@@ -1,0 +1,55 @@
+{
+  "$schema": "https://yellowbird.local/schemas/project-v0.json",
+  "project": {
+    "name": "Feather Shop",
+    "repository": {
+      "provider": "local"
+    }
+  },
+  "targets": {
+    "local": {
+      "binding": "target://local-development"
+    },
+    "staging": {
+      "binding": "target://staging"
+    }
+  },
+  "testIntents": [
+    {
+      "id": "checkout-idempotency",
+      "intent": "A repeated checkout submission creates exactly one order and one charge.",
+      "expected": "order_count_delta == 1 && charge_count_delta == 1",
+      "execution": "hybrid"
+    }
+  ],
+  "requestedCapabilities": [
+    "browser.navigate",
+    "http.read",
+    "http.write",
+    "test_data.create",
+    "test_data.delete_owned"
+  ],
+  "triggers": {
+    "pullRequest": {
+      "type": "ci",
+      "event": "ready-for-review"
+    },
+    "nightly": {
+      "type": "schedule",
+      "expression": "0 3 * * *",
+      "timezone": "America/Los_Angeles",
+      "enabled": false
+    }
+  },
+  "engine": {
+    "binding": "engine://deployment-default",
+    "requires": [
+      "tool_calls",
+      "json_schema"
+    ],
+    "prefers": [
+      "open_weight_available",
+      "image_input"
+    ]
+  }
+}

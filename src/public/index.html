@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4b942" />
+    <title>Yellow Bird</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#overview" aria-label="Yellow Bird home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 44 44" role="img">
+              <path d="M10 27c0-9 6-16 14-16 7 0 12 4 14 10-3-1-6 0-8 2 0 7-5 12-12 12-5 0-8-3-8-8Z"></path>
+              <path class="brand-wing" d="M13 24c5-1 10 1 13 6-5 2-11 0-13-6Z"></path>
+              <circle cx="26.5" cy="17.5" r="1.5"></circle>
+              <path d="m37 20 6 3-6 2Z"></path>
+            </svg>
+          </span>
+          <span>
+            <strong>Yellow Bird</strong>
+            <small>Canary control</small>
+          </span>
+        </a>
+
+        <nav class="primary-nav" aria-label="Primary">
+          <a href="#overview" data-nav="overview">
+            <span class="nav-icon">⌂</span><span>Overview</span>
+          </a>
+          <a href="#runs" data-nav="runs">
+            <span class="nav-icon">↗</span><span>Runs</span>
+            <span class="nav-count" id="active-run-count">0</span>
+          </a>
+          <a href="#findings" data-nav="findings">
+            <span class="nav-icon">◇</span><span>Findings</span>
+            <span class="nav-count alert" id="finding-count">0</span>
+          </a>
+          <a href="#tests" data-nav="tests">
+            <span class="nav-icon">☷</span><span>Test library</span>
+          </a>
+          <a href="#targets" data-nav="targets">
+            <span class="nav-icon">◎</span><span>Targets</span>
+          </a>
+          <a href="#policy" data-nav="policy">
+            <span class="nav-icon">⬡</span><span>Policy</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="stub-card">
+            <span class="eyebrow">Execution posture</span>
+            <strong>Local stub</strong>
+            <p>Simulation only. No customer code or real targets are exercised.</p>
+            <button class="text-button" data-action="doctor">View boundaries →</button>
+          </div>
+          <div class="principal">
+            <span class="avatar">LO</span>
+            <span><strong>Local Owner</strong><small>Organization owner</small></span>
+            <span class="online-dot" title="Local server online"></span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="breadcrumb"><span>Feather Shop</span> / <span id="section-kicker">Workspace</span></p>
+            <h1 id="page-title">Canary overview</h1>
+          </div>
+          <div class="topbar-actions">
+            <span class="mode-pill"><span></span> Local</span>
+            <button class="secondary-button icon-button" data-action="reset" title="Reset demonstration data">↻</button>
+            <button class="primary-button" data-action="new-run">
+              <span>＋</span> Start canary
+            </button>
+          </div>
+        </header>
+
+        <section id="view" class="view" aria-live="polite">
+          <div class="loading-state">
+            <span class="bird-loader"></span>
+            <p>Calling the flock…</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="run-dialog" class="modal">
+      <form id="run-form" method="dialog">
+        <div class="modal-header">
+          <div>
+            <span class="eyebrow">Manual trigger</span>
+            <h2>Start a canary run</h2>
+            <p>Yellow Bird will resolve these choices against organization policy before issuing a grant.</p>
+          </div>
+          <button type="button" class="close-button" data-action="close-run" aria-label="Close">×</button>
+        </div>
+        <div id="run-form-content" class="modal-body"></div>
+        <div class="modal-footer">
+          <p><span class="mini-shield">◇</span> Missing capabilities become coverage gaps, never passes.</p>
+          <div>
+            <button type="button" class="secondary-button" data-action="close-run">Cancel</button>
+            <button type="submit" class="primary-button">
+              Authorize &amp; run <span>→</span>
+            </button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="detail-dialog" class="modal detail-modal">
+      <div id="detail-content"></div>
+    </dialog>
+
+    <div id="toast-region" class="toast-region" aria-live="assertive"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

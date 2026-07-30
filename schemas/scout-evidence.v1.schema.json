@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yellowbird.dev/schemas/scout-evidence.v1.schema.json",
+  "title": "YellowBird local scout evidence",
+  "description": "Portable evidence emitted by a bounded YellowBird local browser scout.",
+  "type": "object",
+  "required": [
+    "schema",
+    "outcome",
+    "intent",
+    "run",
+    "target",
+    "assertions",
+    "findings",
+    "observations",
+    "coverageGaps",
+    "artifacts",
+    "provenance"
+  ],
+  "properties": {
+    "schema": {
+      "const": "yellowbird.scout-evidence.v1"
+    },
+    "outcome": {
+      "enum": ["clear", "attention"]
+    },
+    "intent": {
+      "type": "string"
+    },
+    "run": {
+      "type": "object",
+      "required": ["id", "startedAt", "durationMs"],
+      "properties": {
+        "id": { "type": "string" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "durationMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["url", "origin", "authorization"],
+      "properties": {
+        "url": { "type": "string", "format": "uri" },
+        "origin": { "type": "string", "format": "uri" },
+        "authorization": {
+          "type": "object",
+          "required": ["method", "scope", "rationale"],
+          "properties": {
+            "method": { "type": "string" },
+            "scope": { "type": "string" },
+            "rationale": { "type": "string" }
+          }
+        }
+      }
+    },
+    "assertions": {
+      "type": "object",
+      "required": [
+        "expectedStatus",
+        "expectedTitle",
+        "expectedTexts",
+        "consoleErrorsAllowed"
+      ],
+      "properties": {
+        "expectedStatus": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "expectedTitle": { "type": ["string", "null"] },
+        "expectedTexts": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "consoleErrorsAllowed": { "type": "boolean" }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "title", "evidence"],
+        "properties": {
+          "id": { "type": "string" },
+          "severity": { "enum": ["low", "medium", "high", "critical"] },
+          "title": { "type": "string" },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "observations": {
+      "type": "object"
+    },
+    "coverageGaps": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "artifacts": {
+      "type": "object",
+      "required": [
+        "evidence",
+        "report",
+        "screenshot",
+        "regression",
+        "playwrightConfig"
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["runner", "runtime", "browser", "agenticEngine"],
+      "properties": {
+        "runner": { "type": "string" },
+        "runtime": { "type": "string" },
+        "browser": { "type": "string" },
+        "agenticEngine": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
