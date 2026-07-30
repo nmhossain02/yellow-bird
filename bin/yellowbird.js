@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import process from "node:process";
 import { startServer } from "../src/server.js";
@@ -120,18 +120,40 @@ async function run() {
 }
 
 async function scout() {
-  const target = argument("target");
+  const scenarioPath = argument("scenario");
+  let scenario = {};
+  if (scenarioPath) {
+    scenario = JSON.parse(await readFile(resolve(scenarioPath), "utf8"));
+    if (scenario.schema !== "yellowbird.scenario.v1") {
+      throw new Error(
+        "scenario must declare schema yellowbird.scenario.v1"
+      );
+    }
+  }
+
+  const target = argument("target", scenario.target);
   if (!target) {
-    throw new Error("scout requires --target URL");
+    throw new Error("scout requires --target URL or a scenario target");
   }
 
   const { runScout } = await import("../src/scout/scout.js");
   const report = await runScout({
     target,
-    intent: argument("intent"),
-    expectedStatus: argument("expect-status", "200"),
-    expectedTitle: argument("expect-title"),
-    expectedTexts: argumentsFor("expect-text"),
+    intent: argument("intent", scenario.intent),
+    expectedStatus: argument(
+      "expect-status",
+      String(scenario.assertions?.expectedStatus ?? 200)
+    ),
+    expectedTitle: argument(
+      "expect-title",
+      scenario.assertions?.expectedTitle
+    ),
+    expectedTexts: [
+      ...(scenario.assertions?.expectedTexts || []),
+      ...argumentsFor("expect-text")
+    ],
+    permissions: scenario.permissions,
+    steps: scenario.steps,
     outputDirectory: argument("output"),
     headed: flag("headed"),
     ignoreConsoleErrors: flag("ignore-console-errors")
@@ -139,6 +161,11 @@ async function scout() {
 
   console.log(`Scout ${report.run.id}: ${report.outcome}`);
   console.log(`Findings: ${report.findings.length}`);
+  if (report.observations.workflowSteps.length) {
+    console.log(
+      `Workflow: ${report.observations.workflowSteps.map((step) => `${step.id}=${step.status}`).join(", ")}`
+    );
+  }
   for (const finding of report.findings) {
     console.log(`- [${finding.severity}] ${finding.title}`);
   }
@@ -148,7 +175,8 @@ async function scout() {
   console.log(
     `Replay: bunx playwright test --config ${report.artifacts.playwrightConfig}`
   );
-  if (report.findings.length) process.exitCode = 2;
+  if (report.outcome === "attention") process.exitCode = 2;
+  else if (report.outcome === "inconclusive") process.exitCode = 3;
 }
 
 function help() {
@@ -158,7 +186,7 @@ Usage:
   yellowbird serve [--port 4310]
   yellowbird doctor
   yellowbird run [--server URL] [--project ID] [--target ID] [--profile balanced|deterministic|exploratory]
-  yellowbird scout --target URL [--intent TEXT] [--expect-status 200]
+  yellowbird scout [--scenario FILE] [--target URL] [--intent TEXT] [--expect-status 200]
                    [--expect-title TEXT] [--expect-text TEXT ...]
                    [--output DIRECTORY] [--headed] [--ignore-console-errors]
 `);

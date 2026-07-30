@@ -1,0 +1,35 @@
+{
+  "schema": "yellowbird.scenario.v1",
+  "target": "http://127.0.0.1:4321/?fixed",
+  "intent": "A shopper can provide an email and prepare an order",
+  "permissions": [
+    "browser.navigate",
+    "browser.read",
+    "browser.fill",
+    "browser.click"
+  ],
+  "assertions": {
+    "expectedStatus": 200,
+    "expectedTitle": "Feather Shop",
+    "expectedTexts": ["Checkout ready"]
+  },
+  "steps": [
+    {
+      "id": "enter-email",
+      "action": "fill",
+      "selector": "[name=email]",
+      "value": "bird@example.test"
+    },
+    {
+      "id": "prepare-order",
+      "action": "click",
+      "selector": "#checkout"
+    },
+    {
+      "id": "confirm-order-ready",
+      "action": "expectText",
+      "selector": "#status",
+      "text": "Order ready"
+    }
+  ]
+}

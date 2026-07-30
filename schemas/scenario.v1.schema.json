@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yellowbird.dev/schemas/scenario.v1.schema.json",
+  "title": "YellowBird owner-declared browser scenario",
+  "type": "object",
+  "required": [
+    "schema",
+    "target",
+    "intent",
+    "permissions",
+    "assertions",
+    "steps"
+  ],
+  "properties": {
+    "schema": {
+      "const": "yellowbird.scenario.v1"
+    },
+    "target": {
+      "type": "string",
+      "format": "uri"
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "permissions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "browser.navigate",
+          "browser.read",
+          "browser.fill",
+          "browser.click"
+        ]
+      }
+    },
+    "assertions": {
+      "type": "object",
+      "required": ["expectedStatus"],
+      "properties": {
+        "expectedStatus": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "expectedTitle": {
+          "type": "string"
+        },
+        "expectedTexts": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/click"
+          },
+          {
+            "$ref": "#/$defs/fill"
+          },
+          {
+            "$ref": "#/$defs/expectText"
+          },
+          {
+            "$ref": "#/$defs/expectVisible"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["id", "action", "selector"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "action": { "type": "string" },
+        "selector": { "type": "string", "minLength": 1 }
+      }
+    },
+    "click": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "properties": {
+            "action": { "const": "click" }
+          }
+        }
+      ]
+    },
+    "fill": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "properties": {
+            "action": { "const": "fill" },
+            "value": { "type": "string" },
+            "valueFromEnv": { "type": "string", "minLength": 1 }
+          },
+          "oneOf": [
+            { "required": ["value"] },
+            { "required": ["valueFromEnv"] }
+          ]
+        }
+      ]
+    },
+    "expectText": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "required": ["text"],
+          "properties": {
+            "action": { "const": "expectText" },
+            "text": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "expectVisible": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "properties": {
+            "action": { "const": "expectVisible" }
+          }
+        }
+      ]
+    }
+  }
+}

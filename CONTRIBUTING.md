@@ -29,6 +29,12 @@ bun run scout -- \
   --expect-text "Checkout ready"
 ```
 
+Or execute the multi-step example:
+
+```bash
+bun run scout -- --scenario examples/checkout.scenario.json
+```
+
 ## Pull requests
 
 - Open an issue before making a large architectural or policy change.

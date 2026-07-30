@@ -4,6 +4,13 @@ import { join, resolve } from "node:path";
 import { chromium } from "@playwright/test";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const STEP_CAPABILITIES = {
+  click: "browser.click",
+  fill: "browser.fill",
+  expectText: "browser.read",
+  expectVisible: "browser.read"
+};
+const SUPPORTED_STEP_ACTIONS = new Set(Object.keys(STEP_CAPABILITIES));
 
 export function authorizeScoutTarget(value) {
   let target;
@@ -37,6 +44,88 @@ export function authorizeScoutTarget(value) {
   };
 }
 
+export function validateWorkflow(input = {}) {
+  if (input.permissions !== undefined && !Array.isArray(input.permissions)) {
+    throw new Error("workflow permissions must be an array");
+  }
+  const permissions = new Set(
+    input.permissions || ["browser.navigate", "browser.read"]
+  );
+  const steps = input.steps || [];
+
+  if (!Array.isArray(steps)) {
+    throw new Error("workflow steps must be an array");
+  }
+  for (const baselineCapability of ["browser.navigate", "browser.read"]) {
+    if (!permissions.has(baselineCapability)) {
+      throw new Error(
+        `workflow requires declared capability ${baselineCapability}`
+      );
+    }
+  }
+
+  const ids = new Set();
+  const normalizedSteps = steps.map((step, index) => {
+    if (!step || typeof step !== "object") {
+      throw new Error(`workflow step ${index + 1} must be an object`);
+    }
+    const id = step.id || `step-${index + 1}`;
+    if (ids.has(id)) throw new Error(`workflow step id must be unique: ${id}`);
+    ids.add(id);
+
+    if (!SUPPORTED_STEP_ACTIONS.has(step.action)) {
+      throw new Error(`unsupported workflow action: ${step.action}`);
+    }
+    if (typeof step.selector !== "string" || !step.selector.trim()) {
+      throw new Error(`workflow step ${id} requires a selector`);
+    }
+
+    const capability = STEP_CAPABILITIES[step.action];
+    if (!permissions.has(capability)) {
+      throw new Error(
+        `workflow step ${id} requires undeclared capability ${capability}`
+      );
+    }
+
+    if (step.action === "fill") {
+      const hasLiteralValue = typeof step.value === "string";
+      const hasEnvironmentValue =
+        typeof step.valueFromEnv === "string" && step.valueFromEnv.length > 0;
+      if (hasLiteralValue === hasEnvironmentValue) {
+        throw new Error(
+          `fill step ${id} requires exactly one of value or valueFromEnv`
+        );
+      }
+      if (hasEnvironmentValue && process.env[step.valueFromEnv] === undefined) {
+        throw new Error(
+          `fill step ${id} requires environment variable ${step.valueFromEnv}`
+        );
+      }
+    }
+    if (
+      step.action === "expectText" &&
+      (typeof step.text !== "string" || !step.text)
+    ) {
+      throw new Error(`expectText step ${id} requires text`);
+    }
+
+    return {
+      id,
+      action: step.action,
+      selector: step.selector,
+      text: step.text,
+      value: step.value,
+      valueFromEnv: step.valueFromEnv,
+      capability
+    };
+  });
+
+  return {
+    permissions: [...permissions],
+    steps: normalizedSteps
+  };
+}
+
 function markdownEscape(value) {
   return String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
 }
@@ -50,6 +139,14 @@ function buildMarkdown(report) {
         )
         .join("\n")
     : "| — | No asserted failures observed | — |";
+  const workflowRows = report.observations.workflowSteps.length
+    ? report.observations.workflowSteps
+        .map(
+          (step) =>
+            `| ${markdownEscape(step.id)} | ${markdownEscape(step.action)} | ${markdownEscape(step.status)} | ${markdownEscape(step.evidence || "—")} |`
+        )
+        .join("\n")
+    : "| — | — | No workflow declared | — |";
 
   return `# YellowBird scout report
 
@@ -66,6 +163,14 @@ function buildMarkdown(report) {
 | Severity | Finding | Evidence |
 | --- | --- | --- |
 ${findingRows}
+
+## Workflow
+
+Declared capabilities: ${report.permissions.map((permission) => `\`${permission}\``).join(", ")}
+
+| Step | Action | Status | Evidence |
+| --- | --- | --- | --- |
+${workflowRows}
 
 ## Observations
 
@@ -107,7 +212,24 @@ function buildRegression(options) {
     '    if (message.type() === "error") consoleErrors.push(message.text());',
     "  });",
     "",
-    `  const response = await page.goto(${quoteForJavaScript(options.target)}, { waitUntil: "domcontentloaded" });`,
+    `  const yellowbirdTarget = new URL(${quoteForJavaScript(options.target)});`,
+    '  await page.context().route("**/*", async (route) => {',
+    "    const requestUrl = route.request().url();",
+    '    if (requestUrl.startsWith("data:") || requestUrl.startsWith("blob:"))',
+    "      return route.continue();",
+    "    let allowed = false;",
+    "    try { allowed = new URL(requestUrl).origin === yellowbirdTarget.origin; } catch {}",
+    "    return allowed ? route.continue() : route.abort(\"blockedbyclient\");",
+    "  });",
+    "  const yellowbirdSocketProtocol = yellowbirdTarget.protocol === \"https:\" ? \"wss:\" : \"ws:\";",
+    "  const yellowbirdSocketPort = yellowbirdTarget.port || (yellowbirdTarget.protocol === \"https:\" ? \"443\" : \"80\");",
+    "  await page.context().routeWebSocket(url => {",
+    "    const socketPort = url.port || (url.protocol === \"wss:\" ? \"443\" : \"80\");",
+    "    return url.protocol !== yellowbirdSocketProtocol ||",
+    "      url.hostname !== yellowbirdTarget.hostname || socketPort !== yellowbirdSocketPort;",
+    "  }, socket => socket.close({ code: 1008, reason: \"Blocked by YellowBird exact-origin policy\" }));",
+    "",
+    `  const response = await page.goto(yellowbirdTarget.href, { waitUntil: "domcontentloaded" });`,
     `  expect(response?.status()).toBe(${options.expectedStatus});`
   ];
 
@@ -121,6 +243,27 @@ function buildRegression(options) {
       `  await expect(page.locator("body")).toContainText(${quoteForJavaScript(text)});`
     );
   }
+  options.steps.forEach((step, index) => {
+    const locator = `page.locator(${quoteForJavaScript(step.selector)})`;
+    if (step.action === "click") {
+      lines.push(`  await ${locator}.click();`);
+    } else if (step.action === "fill" && step.valueFromEnv) {
+      const variable = `yellowbirdValue${index + 1}`;
+      lines.push(
+        `  const ${variable} = process.env[${quoteForJavaScript(step.valueFromEnv)}];`,
+        `  expect(${variable}, ${quoteForJavaScript(`Missing environment variable ${step.valueFromEnv}`)}).toBeTruthy();`,
+        `  await ${locator}.fill(${variable});`
+      );
+    } else if (step.action === "fill") {
+      lines.push(`  await ${locator}.fill(${quoteForJavaScript(step.value)});`);
+    } else if (step.action === "expectText") {
+      lines.push(
+        `  await expect(${locator}).toContainText(${quoteForJavaScript(step.text)});`
+      );
+    } else if (step.action === "expectVisible") {
+      lines.push(`  await expect(${locator}).toBeVisible();`);
+    }
+  });
   if (!options.ignoreConsoleErrors) {
     lines.push("  expect(consoleErrors).toEqual([]);");
   }
@@ -144,6 +287,10 @@ export default defineConfig({
 
 export async function runScout(input) {
   const authorization = authorizeScoutTarget(input.target);
+  const workflow = validateWorkflow({
+    permissions: input.permissions,
+    steps: input.steps
+  });
   const runId = `scout_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
   const outputDirectory = resolve(
     input.outputDirectory || join(".yellowbird", "scout", runId)
@@ -154,12 +301,18 @@ export async function runScout(input) {
     expectedStatus: Number(input.expectedStatus ?? 200),
     expectedTitle: input.expectedTitle || null,
     expectedTexts: input.expectedTexts || [],
+    permissions: workflow.permissions,
+    steps: workflow.steps,
     ignoreConsoleErrors: Boolean(input.ignoreConsoleErrors),
     headed: Boolean(input.headed),
     timeoutMs: Number(input.timeoutMs ?? 15_000)
   };
 
-  if (!Number.isInteger(options.expectedStatus) || options.expectedStatus < 100) {
+  if (
+    !Number.isInteger(options.expectedStatus) ||
+    options.expectedStatus < 100 ||
+    options.expectedStatus > 599
+  ) {
     throw new Error("expected status must be a valid HTTP status code");
   }
 
@@ -172,6 +325,9 @@ export async function runScout(input) {
   const failedRequests = [];
   const blockedRequests = [];
   const serverErrors = [];
+  const workflowSteps = [];
+  const workflowFindings = [];
+  const invalidWorkflowSteps = [];
   let navigationError = null;
   let status = null;
   let title = "";
@@ -184,11 +340,8 @@ export async function runScout(input) {
       serviceWorkers: "block",
       viewport: { width: 1440, height: 900 }
     });
-    const page = await context.newPage();
-    page.setDefaultTimeout(options.timeoutMs);
-
     const targetUrl = new URL(options.target);
-    await page.routeWebSocket(
+    await context.routeWebSocket(
       (socketUrl) => {
         const expectedProtocol = targetUrl.protocol === "https:" ? "wss:" : "ws:";
         const expectedPort =
@@ -214,7 +367,7 @@ export async function runScout(input) {
       }
     );
 
-    await page.route("**/*", async (route) => {
+    await context.route("**/*", async (route) => {
       const requestUrl = route.request().url();
       let requestOrigin;
       try {
@@ -240,6 +393,8 @@ export async function runScout(input) {
       await route.abort("blockedbyclient");
     });
 
+    const page = await context.newPage();
+    page.setDefaultTimeout(options.timeoutMs);
     page.on("console", (message) => {
       if (message.type() === "error") {
         consoleErrors.push({ text: message.text(), location: message.location() });
@@ -279,6 +434,75 @@ export async function runScout(input) {
       navigationError = error.message;
     }
 
+    for (const step of options.steps) {
+      const stepStartedAt = Date.now();
+      if (navigationError) {
+        workflowSteps.push({
+          id: step.id,
+          action: step.action,
+          status: "skipped",
+          evidence: "Initial navigation did not complete",
+          durationMs: 0
+        });
+        continue;
+      }
+
+      try {
+        const locator = page.locator(step.selector);
+        if (step.action === "click") {
+          await locator.click();
+        } else if (step.action === "fill") {
+          const value = step.valueFromEnv
+            ? process.env[step.valueFromEnv]
+            : step.value;
+          await locator.fill(value);
+        } else if (step.action === "expectText") {
+          const observed = (await locator.textContent()) || "";
+          if (!observed.includes(step.text)) {
+            throw new Error(
+              `expected ${JSON.stringify(step.text)}, observed ${JSON.stringify(observed.slice(0, 300))}`
+            );
+          }
+        } else if (step.action === "expectVisible") {
+          if (!(await locator.isVisible())) {
+            throw new Error(`selector was not visible: ${step.selector}`);
+          }
+        }
+
+        workflowSteps.push({
+          id: step.id,
+          action: step.action,
+          status: "passed",
+          evidence:
+            step.action.startsWith("expect")
+              ? "Owner assertion satisfied"
+              : "Action completed",
+          durationMs: Date.now() - stepStartedAt
+        });
+      } catch (error) {
+        const isAssertion = step.action.startsWith("expect");
+        const result = {
+          id: step.id,
+          action: step.action,
+          status: isAssertion ? "failed" : "invalid",
+          evidence: error.message,
+          durationMs: Date.now() - stepStartedAt
+        };
+        workflowSteps.push(result);
+
+        if (isAssertion) {
+          workflowFindings.push({
+            id: `workflow-assertion-${step.id}`,
+            severity: "medium",
+            title: `Workflow assertion failed: ${step.id}`,
+            evidence: error.message
+          });
+        } else {
+          invalidWorkflowSteps.push(result);
+        }
+      }
+    }
+
     title = await page.title().catch(() => "");
     const snapshot = await page
       .evaluate(() => {
@@ -307,7 +531,8 @@ export async function runScout(input) {
     interactiveElements = snapshot.interactiveElements;
     await page.screenshot({
       path: join(outputDirectory, "page.png"),
-      fullPage: true
+      fullPage: true,
+      timeout: Math.max(options.timeoutMs, 5_000)
     });
   } finally {
     await browser.close();
@@ -387,14 +612,28 @@ export async function runScout(input) {
         .slice(0, 500)
     });
   }
+  findings.push(...workflowFindings);
 
   const coverageGaps = [
-    "This alpha inspected only the initial page load; it did not autonomously exercise workflows.",
     "No model or agent made pass/fail decisions. Findings come from explicit assertions and runtime signals."
   ];
+  if (options.steps.length) {
+    coverageGaps.push(
+      `Only the ${options.steps.length} owner-declared workflow step(s) were exercised; YellowBird did not explore beyond them.`
+    );
+  } else {
+    coverageGaps.push(
+      "This alpha inspected only the initial page load; it did not autonomously exercise workflows."
+    );
+  }
   if (interactiveElements.length) {
     coverageGaps.push(
-      `${interactiveElements.length} interactive element(s) were inventoried but not exercised.`
+      `${interactiveElements.length} interactive element(s) were inventoried; undeclared interactions were not exercised.`
+    );
+  }
+  if (invalidWorkflowSteps.length) {
+    coverageGaps.push(
+      `${invalidWorkflowSteps.length} workflow action(s) were invalid. YellowBird did not attempt selector healing.`
     );
   }
   if (blockedRequests.length) {
@@ -403,10 +642,16 @@ export async function runScout(input) {
     );
   }
 
+  const outcome = findings.length
+    ? "attention"
+    : invalidWorkflowSteps.length
+      ? "inconclusive"
+      : "clear";
   const report = {
     schema: "yellowbird.scout-evidence.v1",
-    outcome: findings.length ? "attention" : "clear",
+    outcome,
     intent: options.intent,
+    permissions: options.permissions,
     run: {
       id: runId,
       startedAt: startedAt.toISOString(),
@@ -432,7 +677,8 @@ export async function runScout(input) {
       pageErrors,
       failedRequests,
       blockedRequests,
-      serverErrors
+      serverErrors,
+      workflowSteps
     },
     coverageGaps,
     artifacts: {

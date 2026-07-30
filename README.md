@@ -34,8 +34,9 @@ bun run scout -- \
   --expect-text "Checkout ready"
 ```
 
-The scout exits `2` when it finds asserted failures. It writes an evidence bundle
-under `.yellowbird/scout/<run-id>/`:
+The scout exits `2` when it finds asserted failures and `3` when test mechanics
+make the result inconclusive. It writes an evidence bundle under
+`.yellowbird/scout/<run-id>/`:
 
 - `report.md` — human-readable findings, reproduction steps, and coverage gaps
 - `evidence.json` — versioned machine-readable observations and provenance
@@ -52,6 +53,18 @@ on YellowBird internals.
 The demo has a fixed state at `http://127.0.0.1:4321/?fixed`, so the same command
 with that target should complete with `clear`.
 
+To run a real multi-step canary, use the versioned example scenario:
+
+```bash
+bun run scout -- --scenario examples/checkout.scenario.json
+```
+
+That workflow declares `browser.fill` and `browser.click` before the run, enters
+an email, prepares an order, and asserts that the product reaches `Order ready`.
+Its actions and assertions are also written into the generated regression.
+The public format is
+[`schemas/scenario.v1.schema.json`](./schemas/scenario.v1.schema.json).
+
 ## Scout safety boundary
 
 The alpha accepts only `localhost`, `127.0.0.1`, and `::1`. Browser requests are
@@ -63,9 +76,11 @@ This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
 scoped run grants, sandboxing, and policy approval before they are enabled.
 
-The scout does not currently click controls, sign up users, mutate data, or use
-an LLM. It inventories interactive elements and says that they were not tested.
-That honesty is part of the evidence contract, not an incidental limitation.
+The scout clicks and fills controls only when an owner-declared scenario requests
+those capabilities. It does not explore beyond declared steps, sign up external
+users, or use an LLM. A failed action is reported as `inconclusive`, not as a
+product pass or product bug, because selector healing has not been implemented.
+That distinction is part of the evidence contract.
 
 ## Run the dashboard
 
@@ -94,6 +109,7 @@ bun run doctor
 bun bin/yellowbird.js serve --port 4310
 bun bin/yellowbird.js run --project prj_feather --target tgt_local --profile balanced
 bun bin/yellowbird.js scout --target http://127.0.0.1:4321 --expect-text "Checkout ready"
+bun bin/yellowbird.js scout --scenario examples/checkout.scenario.json
 ```
 
 `run` talks to an already-running dashboard server. `scout` performs the real
@@ -104,6 +120,8 @@ local browser check.
 - Loopback-only target authorization and exact-origin browser network policy
 - Initial-page navigation with status, title, text, console, exception, failed
   request, screenshot, and interactive-element evidence
+- Permission-declared `fill`, `click`, `expectText`, and `expectVisible` workflow
+  steps with `inconclusive` handling for invalid test mechanics
 - Owner-authored assertions that YellowBird does not rewrite
 - Machine-readable evidence, a human report, and a generated Playwright regression
 - Persistent dashboard projects, targets, scenarios, runs, findings, and audit events

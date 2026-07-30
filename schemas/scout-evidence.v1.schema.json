@@ -22,10 +22,14 @@
       "const": "yellowbird.scout-evidence.v1"
     },
     "outcome": {
-      "enum": ["clear", "attention"]
+      "enum": ["clear", "attention", "inconclusive"]
     },
     "intent": {
       "type": "string"
+    },
+    "permissions": {
+      "type": "array",
+      "items": { "type": "string" }
     },
     "run": {
       "type": "object",

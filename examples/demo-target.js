@@ -21,9 +21,21 @@ const server = createServer((request, response) => {
     <main>
       <h1>Feather Shop</h1>
       <p>${fixed ? "Checkout ready" : "Checkout temporarily unavailable"}</p>
-      <button type="button">Buy a feather</button>
+      <label>Email <input name="email" type="email"></label>
+      <button id="checkout" type="button">Buy a feather</button>
+      <p id="status" aria-live="polite"></p>
     </main>
-    ${fixed ? "" : '<script>console.error("checkout bootstrap failed")</script>'}
+    ${
+      fixed
+        ? `<script>
+            document.querySelector("#checkout").addEventListener("click", () => {
+              const email = document.querySelector("[name=email]").value;
+              document.querySelector("#status").textContent =
+                email ? "Order ready" : "Email required";
+            });
+          </script>`
+        : '<script>console.error("checkout bootstrap failed")</script>'
+    }
   </body>
 </html>`);
 });
