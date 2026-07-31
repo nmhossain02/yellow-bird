@@ -325,6 +325,9 @@ test("scout reports explicit failures without changing expected results", async 
     ["console-errors", "missing-text"]
   );
   assert.deepEqual(report.assertions.expectedTexts, ["Checkout ready"]);
+
+  const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
+  assert.doesNotMatch(diagnostics, /checkout failed/);
 });
 
 test("scout repairs a loopback HTTPS-to-HTTP transport mismatch with diagnostics", async () => {

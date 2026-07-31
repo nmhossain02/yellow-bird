@@ -40,14 +40,15 @@ make the result inconclusive. It writes an evidence bundle under
 
 - `report.md` — human-readable findings, reproduction steps, and coverage gaps
 - `evidence.json` — versioned machine-readable observations and provenance
-- `page.png` — full-page visual evidence
+- `page.png` — full-page visual evidence when a browser page was available
 - `regression.spec.js` — deterministic Playwright assertions suitable for review
 - `playwright.config.js` — makes the regression immediately replayable from the
   hidden evidence directory
 - `package.json` — pins the Playwright dependency needed to replay from any
   product repository
-- `diagnostics.jsonl` — ordered, run-correlated operational events with URL
-  query values and console contents omitted
+- `diagnostics.jsonl` — ordered, run-correlated operational events conforming to
+  [`schemas/diagnostic-event.v1.schema.json`](./schemas/diagnostic-event.v1.schema.json),
+  with URL query values and console contents omitted
 
 The current machine-readable format is published as
 [`schemas/scout-evidence.v2.schema.json`](./schemas/scout-evidence.v2.schema.json).
@@ -91,9 +92,12 @@ yellowbird scout \
   --verbose
 ```
 
-Verbose mode streams the same structured lifecycle events that are retained in
-`diagnostics.jsonl`. Exit `0` means no failure was observed within the tested
-scope; consult the coverage gaps before treating that as broader product health.
+An existing directory whose name ends in `.md` is diagnosed as legacy output;
+rename or remove it, choose a new Markdown filename, or pass a directory path
+without a `.md` suffix. Verbose mode renders a live view of the same structured
+lifecycle events retained in `diagnostics.jsonl`. Exit `0` means no failure was
+observed within the tested scope; consult the coverage gaps before treating that
+as broader product health.
 
 ## Scout safety boundary
 
@@ -102,10 +106,10 @@ restricted to the target's exact origin; cross-origin requests are blocked and
 reported as coverage gaps. Local control is the authorization proof for this
 mode.
 
-For loopback targets only, if an HTTPS transport probe fails and the identical
-host, port, path, and query responds over HTTP, YellowBird repairs the scheme
-and records both URLs and the unchanged expected result. It does not silently
-ignore certificate errors or repair remote targets.
+For loopback targets only, YellowBird makes a bounded, best-effort repair if an
+HTTPS transport probe fails and the identical host, port, path, and query
+responds over HTTP. It records both URLs and the unchanged expected result. It
+does not silently ignore certificate errors or repair remote targets.
 
 This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
