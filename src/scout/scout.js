@@ -504,7 +504,7 @@ async function finalizeRun(state) {
     invalidWorkflowStepCount: invalidWorkflowSteps.length
   });
   const report = {
-    schema: "yellowbird.scout-evidence.v1",
+    schema: "yellowbird.scout-evidence.v2",
     outcome,
     intent: options.intent,
     permissions: options.permissions,

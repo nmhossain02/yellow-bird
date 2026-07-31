@@ -32,6 +32,45 @@ async function runCommand(command, cwd, env) {
   return { exitCode, stdout, stderr };
 }
 
+function assertConformsToSchema(schema, value, path = "$") {
+  if (Object.hasOwn(schema, "const")) {
+    assert.deepEqual(value, schema.const, `${path} does not match const`);
+  }
+  if (schema.enum) {
+    assert.ok(schema.enum.includes(value), `${path} is not in enum`);
+  }
+  if (schema.type) {
+    const expectedTypes = Array.isArray(schema.type) ? schema.type : [schema.type];
+    const actualType =
+      value === null
+        ? "null"
+        : Array.isArray(value)
+          ? "array"
+          : Number.isInteger(value)
+            ? "integer"
+            : typeof value;
+    assert.ok(
+      expectedTypes.includes(actualType),
+      `${path} has type ${actualType}, expected ${expectedTypes.join(" or ")}`
+    );
+  }
+  for (const property of schema.required || []) {
+    assert.ok(Object.hasOwn(value, property), `${path}.${property} is required`);
+  }
+  for (const [property, propertySchema] of Object.entries(
+    schema.properties || {}
+  )) {
+    if (Object.hasOwn(value, property)) {
+      assertConformsToSchema(propertySchema, value[property], `${path}.${property}`);
+    }
+  }
+  if (Array.isArray(value) && schema.items) {
+    value.forEach((item, index) =>
+      assertConformsToSchema(schema.items, item, `${path}[${index}]`)
+    );
+  }
+}
+
 beforeAll(async () => {
   server = createServer((request, response) => {
     const failing = request.url === "/failing";
@@ -214,14 +253,61 @@ test("scout writes portable evidence and a deterministic regression", async () =
 
   const evidence = JSON.parse(await readFile(report.artifacts.evidence, "utf8"));
   const schema = JSON.parse(
+    await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
+  );
+  assert.equal(evidence.schema, "yellowbird.scout-evidence.v2");
+  assert.equal(schema.properties.schema.const, evidence.schema);
+  assertConformsToSchema(schema, evidence);
+  assert.equal(evidence.provenance.agenticEngine, null);
+});
+
+test("historical v1 scout evidence remains valid", async () => {
+  const schema = JSON.parse(
     await readFile(resolve("schemas/scout-evidence.v1.schema.json"), "utf8")
   );
-  assert.equal(evidence.schema, "yellowbird.scout-evidence.v1");
-  assert.equal(schema.properties.schema.const, evidence.schema);
-  for (const requiredProperty of schema.required) {
-    assert.ok(requiredProperty in evidence, `missing schema property ${requiredProperty}`);
-  }
-  assert.equal(evidence.provenance.agenticEngine, null);
+  const historicalEvidence = {
+    schema: "yellowbird.scout-evidence.v1",
+    outcome: "clear",
+    intent: "Verify the initial page",
+    run: {
+      id: "scout_historical",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      durationMs: 25
+    },
+    target: {
+      url: "http://127.0.0.1:3000/",
+      origin: "http://127.0.0.1:3000",
+      authorization: {
+        method: "local-loopback-attestation",
+        scope: "exact-origin",
+        rationale: "Historical fixture"
+      }
+    },
+    assertions: {
+      expectedStatus: 200,
+      expectedTitle: null,
+      expectedTexts: [],
+      consoleErrorsAllowed: false
+    },
+    findings: [],
+    observations: {},
+    coverageGaps: [],
+    artifacts: {
+      evidence: "evidence.json",
+      report: "report.md",
+      screenshot: "page.png",
+      regression: "regression.spec.js",
+      playwrightConfig: "playwright.config.js"
+    },
+    provenance: {
+      runner: "yellowbird-local-scout",
+      runtime: "Bun 1.3.9",
+      browser: "Playwright Chromium",
+      agenticEngine: null
+    }
+  };
+
+  assertConformsToSchema(schema, historicalEvidence);
 });
 
 test("scout reports explicit failures without changing expected results", async () => {

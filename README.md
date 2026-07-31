@@ -49,10 +49,12 @@ make the result inconclusive. It writes an evidence bundle under
 - `diagnostics.jsonl` — ordered, run-correlated operational events with URL
   query values and console contents omitted
 
-The machine-readable format is published as
+The current machine-readable format is published as
+[`schemas/scout-evidence.v2.schema.json`](./schemas/scout-evidence.v2.schema.json).
+The original
 [`schemas/scout-evidence.v1.schema.json`](./schemas/scout-evidence.v1.schema.json)
-so issue trackers, CI reporters, and other tools can integrate without depending
-on YellowBird internals.
+remains available unchanged for historical evidence, so integrations can migrate
+between explicit contract versions without depending on YellowBird internals.
 
 The demo has a fixed state at `http://127.0.0.1:4321/?fixed`, so the same command
 with that target should complete with `clear`.
