@@ -10,7 +10,11 @@ import {
   runScout,
   validateWorkflow
 } from "../src/scout/scout.js";
-import { diagnoseBrowserLaunchError } from "../src/scout/diagnostics.js";
+import {
+  diagnoseBrowserLaunchError,
+  diagnoseNavigationError,
+  resolveLoopbackScheme
+} from "../src/scout/diagnostics.js";
 import { resolveOutputOption } from "../src/scout/output.js";
 
 let server;
@@ -151,6 +155,47 @@ test("browser launch errors have actionable test-mechanics diagnostics", () => {
     diagnoseBrowserLaunchError("spawn failed unexpectedly").code,
     "browser-launch-failed"
   );
+});
+
+test("loopback HTTP alternatives preserve implicit HTTPS port 443", async () => {
+  const originalFetch = globalThis.fetch;
+  const probedUrls = [];
+  globalThis.fetch = async (url) => {
+    probedUrls.push(String(url));
+    if (probedUrls.length === 1) {
+      throw new Error("TLS probe failed");
+    }
+    return new Response(null, { status: 200 });
+  };
+
+  try {
+    const result = await resolveLoopbackScheme(
+      "https://127.0.0.1/path?token=secret",
+      100,
+      () => {}
+    );
+    assert.equal(
+      result.effectiveTarget,
+      "http://127.0.0.1:443/path?token=secret"
+    );
+    assert.deepEqual(probedUrls, [
+      "https://127.0.0.1/path?token=secret",
+      "http://127.0.0.1:443/path?token=secret"
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("TLS remediation redacts credentials and query values", () => {
+  const diagnostic = diagnoseNavigationError(
+    "page.goto failed with net::ERR_SSL_PROTOCOL_ERROR and console secret-value",
+    "https://user:password@127.0.0.1/path?token=not-for-logs"
+  );
+
+  assert.equal(diagnostic.code, "target-tls-protocol-mismatch");
+  assert.match(diagnostic.remediation, /http:\/\/127\.0\.0\.1:443\/path/);
+  assert.doesNotMatch(diagnostic.remediation, /user|password|not-for-logs|token/);
 });
 
 test("browser launch failure finalizes an inconclusive run", async () => {

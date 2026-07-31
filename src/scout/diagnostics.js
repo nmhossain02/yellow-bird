@@ -73,6 +73,17 @@ async function probe(url, timeoutMs) {
   }
 }
 
+function httpAlternative(requested) {
+  const candidate = new URL(requested.href);
+  const effectivePort =
+    requested.port || (requested.protocol === "https:" ? "443" : "");
+  candidate.protocol = "http:";
+  if (effectivePort) {
+    candidate.port = effectivePort;
+  }
+  return candidate;
+}
+
 export async function resolveLoopbackScheme(target, timeoutMs, record) {
   const requested = new URL(target);
   record("debug", "target.probe.started", "Probing the requested target", {
@@ -93,8 +104,7 @@ export async function resolveLoopbackScheme(target, timeoutMs, record) {
     return { effectiveTarget: requested.href, requestedProbe, repairs: [] };
   }
 
-  const candidate = new URL(requested.href);
-  candidate.protocol = "http:";
+  const candidate = httpAlternative(requested);
   record(
     "debug",
     "target.scheme_probe.started",
@@ -148,10 +158,13 @@ export function diagnoseNavigationError(error, target) {
   const detail = redactUrlValues(cleanDiagnosticText(error));
   const lower = detail.toLowerCase();
   if (lower.includes("err_ssl_protocol_error")) {
+    const suggestedTarget = diagnosticUrl(
+      httpAlternative(new URL(target)).href
+    ).url;
     return {
       code: "target-tls-protocol-mismatch",
       message: "The target did not complete an HTTPS handshake.",
-      remediation: `Confirm the service uses TLS, or try ${new URL(target).href.replace(/^https:/, "http:")}.`,
+      remediation: `Confirm the service uses TLS, or try ${suggestedTarget}.`,
       detail
     };
   }
