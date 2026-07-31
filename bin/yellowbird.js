@@ -3,6 +3,7 @@
 import { access, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
+import { diagnosticUrl } from "../src/scout/diagnostics.js";
 import { resolveOutputOption } from "../src/scout/output.js";
 import { startServer } from "../src/server.js";
 
@@ -171,7 +172,9 @@ async function scout() {
 
   console.log(`Scout ${report.run.id}: ${report.outcome}`);
   for (const repair of report.target.repairs) {
-    console.log(`Target repaired: ${repair.from} -> ${repair.to}`);
+    console.log(
+      `Target repaired: ${diagnosticUrl(repair.from).url} -> ${diagnosticUrl(repair.to).url}`
+    );
   }
   console.log(`Findings: ${report.findings.length}`);
   console.log(

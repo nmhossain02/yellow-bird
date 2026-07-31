@@ -277,6 +277,41 @@ test("CLI persists an inconclusive run when Chromium is not installed", async ()
   assert.equal(evidence.artifacts.screenshot, null);
 });
 
+test("CLI redacts repaired target query values while evidence stays exact", async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-cli-repair-"));
+  const secret = "not-for-cli-logs";
+  const requestedTarget = `${target.replace("http:", "https:")}/?token=${secret}`;
+  const repairedTarget = `${target}/?token=${secret}`;
+  const result = await runCommand(
+    [
+      process.execPath,
+      resolve("bin/yellowbird.js"),
+      "scout",
+      "--target",
+      requestedTarget,
+      "--output",
+      outputDirectory
+    ],
+    resolve(".")
+  );
+
+  assert.equal(result.exitCode, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(
+    result.stdout,
+    new RegExp(
+      `Target repaired: https://127\\.0\\.0\\.1:${server.address().port}/ -> http://127\\.0\\.0\\.1:${server.address().port}/`
+    )
+  );
+  assert.doesNotMatch(result.stdout, new RegExp(secret));
+  assert.doesNotMatch(result.stderr, new RegExp(secret));
+
+  const evidence = JSON.parse(
+    await readFile(join(outputDirectory, "evidence.json"), "utf8")
+  );
+  assert.equal(evidence.target.repairs[0].from, requestedTarget);
+  assert.equal(evidence.target.repairs[0].to, repairedTarget);
+});
+
 test("scout writes portable evidence and a deterministic regression", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-clear-"));
   const report = await runScout({
