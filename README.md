@@ -40,15 +40,22 @@ make the result inconclusive. It writes an evidence bundle under
 
 - `report.md` — human-readable findings, reproduction steps, and coverage gaps
 - `evidence.json` — versioned machine-readable observations and provenance
-- `page.png` — full-page visual evidence
+- `page.png` — full-page visual evidence when a browser page was available
 - `regression.spec.js` — deterministic Playwright assertions suitable for review
 - `playwright.config.js` — makes the regression immediately replayable from the
   hidden evidence directory
+- `package.json` — pins the Playwright dependency needed to replay from any
+  product repository
+- `diagnostics.jsonl` — ordered, run-correlated operational events conforming to
+  [`schemas/diagnostic-event.v1.schema.json`](./schemas/diagnostic-event.v1.schema.json),
+  with URL query values and console contents omitted
 
-The machine-readable format is published as
+The current machine-readable format is published as
+[`schemas/scout-evidence.v2.schema.json`](./schemas/scout-evidence.v2.schema.json).
+The original
 [`schemas/scout-evidence.v1.schema.json`](./schemas/scout-evidence.v1.schema.json)
-so issue trackers, CI reporters, and other tools can integrate without depending
-on YellowBird internals.
+remains available unchanged for historical evidence, so integrations can migrate
+between explicit contract versions without depending on YellowBird internals.
 
 The demo has a fixed state at `http://127.0.0.1:4321/?fixed`, so the same command
 with that target should complete with `clear`.
@@ -65,12 +72,45 @@ Its actions and assertions are also written into the generated regression.
 The public format is
 [`schemas/scenario.v1.schema.json`](./schemas/scenario.v1.schema.json).
 
+## Use YellowBird from another repository
+
+Install the local checkout once:
+
+```bash
+bun install --global /path/to/yellow-bird
+```
+
+Then run it from the product repository. `--output report.md` writes that exact
+Markdown file and places the remaining evidence in `report.assets/`:
+
+```bash
+cd /path/to/product
+yellowbird scout \
+  --target http://127.0.0.1:3000 \
+  --intent "Assess the initial interface" \
+  --output yellowbird-report.md \
+  --verbose
+```
+
+An existing directory whose name ends in `.md` is diagnosed as legacy output;
+rename or remove it, choose a new Markdown filename, or pass a directory path
+without a `.md` suffix. Verbose mode renders a live view of the same structured
+lifecycle events retained in `diagnostics.jsonl`. Exit `0` means no failure was
+observed within the tested scope; consult the coverage gaps before treating that
+as broader product health.
+
 ## Scout safety boundary
 
 The alpha accepts only `localhost`, `127.0.0.1`, and `::1`. Browser requests are
 restricted to the target's exact origin; cross-origin requests are blocked and
 reported as coverage gaps. Local control is the authorization proof for this
 mode.
+
+For loopback targets only, YellowBird makes a bounded, best-effort repair if an
+HTTPS transport probe fails and the same host, effective port (including 443
+when HTTPS omits it), path, and query responds over HTTP. It records both URLs
+and the unchanged expected result. It does not silently ignore certificate
+errors or repair remote targets.
 
 This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
@@ -81,6 +121,21 @@ those capabilities. It does not explore beyond declared steps, sign up external
 users, or use an LLM. A failed action is reported as `inconclusive`, not as a
 product pass or product bug, because selector healing has not been implemented.
 That distinction is part of the evidence contract.
+
+Navigation and transport failures are also `inconclusive` test mechanics rather
+than product findings. The report provides a diagnostic code, remediation, and
+structured event log instead of duplicating the failed navigation as a product
+request failure.
+
+Browser launch failures follow the same contract. YellowBird distinguishes a
+missing Chromium executable, missing host dependencies, and other launch
+failures, then writes the report, evidence, diagnostics, generated regression,
+Playwright configuration, and replay package. Navigation and declared workflow
+steps are marked skipped with reason `browser-unavailable`, and the report says
+the product was not evaluated. Since no page existed, `artifacts.screenshot` is
+`null` and no screenshot file is claimed. Applications embedding the scout can
+inject a browser launcher with `createScoutRunner({ launchBrowser })`;
+`runScout(input)` uses the real Playwright Chromium launcher.
 
 ## Run the dashboard
 
@@ -122,6 +177,8 @@ local browser check.
   request, screenshot, and interactive-element evidence
 - Permission-declared `fill`, `click`, `expectText`, and `expectVisible` workflow
   steps with `inconclusive` handling for invalid test mechanics
+- Loopback transport diagnosis and evidence-backed HTTPS-to-HTTP scheme repair
+- Ordered JSONL diagnostics correlated by run ID, with a live `--verbose` view
 - Owner-authored assertions that YellowBird does not rewrite
 - Machine-readable evidence, a human report, and a generated Playwright regression
 - Persistent dashboard projects, targets, scenarios, runs, findings, and audit events
