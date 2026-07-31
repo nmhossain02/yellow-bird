@@ -1,0 +1,197 @@
+const ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+
+export function cleanDiagnosticText(value) {
+  return String(value || "").replace(ANSI_PATTERN, "").trim();
+}
+
+function redactUrlValues(value) {
+  return value.replace(/https?:\/\/[^\s"'<>]+/g, (candidate) => {
+    const trailing = candidate.match(/[),.;:]+$/)?.[0] || "";
+    const url = trailing ? candidate.slice(0, -trailing.length) : candidate;
+    return `${diagnosticUrl(url).url}${trailing}`;
+  });
+}
+
+export function diagnosticUrl(value) {
+  try {
+    const url = new URL(value);
+    const parameterNames = [...new Set(url.searchParams.keys())];
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return {
+      url: url.href,
+      ...(parameterNames.length ? { queryParameterNames: parameterNames } : {})
+    };
+  } catch {
+    return { url: "unparseable" };
+  }
+}
+
+export function createDiagnosticRecorder(onEvent, context = {}) {
+  const events = [];
+  let sequence = 0;
+  const record = (level, event, message, data = {}) => {
+    const entry = {
+      schema: "yellowbird.diagnostic-event.v1",
+      sequence: (sequence += 1),
+      timestamp: new Date().toISOString(),
+      level,
+      component: "local-scout",
+      ...context,
+      event,
+      message,
+      data
+    };
+    events.push(entry);
+    onEvent?.(entry);
+    return entry;
+  };
+  return { events, record };
+}
+
+async function probe(url, timeoutMs) {
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(url, {
+      method: "HEAD",
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    return {
+      reachable: true,
+      status: response.status,
+      durationMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    return {
+      reachable: false,
+      error: cleanDiagnosticText(error.message),
+      durationMs: Date.now() - startedAt
+    };
+  }
+}
+
+export async function resolveLoopbackScheme(target, timeoutMs, record) {
+  const requested = new URL(target);
+  record("debug", "target.probe.started", "Probing the requested target", {
+    ...diagnosticUrl(requested.href),
+    method: "HEAD"
+  });
+  const requestedProbe = await probe(requested.href, timeoutMs);
+  record(
+    requestedProbe.reachable ? "info" : "warn",
+    "target.probe.completed",
+    requestedProbe.reachable
+      ? "The requested target accepted an HTTP connection"
+      : "The requested target did not accept the probe",
+    { ...diagnosticUrl(requested.href), ...requestedProbe }
+  );
+
+  if (requestedProbe.reachable || requested.protocol !== "https:") {
+    return { effectiveTarget: requested.href, requestedProbe, repairs: [] };
+  }
+
+  const candidate = new URL(requested.href);
+  candidate.protocol = "http:";
+  record(
+    "debug",
+    "target.scheme_probe.started",
+    "Probing HTTP because the loopback HTTPS probe failed",
+    diagnosticUrl(candidate.href)
+  );
+  const candidateProbe = await probe(candidate.href, timeoutMs);
+  record(
+    candidateProbe.reachable ? "info" : "warn",
+    "target.scheme_probe.completed",
+    candidateProbe.reachable
+      ? "The HTTP alternative accepted a connection"
+      : "The HTTP alternative did not accept a connection",
+    { ...diagnosticUrl(candidate.href), ...candidateProbe }
+  );
+
+  if (!candidateProbe.reachable) {
+    return { effectiveTarget: requested.href, requestedProbe, repairs: [] };
+  }
+
+  const repair = {
+    code: "loopback-scheme-repaired",
+    field: "target.url",
+    from: requested.href,
+    to: candidate.href,
+    rationale:
+      "The requested HTTPS endpoint rejected the transport probe while the same loopback host and port responded over HTTP.",
+    expectedResultChanged: false
+  };
+  record(
+    "warn",
+    "target.scheme_repaired",
+    "Repaired the loopback target scheme from HTTPS to HTTP",
+    {
+      code: repair.code,
+      field: repair.field,
+      from: diagnosticUrl(repair.from).url,
+      to: diagnosticUrl(repair.to).url,
+      expectedResultChanged: repair.expectedResultChanged
+    }
+  );
+  return {
+    effectiveTarget: candidate.href,
+    requestedProbe,
+    candidateProbe,
+    repairs: [repair]
+  };
+}
+
+export function diagnoseNavigationError(error, target) {
+  const detail = redactUrlValues(cleanDiagnosticText(error));
+  const lower = detail.toLowerCase();
+  if (lower.includes("err_ssl_protocol_error")) {
+    return {
+      code: "target-tls-protocol-mismatch",
+      message: "The target did not complete an HTTPS handshake.",
+      remediation: `Confirm the service uses TLS, or try ${new URL(target).href.replace(/^https:/, "http:")}.`,
+      detail
+    };
+  }
+  if (lower.includes("err_cert_authority_invalid")) {
+    return {
+      code: "target-certificate-untrusted",
+      message: "The target presented a certificate Chromium does not trust.",
+      remediation:
+        "Install a trusted local certificate or add an explicit certificate policy; YellowBird does not silently ignore TLS errors.",
+      detail
+    };
+  }
+  if (lower.includes("err_connection_refused")) {
+    return {
+      code: "target-connection-refused",
+      message: "No service accepted a connection at the target address.",
+      remediation: "Start the product and confirm its host and port, then rerun the scout.",
+      detail
+    };
+  }
+  if (lower.includes("err_name_not_resolved")) {
+    return {
+      code: "target-name-unresolved",
+      message: "The target hostname could not be resolved.",
+      remediation: "Correct the hostname or update local name resolution before rerunning.",
+      detail
+    };
+  }
+  if (lower.includes("timeout")) {
+    return {
+      code: "target-navigation-timeout",
+      message: "The target did not finish its initial navigation before the timeout.",
+      remediation: "Check product startup health or rerun with a larger timeout.",
+      detail
+    };
+  }
+  return {
+    code: "target-navigation-failed",
+    message: "The initial browser navigation did not complete.",
+    remediation: "Review diagnostics.jsonl and verify the target URL and product health.",
+    detail
+  };
+}

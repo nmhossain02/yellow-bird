@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 
 import { access, readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import process from "node:process";
+import { resolveOutputOption } from "../src/scout/output.js";
 import { startServer } from "../src/server.js";
 
 function argument(name, fallback) {
@@ -136,6 +137,8 @@ async function scout() {
     throw new Error("scout requires --target URL or a scenario target");
   }
 
+  const output = await resolveOutputOption(argument("output"));
+  const verbose = flag("verbose");
   const { runScout } = await import("../src/scout/scout.js");
   const report = await runScout({
     target,
@@ -154,13 +157,35 @@ async function scout() {
     ],
     permissions: scenario.permissions,
     steps: scenario.steps,
-    outputDirectory: argument("output"),
+    ...output,
     headed: flag("headed"),
-    ignoreConsoleErrors: flag("ignore-console-errors")
+    ignoreConsoleErrors: flag("ignore-console-errors"),
+    onDiagnostic: verbose
+      ? (event) => {
+          console.error(
+            `[${event.timestamp}] ${event.level.toUpperCase()} ${event.event}: ${event.message}`
+          );
+        }
+      : undefined
   });
 
   console.log(`Scout ${report.run.id}: ${report.outcome}`);
+  for (const repair of report.target.repairs) {
+    console.log(`Target repaired: ${repair.from} -> ${repair.to}`);
+  }
   console.log(`Findings: ${report.findings.length}`);
+  console.log(
+    report.observations.workflowSteps.length
+      ? `Scope: ${report.observations.workflowSteps.length} declared workflow step(s); no autonomous exploration`
+      : `Scope: initial page load only; ${report.observations.interactiveElements.length} interactive element(s) not exercised`
+  );
+  if (report.invalidTestMechanics.length) {
+    console.log(`Test-mechanics issues: ${report.invalidTestMechanics.length}`);
+    for (const issue of report.invalidTestMechanics) {
+      console.log(`- [${issue.id}] ${issue.title}`);
+      console.log(`  Fix: ${issue.remediation}`);
+    }
+  }
   if (report.observations.workflowSteps.length) {
     console.log(
       `Workflow: ${report.observations.workflowSteps.map((step) => `${step.id}=${step.status}`).join(", ")}`
@@ -172,9 +197,13 @@ async function scout() {
   console.log(`Evidence: ${report.artifacts.evidence}`);
   console.log(`Report: ${report.artifacts.report}`);
   console.log(`Regression: ${report.artifacts.regression}`);
+  console.log(`Diagnostics: ${report.artifacts.diagnostics}`);
+  const replayDirectory = JSON.stringify(dirname(report.artifacts.replayPackage));
+  console.log(`Replay setup: bun install --cwd ${replayDirectory}`);
   console.log(
-    `Replay: bunx playwright test --config ${report.artifacts.playwrightConfig}`
+    `Browser setup: bun run --cwd ${replayDirectory} setup:browsers`
   );
+  console.log(`Replay: bun run --cwd ${replayDirectory} test`);
   if (report.outcome === "attention") process.exitCode = 2;
   else if (report.outcome === "inconclusive") process.exitCode = 3;
 }
@@ -188,7 +217,8 @@ Usage:
   yellowbird run [--server URL] [--project ID] [--target ID] [--profile balanced|deterministic|exploratory]
   yellowbird scout [--scenario FILE] [--target URL] [--intent TEXT] [--expect-status 200]
                    [--expect-title TEXT] [--expect-text TEXT ...]
-                   [--output DIRECTORY] [--headed] [--ignore-console-errors]
+                   [--output DIRECTORY|REPORT.md] [--verbose]
+                   [--headed] [--ignore-console-errors]
 `);
 }
 

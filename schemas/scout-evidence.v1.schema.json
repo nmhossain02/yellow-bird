@@ -44,8 +44,31 @@
       "type": "object",
       "required": ["url", "origin", "authorization"],
       "properties": {
+        "requestedUrl": { "type": "string", "format": "uri" },
         "url": { "type": "string", "format": "uri" },
         "origin": { "type": "string", "format": "uri" },
+        "repairs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "code",
+              "field",
+              "from",
+              "to",
+              "rationale",
+              "expectedResultChanged"
+            ],
+            "properties": {
+              "code": { "type": "string" },
+              "field": { "type": "string" },
+              "from": { "type": "string" },
+              "to": { "type": "string" },
+              "rationale": { "type": "string" },
+              "expectedResultChanged": { "const": false }
+            }
+          }
+        },
         "authorization": {
           "type": "object",
           "required": ["method", "scope", "rationale"],
@@ -88,6 +111,26 @@
         }
       }
     },
+    "invalidTestMechanics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "classification",
+          "title",
+          "evidence",
+          "remediation"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "classification": { "const": "test-mechanics" },
+          "title": { "type": "string" },
+          "evidence": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    },
     "observations": {
       "type": "object"
     },
@@ -103,7 +146,11 @@
         "screenshot",
         "regression",
         "playwrightConfig"
-      ]
+      ],
+      "properties": {
+        "diagnostics": { "type": "string" },
+        "replayPackage": { "type": "string" }
+      }
     },
     "provenance": {
       "type": "object",

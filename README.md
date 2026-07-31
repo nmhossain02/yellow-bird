@@ -44,6 +44,10 @@ make the result inconclusive. It writes an evidence bundle under
 - `regression.spec.js` — deterministic Playwright assertions suitable for review
 - `playwright.config.js` — makes the regression immediately replayable from the
   hidden evidence directory
+- `package.json` — pins the Playwright dependency needed to replay from any
+  product repository
+- `diagnostics.jsonl` — ordered, run-correlated operational events with URL
+  query values and console contents omitted
 
 The machine-readable format is published as
 [`schemas/scout-evidence.v1.schema.json`](./schemas/scout-evidence.v1.schema.json)
@@ -65,12 +69,41 @@ Its actions and assertions are also written into the generated regression.
 The public format is
 [`schemas/scenario.v1.schema.json`](./schemas/scenario.v1.schema.json).
 
+## Use YellowBird from another repository
+
+Install the local checkout once:
+
+```bash
+bun install --global /path/to/yellow-bird
+```
+
+Then run it from the product repository. `--output report.md` writes that exact
+Markdown file and places the remaining evidence in `report.assets/`:
+
+```bash
+cd /path/to/product
+yellowbird scout \
+  --target http://127.0.0.1:3000 \
+  --intent "Assess the initial interface" \
+  --output yellowbird-report.md \
+  --verbose
+```
+
+Verbose mode streams the same structured lifecycle events that are retained in
+`diagnostics.jsonl`. Exit `0` means no failure was observed within the tested
+scope; consult the coverage gaps before treating that as broader product health.
+
 ## Scout safety boundary
 
 The alpha accepts only `localhost`, `127.0.0.1`, and `::1`. Browser requests are
 restricted to the target's exact origin; cross-origin requests are blocked and
 reported as coverage gaps. Local control is the authorization proof for this
 mode.
+
+For loopback targets only, if an HTTPS transport probe fails and the identical
+host, port, path, and query responds over HTTP, YellowBird repairs the scheme
+and records both URLs and the unchanged expected result. It does not silently
+ignore certificate errors or repair remote targets.
 
 This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
@@ -81,6 +114,11 @@ those capabilities. It does not explore beyond declared steps, sign up external
 users, or use an LLM. A failed action is reported as `inconclusive`, not as a
 product pass or product bug, because selector healing has not been implemented.
 That distinction is part of the evidence contract.
+
+Navigation and transport failures are also `inconclusive` test mechanics rather
+than product findings. The report provides a diagnostic code, remediation, and
+structured event log instead of duplicating the failed navigation as a product
+request failure.
 
 ## Run the dashboard
 
@@ -122,6 +160,8 @@ local browser check.
   request, screenshot, and interactive-element evidence
 - Permission-declared `fill`, `click`, `expectText`, and `expectVisible` workflow
   steps with `inconclusive` handling for invalid test mechanics
+- Loopback transport diagnosis and evidence-backed HTTPS-to-HTTP scheme repair
+- Ordered JSONL diagnostics correlated by run ID, with a live `--verbose` view
 - Owner-authored assertions that YellowBird does not rewrite
 - Machine-readable evidence, a human report, and a generated Playwright regression
 - Persistent dashboard projects, targets, scenarios, runs, findings, and audit events

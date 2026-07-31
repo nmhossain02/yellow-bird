@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
 import { chromium } from "@playwright/test";
+import {
+  cleanDiagnosticText,
+  createDiagnosticRecorder,
+  diagnoseNavigationError,
+  diagnosticUrl,
+  resolveLoopbackScheme
+} from "./diagnostics.js";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const STEP_CAPABILITIES = {
@@ -11,6 +19,8 @@ const STEP_CAPABILITIES = {
   expectVisible: "browser.read"
 };
 const SUPPORTED_STEP_ACTIONS = new Set(Object.keys(STEP_CAPABILITIES));
+const require = createRequire(import.meta.url);
+const PLAYWRIGHT_VERSION = require("@playwright/test/package.json").version;
 
 export function authorizeScoutTarget(value) {
   let target;
@@ -130,6 +140,10 @@ function markdownEscape(value) {
   return String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
 }
 
+function diagnosticsJsonl(events) {
+  return `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+}
+
 function buildMarkdown(report) {
   const findingRows = report.findings.length
     ? report.findings
@@ -138,7 +152,7 @@ function buildMarkdown(report) {
             `| ${markdownEscape(finding.severity)} | ${markdownEscape(finding.title)} | ${markdownEscape(finding.evidence)} |`
         )
         .join("\n")
-    : "| — | No asserted failures observed | — |";
+    : "| — | No asserted failures observed within the tested scope | — |";
   const workflowRows = report.observations.workflowSteps.length
     ? report.observations.workflowSteps
         .map(
@@ -147,12 +161,29 @@ function buildMarkdown(report) {
         )
         .join("\n")
     : "| — | — | No workflow declared | — |";
+  const diagnosticRows = report.invalidTestMechanics.length
+    ? report.invalidTestMechanics
+        .map(
+          (issue) =>
+            `| ${markdownEscape(issue.id)} | ${markdownEscape(issue.title)} | ${markdownEscape(issue.remediation)} |`
+        )
+        .join("\n")
+    : "| — | No test-mechanics issues observed | — |";
+  const repairRows = report.target.repairs.length
+    ? report.target.repairs
+        .map(
+          (repair) =>
+            `| ${markdownEscape(repair.code)} | ${markdownEscape(repair.from)} | ${markdownEscape(repair.to)} | ${repair.expectedResultChanged ? "yes" : "no"} |`
+        )
+        .join("\n")
+    : "| — | — | — | — |";
 
   return `# YellowBird scout report
 
 - Run: \`${report.run.id}\`
 - Outcome: **${report.outcome}**
 - Target: \`${report.target.url}\`
+- Requested target: \`${report.target.requestedUrl}\`
 - Authorization: ${report.target.authorization.method}, ${report.target.authorization.scope}
 - Intent: ${report.intent}
 - Started: ${report.run.startedAt}
@@ -163,6 +194,18 @@ function buildMarkdown(report) {
 | Severity | Finding | Evidence |
 | --- | --- | --- |
 ${findingRows}
+
+## Diagnostics
+
+| Code | Test-mechanics issue | Remediation |
+| --- | --- | --- |
+${diagnosticRows}
+
+| Repair | From | To | Expected result changed? |
+| --- | --- | --- | --- |
+${repairRows}
+
+Structured event log: \`${report.artifacts.diagnostics}\`
 
 ## Workflow
 
@@ -188,10 +231,10 @@ ${report.coverageGaps.map((gap) => `- ${gap}`).join("\n")}
 
 ## Reproduction
 
-1. Install dependencies with \`bun install\`.
-2. Install Chromium with \`bun run setup:browsers\`.
+1. Run \`bun install --cwd ${JSON.stringify(dirname(report.artifacts.replayPackage))}\`.
+2. Run \`bun run --cwd ${JSON.stringify(dirname(report.artifacts.replayPackage))} setup:browsers\`.
 3. Ensure the target is available at \`${report.target.url}\`.
-4. Run \`bunx playwright test --config ${report.artifacts.playwrightConfig}\`.
+4. Run \`bun run --cwd ${JSON.stringify(dirname(report.artifacts.replayPackage))} test\`.
 
 The generated regression contains only explicit, deterministic assertions. Review it before
 committing it to the product repository.
@@ -285,8 +328,26 @@ export default defineConfig({
 `;
 }
 
+function buildReplayPackage() {
+  return `${JSON.stringify(
+    {
+      private: true,
+      type: "module",
+      scripts: {
+        "setup:browsers": "playwright install chromium",
+        test: "playwright test --config playwright.config.js"
+      },
+      devDependencies: {
+        "@playwright/test": PLAYWRIGHT_VERSION
+      }
+    },
+    null,
+    2
+  )}\n`;
+}
+
 export async function runScout(input) {
-  const authorization = authorizeScoutTarget(input.target);
+  const requestedAuthorization = authorizeScoutTarget(input.target);
   const workflow = validateWorkflow({
     permissions: input.permissions,
     steps: input.steps
@@ -295,6 +356,32 @@ export async function runScout(input) {
   const outputDirectory = resolve(
     input.outputDirectory || join(".yellowbird", "scout", runId)
   );
+  const reportPath = resolve(input.reportPath || join(outputDirectory, "report.md"));
+  const timeoutMs = Number(input.timeoutMs ?? 15_000);
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
+    throw new Error("timeout must be a positive number of milliseconds");
+  }
+
+  const startedAt = new Date();
+  const { events: diagnosticEvents, record } = createDiagnosticRecorder(
+    input.onDiagnostic,
+    { runId }
+  );
+  record("info", "run.started", "YellowBird scout started", {
+    runId,
+    ...diagnosticUrl(requestedAuthorization.target)
+  });
+  const targetResolution = await resolveLoopbackScheme(
+    requestedAuthorization.target,
+    Math.max(100, Math.min(timeoutMs, 2_000)),
+    record
+  );
+  const authorization = authorizeScoutTarget(targetResolution.effectiveTarget);
+  record("info", "target.authorized", "Authorized the effective loopback target", {
+    origin: authorization.origin,
+    method: authorization.authorization.method,
+    scope: authorization.authorization.scope
+  });
   const options = {
     target: authorization.target,
     intent: input.intent || "Verify that the initial page is healthy",
@@ -305,7 +392,7 @@ export async function runScout(input) {
     steps: workflow.steps,
     ignoreConsoleErrors: Boolean(input.ignoreConsoleErrors),
     headed: Boolean(input.headed),
-    timeoutMs: Number(input.timeoutMs ?? 15_000)
+    timeoutMs
   };
 
   if (
@@ -317,9 +404,9 @@ export async function runScout(input) {
   }
 
   await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
+  await mkdir(dirname(reportPath), { recursive: true, mode: 0o700 });
   await chmod(outputDirectory, 0o700);
 
-  const startedAt = new Date();
   const consoleErrors = [];
   const pageErrors = [];
   const failedRequests = [];
@@ -329,12 +416,29 @@ export async function runScout(input) {
   const workflowFindings = [];
   const invalidWorkflowSteps = [];
   let navigationError = null;
+  let navigationDiagnostic = null;
   let status = null;
   let title = "";
   let bodyText = "";
   let interactiveElements = [];
 
-  const browser = await chromium.launch({ headless: !options.headed });
+  record("debug", "browser.launch.started", "Launching Playwright Chromium", {
+    headed: options.headed
+  });
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: !options.headed });
+    record("info", "browser.launch.completed", "Playwright Chromium launched");
+  } catch (error) {
+    record("error", "browser.launch.failed", "Chromium could not be launched", {
+      detail: cleanDiagnosticText(error.message)
+    });
+    const diagnosticsPath = join(outputDirectory, "diagnostics.jsonl");
+    await writeFile(diagnosticsPath, diagnosticsJsonl(diagnosticEvents), {
+      mode: 0o600
+    });
+    throw error;
+  }
   try {
     const context = await browser.newContext({
       serviceWorkers: "block",
@@ -359,6 +463,9 @@ export async function runScout(input) {
           method: "WEBSOCKET",
           resourceType: "websocket",
           url: socket.url()
+        });
+        record("warn", "network.websocket.blocked", "Blocked a cross-origin WebSocket", {
+          ...diagnosticUrl(socket.url())
         });
         await socket.close({
           code: 1008,
@@ -390,6 +497,11 @@ export async function runScout(input) {
         resourceType: route.request().resourceType(),
         url: requestUrl
       });
+      record("warn", "network.request.blocked", "Blocked a cross-origin request", {
+        method: route.request().method(),
+        resourceType: route.request().resourceType(),
+        ...diagnosticUrl(requestUrl)
+      });
       await route.abort("blockedbyclient");
     });
 
@@ -398,9 +510,19 @@ export async function runScout(input) {
     page.on("console", (message) => {
       if (message.type() === "error") {
         consoleErrors.push({ text: message.text(), location: message.location() });
+        record("warn", "browser.console.error", "The page emitted a console error", {
+          location: {
+            ...diagnosticUrl(message.location().url || options.target),
+            lineNumber: message.location().lineNumber,
+            columnNumber: message.location().columnNumber
+          }
+        });
       }
     });
-    page.on("pageerror", (error) => pageErrors.push({ message: error.message }));
+    page.on("pageerror", (error) => {
+      pageErrors.push({ message: error.message });
+      record("error", "browser.page.error", "The page raised an uncaught exception");
+    });
     page.on("requestfailed", (request) => {
       const requestUrl = request.url();
       if (
@@ -412,6 +534,11 @@ export async function runScout(input) {
           url: requestUrl,
           reason: request.failure()?.errorText || "unknown"
         });
+        record("warn", "network.request.failed", "A same-origin request failed", {
+          method: request.method(),
+          ...diagnosticUrl(requestUrl),
+          reason: request.failure()?.errorText || "unknown"
+        });
       }
     });
     page.on("response", (response) => {
@@ -420,18 +547,40 @@ export async function runScout(input) {
         response.status() >= 400
       ) {
         serverErrors.push({ status: response.status(), url: response.url() });
+        record("warn", "network.response.error", "A same-origin response returned an HTTP error", {
+          status: response.status(),
+          ...diagnosticUrl(response.url())
+        });
       }
     });
 
     try {
+      record("info", "navigation.started", "Starting initial browser navigation", {
+        ...diagnosticUrl(options.target),
+        timeoutMs: options.timeoutMs
+      });
       const response = await page.goto(options.target, {
         waitUntil: "domcontentloaded",
         timeout: options.timeoutMs
       });
       status = response?.status() ?? null;
+      record("info", "navigation.completed", "Initial navigation completed", {
+        status,
+        ...diagnosticUrl(page.url())
+      });
       await page.waitForTimeout(250);
     } catch (error) {
-      navigationError = error.message;
+      navigationError = cleanDiagnosticText(error.message);
+      navigationDiagnostic = diagnoseNavigationError(
+        navigationError,
+        options.target
+      );
+      record(
+        "error",
+        "navigation.failed",
+        navigationDiagnostic.message,
+        navigationDiagnostic
+      );
     }
 
     for (const step of options.steps) {
@@ -444,6 +593,12 @@ export async function runScout(input) {
           evidence: "Initial navigation did not complete",
           durationMs: 0
         });
+        record(
+          "warn",
+          "workflow.step.skipped",
+          "Skipped a workflow step because navigation did not complete",
+          { id: step.id, action: step.action }
+        );
         continue;
       }
 
@@ -479,6 +634,11 @@ export async function runScout(input) {
               : "Action completed",
           durationMs: Date.now() - stepStartedAt
         });
+        record("info", "workflow.step.completed", "Workflow step completed", {
+          id: step.id,
+          action: step.action,
+          durationMs: Date.now() - stepStartedAt
+        });
       } catch (error) {
         const isAssertion = step.action.startsWith("expect");
         const result = {
@@ -489,6 +649,19 @@ export async function runScout(input) {
           durationMs: Date.now() - stepStartedAt
         };
         workflowSteps.push(result);
+        record(
+          isAssertion ? "error" : "warn",
+          isAssertion ? "workflow.assertion.failed" : "workflow.action.invalid",
+          isAssertion
+            ? "An owner-declared workflow assertion failed"
+            : "A workflow action could not be executed",
+          {
+            id: step.id,
+            action: step.action,
+            detail: cleanDiagnosticText(error.message),
+            durationMs: result.durationMs
+          }
+        );
 
         if (isAssertion) {
           workflowFindings.push({
@@ -536,15 +709,18 @@ export async function runScout(input) {
     });
   } finally {
     await browser.close();
+    record("debug", "browser.closed", "Playwright Chromium closed");
   }
 
   const findings = [];
+  const setupIssues = [];
   if (navigationError) {
-    findings.push({
-      id: "navigation-failed",
-      severity: "high",
-      title: "Initial navigation failed",
-      evidence: navigationError
+    setupIssues.push({
+      id: navigationDiagnostic.code,
+      classification: "test-mechanics",
+      title: navigationDiagnostic.message,
+      evidence: navigationDiagnostic.detail,
+      remediation: navigationDiagnostic.remediation
     });
   } else if (status !== options.expectedStatus) {
     findings.push({
@@ -554,7 +730,7 @@ export async function runScout(input) {
       evidence: options.target
     });
   }
-  if (options.expectedTitle && title !== options.expectedTitle) {
+  if (!navigationError && options.expectedTitle && title !== options.expectedTitle) {
     findings.push({
       id: "title-mismatch",
       severity: "medium",
@@ -562,7 +738,7 @@ export async function runScout(input) {
       evidence: `expected ${JSON.stringify(options.expectedTitle)}, received ${JSON.stringify(title)}`
     });
   }
-  for (const text of options.expectedTexts) {
+  for (const text of navigationError ? [] : options.expectedTexts) {
     if (!bodyText.includes(text)) {
       findings.push({
         id: "missing-text",
@@ -572,7 +748,7 @@ export async function runScout(input) {
       });
     }
   }
-  if (!options.ignoreConsoleErrors && consoleErrors.length) {
+  if (!navigationError && !options.ignoreConsoleErrors && consoleErrors.length) {
     findings.push({
       id: "console-errors",
       severity: "medium",
@@ -580,7 +756,7 @@ export async function runScout(input) {
       evidence: consoleErrors.map((entry) => entry.text).join("; ").slice(0, 500)
     });
   }
-  if (pageErrors.length) {
+  if (!navigationError && pageErrors.length) {
     findings.push({
       id: "page-errors",
       severity: "high",
@@ -588,7 +764,7 @@ export async function runScout(input) {
       evidence: pageErrors.map((entry) => entry.message).join("; ").slice(0, 500)
     });
   }
-  if (failedRequests.length) {
+  if (!navigationError && failedRequests.length) {
     findings.push({
       id: "failed-requests",
       severity: "medium",
@@ -599,7 +775,7 @@ export async function runScout(input) {
   const subresourceServerErrors = serverErrors.filter(
     (entry) => entry.url !== options.target
   );
-  if (subresourceServerErrors.length) {
+  if (!navigationError && subresourceServerErrors.length) {
     findings.push({
       id: "http-errors",
       severity: subresourceServerErrors.some((entry) => entry.status >= 500)
@@ -636,6 +812,11 @@ export async function runScout(input) {
       `${invalidWorkflowSteps.length} workflow action(s) were invalid. YellowBird did not attempt selector healing.`
     );
   }
+  if (navigationError) {
+    coverageGaps.push(
+      "The product was not evaluated because initial navigation did not complete."
+    );
+  }
   if (blockedRequests.length) {
     coverageGaps.push(
       `${blockedRequests.length} cross-origin request(s) were blocked by the exact-origin network policy.`
@@ -644,9 +825,15 @@ export async function runScout(input) {
 
   const outcome = findings.length
     ? "attention"
-    : invalidWorkflowSteps.length
+    : setupIssues.length || invalidWorkflowSteps.length
       ? "inconclusive"
       : "clear";
+  record("info", "run.completed", `Scout completed with outcome ${outcome}`, {
+    outcome,
+    findingCount: findings.length,
+    setupIssueCount: setupIssues.length,
+    invalidWorkflowStepCount: invalidWorkflowSteps.length
+  });
   const report = {
     schema: "yellowbird.scout-evidence.v1",
     outcome,
@@ -658,9 +845,11 @@ export async function runScout(input) {
       durationMs: Date.now() - startedAt.getTime()
     },
     target: {
+      requestedUrl: requestedAuthorization.target,
       url: options.target,
       origin: authorization.origin,
-      authorization: authorization.authorization
+      authorization: authorization.authorization,
+      repairs: targetResolution.repairs
     },
     assertions: {
       expectedStatus: options.expectedStatus,
@@ -669,9 +858,24 @@ export async function runScout(input) {
       consoleErrorsAllowed: options.ignoreConsoleErrors
     },
     findings,
+    invalidTestMechanics: [
+      ...setupIssues,
+      ...invalidWorkflowSteps.map((step) => ({
+        id: step.id,
+        classification: "test-mechanics",
+        title: `Workflow action was invalid: ${step.id}`,
+        evidence: step.evidence,
+        remediation:
+          "Confirm the selector and declared capability. Selector healing was not attempted."
+      }))
+    ],
     observations: {
       status,
       title,
+      navigation: {
+        completed: !navigationError,
+        diagnostic: navigationDiagnostic
+      },
       interactiveElements,
       consoleErrors,
       pageErrors,
@@ -683,10 +887,12 @@ export async function runScout(input) {
     coverageGaps,
     artifacts: {
       evidence: join(outputDirectory, "evidence.json"),
-      report: join(outputDirectory, "report.md"),
+      report: reportPath,
       screenshot: join(outputDirectory, "page.png"),
       regression: join(outputDirectory, "regression.spec.js"),
-      playwrightConfig: join(outputDirectory, "playwright.config.js")
+      playwrightConfig: join(outputDirectory, "playwright.config.js"),
+      replayPackage: join(outputDirectory, "package.json"),
+      diagnostics: join(outputDirectory, "diagnostics.jsonl")
     },
     provenance: {
       runner: "yellowbird-local-scout",
@@ -709,6 +915,12 @@ export async function runScout(input) {
       mode: 0o600
     }),
     writeFile(report.artifacts.playwrightConfig, buildPlaywrightConfig(), {
+      mode: 0o600
+    }),
+    writeFile(report.artifacts.replayPackage, buildReplayPackage(), {
+      mode: 0o600
+    }),
+    writeFile(report.artifacts.diagnostics, diagnosticsJsonl(diagnosticEvents), {
       mode: 0o600
     })
   ]);

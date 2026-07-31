@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,9 +9,25 @@ import {
   runScout,
   validateWorkflow
 } from "../src/scout/scout.js";
+import { resolveOutputOption } from "../src/scout/output.js";
 
 let server;
 let target;
+
+async function runCommand(command, cwd) {
+  const child = Bun.spawn({
+    cmd: command,
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text()
+  ]);
+  return { exitCode, stdout, stderr };
+}
 
 beforeAll(async () => {
   server = createServer((request, response) => {
@@ -126,6 +142,101 @@ test("scout reports explicit failures without changing expected results", async 
   assert.deepEqual(report.assertions.expectedTexts, ["Checkout ready"]);
 });
 
+test("scout repairs a loopback HTTPS-to-HTTP transport mismatch with diagnostics", async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-repair-"));
+  const reportPath = join(outputDirectory, "price-scout.md");
+  const requestedTarget = `${target.replace("http:", "https:")}/?token=not-for-logs`;
+  const report = await runScout({
+    target: requestedTarget,
+    expectedTitle: "Feather Shop",
+    expectedTexts: ["Checkout ready"],
+    outputDirectory,
+    reportPath
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.target.requestedUrl, requestedTarget);
+  assert.equal(report.target.url, `${target}/?token=not-for-logs`);
+  assert.deepEqual(
+    report.target.repairs.map(({ code, expectedResultChanged }) => ({
+      code,
+      expectedResultChanged
+    })),
+    [{ code: "loopback-scheme-repaired", expectedResultChanged: false }]
+  );
+  assert.equal(report.findings.length, 0);
+  assert.equal(report.invalidTestMechanics.length, 0);
+  assert.equal(report.artifacts.report, reportPath);
+  await stat(reportPath);
+
+  const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
+  const events = diagnostics
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.ok(events.some((event) => event.event === "target.scheme_repaired"));
+  assert.ok(events.some((event) => event.event === "navigation.completed"));
+  assert.deepEqual(
+    events.map((event) => event.sequence),
+    events.map((_, index) => index + 1)
+  );
+  assert.ok(events.every((event) => event.runId === report.run.id));
+  assert.doesNotMatch(diagnostics, /not-for-logs/);
+
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+});
+
+test("navigation setup failures are inconclusive and not duplicate product findings", async () => {
+  const unavailable = createServer();
+  await new Promise((resolve, reject) => {
+    unavailable.once("error", reject);
+    unavailable.listen(0, "127.0.0.1", resolve);
+  });
+  const unavailablePort = unavailable.address().port;
+  await new Promise((resolve, reject) => {
+    unavailable.close((error) => (error ? reject(error) : resolve()));
+  });
+
+  const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-unavailable-"));
+  const report = await runScout({
+    target: `http://127.0.0.1:${unavailablePort}`,
+    timeoutMs: 250,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.findings.length, 0);
+  assert.equal(report.invalidTestMechanics.length, 1);
+  assert.equal(
+    report.invalidTestMechanics[0].id,
+    "target-connection-refused"
+  );
+  assert.equal(report.observations.navigation.completed, false);
+  assert.ok(report.observations.failedRequests.length >= 1);
+});
+
+test("a markdown output option separates the report from its evidence bundle", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "yellowbird-output-"));
+  const reportPath = join(directory, "price-scout.md");
+  const output = await resolveOutputOption(reportPath);
+
+  assert.equal(output.reportPath, reportPath);
+  assert.equal(output.outputDirectory, join(directory, "price-scout.assets"));
+
+  const legacyDirectory = join(directory, "legacy.md");
+  await mkdir(legacyDirectory);
+  await assert.rejects(
+    resolveOutputOption(legacyDirectory),
+    /existing directory created by older YellowBird behavior/
+  );
+});
+
 test("scout executes a permission-declared workflow and generates its regression", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-workflow-"));
   const report = await runScout({
@@ -186,7 +297,7 @@ test("an unexecutable owner action is inconclusive rather than a product pass", 
         selector: "#does-not-exist"
       }
     ],
-    timeoutMs: 100,
+    timeoutMs: 500,
     outputDirectory
   });
 
