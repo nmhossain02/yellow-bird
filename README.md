@@ -107,9 +107,10 @@ reported as coverage gaps. Local control is the authorization proof for this
 mode.
 
 For loopback targets only, YellowBird makes a bounded, best-effort repair if an
-HTTPS transport probe fails and the identical host, port, path, and query
-responds over HTTP. It records both URLs and the unchanged expected result. It
-does not silently ignore certificate errors or repair remote targets.
+HTTPS transport probe fails and the same host, effective port (including 443
+when HTTPS omits it), path, and query responds over HTTP. It records both URLs
+and the unchanged expected result. It does not silently ignore certificate
+errors or repair remote targets.
 
 This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
