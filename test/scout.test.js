@@ -37,6 +37,17 @@ async function runCommand(command, cwd, env) {
 }
 
 function assertConformsToSchema(schema, value, path = "$") {
+  if (schema.oneOf) {
+    let matchingSchemas = 0;
+    for (const candidate of schema.oneOf) {
+      try {
+        assertConformsToSchema(candidate, value, path);
+        matchingSchemas += 1;
+      } catch {}
+    }
+    assert.equal(matchingSchemas, 1, `${path} must match exactly one schema`);
+    return;
+  }
   if (Object.hasOwn(schema, "const")) {
     assert.deepEqual(value, schema.const, `${path} does not match const`);
   }
@@ -78,18 +89,21 @@ function assertConformsToSchema(schema, value, path = "$") {
 beforeAll(async () => {
   server = createServer((request, response) => {
     const failing = request.url === "/failing";
+    const agentFlow = request.url?.startsWith("/agent-flow");
+    const staticPage = request.url?.startsWith("/static");
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     response.end(`<!doctype html>
       <html>
-        <head><title>Feather Shop</title></head>
+        <head><title>${agentFlow ? "Monitor setup" : "Feather Shop"}</title></head>
         <body>
-          <h1>Feather Shop</h1>
+          <h1>${agentFlow ? "Create monitor" : "Feather Shop"}</h1>
           <p>${failing ? "Checkout unavailable" : "Checkout ready"}</p>
-          <input name="email">
-          <button id="checkout">Buy</button>
+          ${staticPage ? "<p>No available workflow controls.</p>" : agentFlow ? '<p>Choose a product URL and monitoring rule.</p>' : '<a href="/agent-flow">New monitor</a>'}
+          ${staticPage ? "" : '<input name="email">'}
+          ${staticPage ? "" : '<button id="checkout">Buy</button>'}
           <p id="status"></p>
           <script>
-            document.querySelector("#checkout").addEventListener("click", () => {
+            document.querySelector("#checkout")?.addEventListener("click", () => {
               document.querySelector("#status").textContent =
                 document.querySelector("[name=email]").value ? "Order ready" : "Email required";
             });
@@ -110,6 +124,37 @@ afterAll(async () => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
 });
+
+function createAgentRunner(decide, resolveEngineOverride) {
+  return createScoutRunner({
+    launchBrowser: async (options) => {
+      const { chromium } = await import("@playwright/test");
+      return chromium.launch(options);
+    },
+    resolveEngine:
+      resolveEngineOverride ||
+      (async () => ({
+        capabilities: {
+          jsonSchema: "verified",
+          toolCalls: "unverified",
+          imageInput: "unverified"
+        },
+        diagnostic: null,
+        engine: {
+          provenance: () => ({
+            adapter: "test-compatible-engine",
+            endpointClass: "loopback",
+            modelRequested: "planner-fixture",
+            modelReported: "planner-fixture",
+            capabilityManifestVersion: "yellowbird.engine-capabilities.v1"
+          }),
+          completeStructured: async (request) => ({
+            output: await decide(request)
+          })
+        }
+      }))
+  });
+}
 
 test("scout authorization is loopback-only", () => {
   assert.equal(authorizeScoutTarget(`${target}/`).authorization.scope, "exact-origin");
@@ -249,6 +294,284 @@ test("browser launch failure finalizes an inconclusive run", async () => {
   assert.doesNotMatch(JSON.stringify(events), /secret=hidden/);
 });
 
+test("intent-driven scout executes bounded same-origin navigation", async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-agent-"));
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the monitor setup route to assess the basic flow.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Exercise a safe form field without submitting data.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The safe read-only portion of the flow was inspected.",
+      coverage: "partial",
+      summary: "The initial page and monitor setup route were inspected without mutation."
+    }
+  ];
+  const runWithAgent = createAgentRunner(() => decisions.shift());
+
+  const report = await runWithAgent({
+    target,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.exploration.status, "completed");
+  assert.equal(report.observations.exploration.coverage, "covered");
+  assert.equal(report.observations.exploration.steps.length, 2);
+  assert.equal(report.observations.exploration.steps[0].status, "passed");
+  assert.equal(
+    report.observations.exploration.steps[0].url,
+    `${target}/agent-flow`
+  );
+  assert.equal(report.observations.exploration.steps[1].action, "fill");
+  assert.equal(
+    report.observations.exploration.steps[1].value,
+    "yellowbird@example.test"
+  );
+  assert.equal(
+    report.provenance.agenticEngine,
+    "test-compatible-engine:planner-fixture"
+  );
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(regression, new RegExp(`${server.address().port}/agent-flow`));
+  assert.match(regression, /yellowbirdAgentResponse1/);
+  assert.match(regression, /input\[name=\\"email\\"\].*fill/);
+  const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
+  assert.match(diagnostics, /"event":"agent.engine.ready"/);
+  assert.match(diagnostics, /"event":"agent.action.completed"/);
+  assert.match(diagnostics, /"event":"agent.completed"/);
+});
+
+test("mutation-oriented intent remains inconclusive at the safe boundary", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-mutation-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the monitor setup route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "Submission is outside the authorized profile.",
+      coverage: "partial",
+      summary: "The setup page was inspected, but no monitor was submitted."
+    }
+  ];
+  const report = await createAgentRunner(() => decisions.shift())({
+    target,
+    intent: "Assess the monitor flow and submit a monitor",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.findings.length, 0);
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.equal(
+    report.invalidTestMechanics[0].id,
+    "agent-intent-not-fully-covered"
+  );
+  assert.match(
+    report.coverageGaps.join("\n"),
+    /form submission, mutation, authentication, and cross-origin behavior were not authorized|requested intent was not fully exercised/
+  );
+});
+
+test("a requested flow with no authorized action is inconclusive", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-no-actions-")
+  );
+  let planningCalls = 0;
+  const report = await createAgentRunner(() => {
+    planningCalls += 1;
+    return {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "Nothing is available.",
+      coverage: "covered",
+      summary: "The flow was covered."
+    };
+  })({
+    target: `${target}/static`,
+    intent: "Assess the basic user flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(planningCalls, 0);
+  assert.equal(
+    report.invalidTestMechanics[0].id,
+    "agent-no-authorized-actions"
+  );
+  assert.equal(report.observations.exploration.coverage, "blocked");
+});
+
+test("initial assertions remain aligned with the generated replay", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-assertions-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the setup flow.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The setup route was observed.",
+      coverage: "covered",
+      summary: "The landing page and setup route were inspected."
+    }
+  ];
+  const report = await createAgentRunner(() => decisions.shift())({
+    target,
+    intent: "Assess the initial interface and basic user flow",
+    expectedTitle: "Feather Shop",
+    expectedTexts: ["Checkout ready"],
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.title, "Monitor setup");
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.ok(
+    regression.indexOf('toHaveTitle("Feather Shop")') <
+      regression.indexOf("yellowbirdAgentResponse1")
+  );
+});
+
+test("agent cannot select a form-submit control omitted by policy", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-policy-")
+  );
+  const report = await createAgentRunner(() => ({
+    action: "act",
+    elementRef: "element-3",
+    value: null,
+    rationale: "Try to use the submit control.",
+    coverage: "continue",
+    summary: ""
+  }))({
+    target,
+    intent: "Assess the purchase control",
+    exploreIntent: true,
+    maxAgentSteps: 1,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.steps.length, 0);
+  assert.equal(report.invalidTestMechanics[0].id, "agent-action-invalid");
+  assert.doesNotMatch(report.observations.exploration.summary, /completed/i);
+});
+
+test("an engine resolver defect still finalizes a truthful run", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-resolver-")
+  );
+  const report = await createAgentRunner(
+    () => null,
+    async () => {
+      throw new Error("resolver defect with private console content");
+    }
+  )({
+    target,
+    intent: "Assess the initial interface",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(
+    report.invalidTestMechanics[0].id,
+    "agent-engine-resolution-failed"
+  );
+  assert.doesNotMatch(
+    JSON.stringify(report.invalidTestMechanics),
+    /private console content/
+  );
+  await Promise.all(
+    Object.values(report.artifacts)
+      .filter(Boolean)
+      .map((path) => stat(path))
+  );
+});
+
+test("unavailable intent engine is inconclusive instead of a narrow clear", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-unavailable-")
+  );
+  const runWithoutAgent = createScoutRunner({
+    launchBrowser: async (options) => {
+      const { chromium } = await import("@playwright/test");
+      return chromium.launch(options);
+    },
+    resolveEngine: async () => ({
+      engine: null,
+      capabilities: null,
+      diagnostic: {
+        id: "agent-engine-unavailable",
+        classification: "test-mechanics",
+        title: "No compatible local agent engine is available.",
+        evidence: "connection refused",
+        remediation: "Start Ollama with a compatible model."
+      }
+    })
+  });
+
+  const report = await runWithoutAgent({
+    target,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.deepEqual(report.findings, []);
+  assert.equal(report.observations.navigation.completed, true);
+  assert.equal(report.observations.exploration.status, "inconclusive");
+  assert.equal(
+    report.invalidTestMechanics[0].id,
+    "agent-engine-unavailable"
+  );
+  assert.match(
+    await readFile(report.artifacts.report, "utf8"),
+    /requested intent was not fully exercised/i
+  );
+});
+
 test("CLI persists an inconclusive run when Chromium is not installed", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-cli-launch-"));
   const emptyBrowserDirectory = await mkdtemp(
@@ -310,6 +633,161 @@ test("CLI redacts repaired target query values while evidence stays exact", asyn
   );
   assert.equal(evidence.target.repairs[0].from, requestedTarget);
   assert.equal(evidence.target.repairs[0].to, repairedTarget);
+});
+
+test("CLI intent runs a real bounded agent loop through a compatible endpoint", async () => {
+  let plannerCalls = 0;
+  const engineServer = createServer(async (request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.end(JSON.stringify({ data: [{ id: "planner-fixture" }] }));
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404);
+      response.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const schemaName = body.response_format?.json_schema?.name;
+    const output = schemaName === "yellowbird_capability_probe"
+      ? { status: "ready", nextAction: "inspect" }
+      : plannerCalls++ === 0
+        ? {
+            action: "act",
+            elementRef: "element-1",
+            value: null,
+            rationale: "Inspect the basic setup flow.",
+            coverage: "continue",
+            summary: ""
+          }
+        : plannerCalls === 2
+          ? {
+              action: "act",
+              elementRef: "element-1",
+              value: null,
+              rationale: "Exercise the safe form field.",
+              coverage: "continue",
+              summary: ""
+            }
+          : {
+            action: "finish",
+            elementRef: null,
+            value: null,
+            rationale: "The read-only route was inspected.",
+            coverage: "covered",
+            summary: "The landing page and setup route were inspected."
+          };
+    response.end(
+      JSON.stringify({
+        model: "planner-fixture",
+        choices: [
+          {
+            finish_reason: "stop",
+            message: { content: JSON.stringify(output) }
+          }
+        ]
+      })
+    );
+  });
+  await new Promise((resolve, reject) => {
+    engineServer.once("error", reject);
+    engineServer.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const outputDirectory = await mkdtemp(
+      join(tmpdir(), "yellowbird-cli-agent-")
+    );
+    const result = await runCommand(
+      [
+        process.execPath,
+        resolve("bin/yellowbird.js"),
+        "scout",
+        "--target",
+        target,
+        "--intent",
+        "Assess the initial interface and basic user flow",
+        "--engine-base-url",
+        `http://127.0.0.1:${engineServer.address().port}/v1`,
+        "--engine-model",
+        "planner-fixture",
+        "--output",
+        outputDirectory
+      ],
+      resolve(".")
+    );
+
+    assert.equal(result.exitCode, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /Agent: completed/);
+    assert.match(result.stdout, /2 bounded agent interaction step/);
+    const evidence = JSON.parse(
+      await readFile(join(outputDirectory, "evidence.json"), "utf8")
+    );
+    assert.equal(evidence.observations.exploration.status, "completed");
+    assert.equal(evidence.observations.exploration.steps.length, 2);
+    assert.equal(evidence.observations.exploration.steps[1].action, "fill");
+    assert.equal(
+      evidence.observations.exploration.steps[1].value,
+      "yellowbird@example.test"
+    );
+    assert.equal(
+      evidence.provenance.agenticEngine,
+      "openai-compatible-chat:planner-fixture"
+    );
+    const schema = JSON.parse(
+      await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
+    );
+    assertConformsToSchema(schema, evidence);
+  } finally {
+    await new Promise((resolve, reject) => {
+      engineServer.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("CLI reports a configured but unavailable intent engine as inconclusive", async () => {
+  const unavailable = createServer();
+  await new Promise((resolve, reject) => {
+    unavailable.once("error", reject);
+    unavailable.listen(0, "127.0.0.1", resolve);
+  });
+  const unavailablePort = unavailable.address().port;
+  await new Promise((resolve, reject) => {
+    unavailable.close((error) => (error ? reject(error) : resolve()));
+  });
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-cli-engine-unavailable-")
+  );
+  const result = await runCommand(
+    [
+      process.execPath,
+      resolve("bin/yellowbird.js"),
+      "scout",
+      "--target",
+      target,
+      "--intent",
+      "Assess the initial interface",
+      "--engine-base-url",
+      `http://127.0.0.1:${unavailablePort}/v1`,
+      "--output",
+      outputDirectory
+    ],
+    resolve(".")
+  );
+
+  assert.equal(result.exitCode, 3, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /inconclusive/);
+  assert.match(result.stdout, /agent-engine-unavailable/);
+  assert.match(result.stdout, /Start the configured engine endpoint/);
+  assert.doesNotMatch(result.stderr, /yellowbird:/i);
+  const evidence = JSON.parse(
+    await readFile(join(outputDirectory, "evidence.json"), "utf8")
+  );
+  assert.equal(evidence.outcome, "inconclusive");
+  assert.equal(evidence.observations.exploration.coverage, "blocked");
 });
 
 test("scout writes portable evidence and a deterministic regression", async () => {

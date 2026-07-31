@@ -75,8 +75,13 @@ async function doctor() {
     name: "Model provider",
     ok: true,
     warning: true,
-    detail: "simulated — Kimi and generic open-weight endpoint adapters are unconfigured"
+    detail: "checking local compatible endpoint"
   });
+  const { inspectAgentEngine } = await import("../src/scout/engine.js");
+  const engine = await inspectAgentEngine();
+  checks[checks.length - 1].detail = engine.available
+    ? `${engine.provenance.modelReported} via ${engine.provenance.adapter}; JSON Schema verified`
+    : `${engine.diagnostic.title} Deterministic scenarios remain available.`;
 
   console.log("Yellow Bird doctor\n");
   for (const check of checks) {
@@ -84,7 +89,7 @@ async function doctor() {
     console.log(`${icon} ${check.name}: ${check.detail}`);
   }
   console.log(
-    "\nThe local scout is executable. Dashboard orchestration and agentic testing remain simulated."
+    "\nThe local scout and bounded intent exploration are executable. Dashboard orchestration remains simulated."
   );
   process.exitCode = checks.every((check) => check.ok) ? 0 : 1;
 }
@@ -140,10 +145,12 @@ async function scout() {
 
   const output = await resolveOutputOption(argument("output"));
   const verbose = flag("verbose");
+  const explicitIntent = argument("intent");
+  const intent = explicitIntent || scenario.intent;
   const { runScout } = await import("../src/scout/scout.js");
   const report = await runScout({
     target,
-    intent: argument("intent", scenario.intent),
+    intent,
     expectedStatus: argument(
       "expect-status",
       String(scenario.assertions?.expectedStatus ?? 200)
@@ -158,6 +165,13 @@ async function scout() {
     ],
     permissions: scenario.permissions,
     steps: scenario.steps,
+    exploreIntent:
+      !scenarioPath &&
+      !flag("no-agent") &&
+      (flag("agent") || Boolean(explicitIntent)),
+    maxAgentSteps: argument("max-agent-steps", "4"),
+    engineBaseUrl: argument("engine-base-url"),
+    engineModel: argument("engine-model"),
     ...output,
     headed: flag("headed"),
     ignoreConsoleErrors: flag("ignore-console-errors"),
@@ -178,10 +192,23 @@ async function scout() {
   }
   console.log(`Findings: ${report.findings.length}`);
   console.log(
-    report.observations.workflowSteps.length
+    report.observations.exploration.requested
+      ? `Scope: ${report.observations.exploration.steps.length} bounded agent interaction step(s); coverage=${report.observations.exploration.coverage}`
+      : report.observations.workflowSteps.length
       ? `Scope: ${report.observations.workflowSteps.length} declared workflow step(s); no autonomous exploration`
       : `Scope: initial page load only; ${report.observations.interactiveElements.length} interactive element(s) not exercised`
   );
+  if (report.observations.exploration.requested) {
+    console.log(`Agent: ${report.observations.exploration.status}`);
+    console.log(
+      `Engine: ${report.observations.exploration.engine || "unavailable"}`
+    );
+    if (report.observations.exploration.summary) {
+      console.log(
+        `Agent summary (coverage only): ${report.observations.exploration.summary}`
+      );
+    }
+  }
   if (report.invalidTestMechanics.length) {
     console.log(`Test-mechanics issues: ${report.invalidTestMechanics.length}`);
     for (const issue of report.invalidTestMechanics) {
@@ -221,6 +248,8 @@ Usage:
   yellowbird scout [--scenario FILE] [--target URL] [--intent TEXT] [--expect-status 200]
                    [--expect-title TEXT] [--expect-text TEXT ...]
                    [--output DIRECTORY|REPORT.md] [--verbose]
+                   [--agent|--no-agent] [--max-agent-steps 4]
+                   [--engine-base-url URL] [--engine-model ID]
                    [--headed] [--ignore-console-errors]
 `);
 }

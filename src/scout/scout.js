@@ -11,6 +11,8 @@ import {
   diagnosticUrl,
   resolveLoopbackScheme
 } from "./diagnostics.js";
+import { resolveAgentEngine } from "./engine.js";
+import { exploreIntentWithEngine } from "./explorer.js";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const STEP_CAPABILITIES = {
@@ -153,15 +155,15 @@ function buildMarkdown(report) {
             `| ${markdownEscape(finding.severity)} | ${markdownEscape(finding.title)} | ${markdownEscape(finding.evidence)} |`
         )
         .join("\n")
-    : "| — | No asserted failures observed within the tested scope | — |";
+    : "| - | No asserted failures observed within the tested scope | - |";
   const workflowRows = report.observations.workflowSteps.length
     ? report.observations.workflowSteps
         .map(
           (step) =>
-            `| ${markdownEscape(step.id)} | ${markdownEscape(step.action)} | ${markdownEscape(step.status)} | ${markdownEscape(step.evidence || "—")} |`
+            `| ${markdownEscape(step.id)} | ${markdownEscape(step.action)} | ${markdownEscape(step.status)} | ${markdownEscape(step.evidence || "-")} |`
         )
         .join("\n")
-    : "| — | — | No workflow declared | — |";
+    : "| - | - | No workflow declared | - |";
   const diagnosticRows = report.invalidTestMechanics.length
     ? report.invalidTestMechanics
         .map(
@@ -169,7 +171,7 @@ function buildMarkdown(report) {
             `| ${markdownEscape(issue.id)} | ${markdownEscape(issue.title)} | ${markdownEscape(issue.remediation)} |`
         )
         .join("\n")
-    : "| — | No test-mechanics issues observed | — |";
+    : "| - | No test-mechanics issues observed | - |";
   const repairRows = report.target.repairs.length
     ? report.target.repairs
         .map(
@@ -177,7 +179,16 @@ function buildMarkdown(report) {
             `| ${markdownEscape(repair.code)} | ${markdownEscape(repair.from)} | ${markdownEscape(repair.to)} | ${repair.expectedResultChanged ? "yes" : "no"} |`
         )
         .join("\n")
-    : "| — | — | — | — |";
+    : "| - | - | - | - |";
+  const exploration = report.observations.exploration;
+  const explorationRows = exploration.steps.length
+    ? exploration.steps
+        .map(
+          (step) =>
+            `| ${markdownEscape(step.id)} | ${markdownEscape(step.status)} | ${markdownEscape(step.title || step.url)} | ${markdownEscape(step.evidence)} |`
+        )
+        .join("\n")
+    : "| - | - | No agent navigation executed | - |";
 
   return `# YellowBird scout report
 
@@ -216,6 +227,21 @@ Declared capabilities: ${report.permissions.map((permission) => `\`${permission}
 | --- | --- | --- | --- |
 ${workflowRows}
 
+## Intent exploration
+
+- Requested: ${exploration.requested ? "yes" : "no"}
+- Mode: ${exploration.mode}
+- Status: ${exploration.status}
+- Coverage: ${exploration.coverage}
+- Engine: ${exploration.engine || "not used"}
+- Planner summary: ${exploration.summary || "none"}
+
+The planner summary describes model-guided coverage. It is not product-failure evidence.
+
+| Step | Status | Page | Evidence |
+| --- | --- | --- | --- |
+${explorationRows}
+
 ## Observations
 
 - HTTP status: ${report.observations.status ?? "unavailable"}
@@ -237,8 +263,9 @@ ${report.coverageGaps.map((gap) => `- ${gap}`).join("\n")}
 3. Ensure the target is available at \`${report.target.url}\`.
 4. Run \`bun run --cwd ${JSON.stringify(dirname(report.artifacts.replayPackage))} test\`.
 
-The generated regression contains only explicit, deterministic assertions. Review it before
-committing it to the product repository.
+The generated regression contains explicit assertions and accepted read-only navigation
+steps. It does not require the planning model. Review it before committing it to the product
+repository.
 `;
 }
 
@@ -246,7 +273,7 @@ function quoteForJavaScript(value) {
   return JSON.stringify(value);
 }
 
-function buildRegression(options) {
+function buildRegression(options, explorationSteps = []) {
   const lines = [
     'import { test, expect } from "@playwright/test";',
     "",
@@ -308,6 +335,37 @@ function buildRegression(options) {
       lines.push(`  await expect(${locator}).toBeVisible();`);
     }
   });
+  explorationSteps
+    .filter((candidate) => candidate.status !== "invalid")
+    .forEach((step, index) => {
+      if (step.action === "visit") {
+        const response = `yellowbirdAgentResponse${index + 1}`;
+        lines.push(
+          `  const ${response} = await page.goto(${quoteForJavaScript(step.url)}, { waitUntil: "domcontentloaded" });`
+        );
+        if (step.httpStatus) {
+          lines.push(
+            `  expect(${response}?.status()).toBe(${step.httpStatus});`
+          );
+        }
+        return;
+      }
+      const locator =
+        step.locator?.kind === "css"
+          ? `page.locator(${quoteForJavaScript(step.locator.selector)}).first()`
+          : `page.getByRole(${quoteForJavaScript(step.locator?.role)}, { name: ${quoteForJavaScript(step.locator?.name)}, exact: true }).first()`;
+      if (step.action === "fill") {
+        lines.push(
+          `  await ${locator}.fill(${quoteForJavaScript(step.value)});`
+        );
+      } else if (step.action === "select") {
+        lines.push(
+          `  await ${locator}.selectOption(${quoteForJavaScript(step.value)});`
+        );
+      } else if (step.action === "click") {
+        lines.push(`  await ${locator}.click();`);
+      }
+    });
   if (!options.ignoreConsoleErrors) {
     lines.push("  expect(consoleErrors).toEqual([]);");
   }
@@ -395,18 +453,25 @@ async function finalizeRun(state) {
       evidence: options.target
     });
   }
+  if (state.exploration.issue) {
+    setupIssues.push(state.exploration.issue);
+  }
 
   const productEvaluated = state.browserLaunch.successful && !state.navigationError;
-  if (productEvaluated && options.expectedTitle && state.title !== options.expectedTitle) {
+  if (
+    productEvaluated &&
+    options.expectedTitle &&
+    state.assertionTitle !== options.expectedTitle
+  ) {
     findings.push({
       id: "title-mismatch",
       severity: "medium",
       title: "Page title did not match the owner assertion",
-      evidence: `expected ${JSON.stringify(options.expectedTitle)}, received ${JSON.stringify(state.title)}`
+      evidence: `expected ${JSON.stringify(options.expectedTitle)}, received ${JSON.stringify(state.assertionTitle)}`
     });
   }
   for (const text of productEvaluated ? options.expectedTexts : []) {
-    if (!state.bodyText.includes(text)) {
+    if (!state.assertionBodyText.includes(text)) {
       findings.push({
         id: "missing-text",
         severity: "medium",
@@ -464,6 +529,16 @@ async function finalizeRun(state) {
     coverageGaps.push(
       `Only the ${options.steps.length} owner-declared workflow step(s) were exercised; YellowBird did not explore beyond them.`
     );
+  } else if (options.exploreIntent) {
+    if (state.exploration.status === "completed") {
+      coverageGaps.push(
+        `The agent exercised ${state.exploration.steps.length} bounded safe same-origin interaction step(s); form submission, mutation, authentication, and cross-origin behavior were not authorized.`
+      );
+    } else {
+      coverageGaps.push(
+        "The requested intent was not fully exercised; consult the intent-exploration status and remediation."
+      );
+    }
   } else {
     coverageGaps.push(
       "This alpha inspected only the initial page load; it did not autonomously exercise workflows."
@@ -563,7 +638,8 @@ async function finalizeRun(state) {
       failedRequests,
       blockedRequests,
       serverErrors,
-      workflowSteps
+      workflowSteps,
+      exploration: state.exploration
     },
     coverageGaps,
     artifacts: {
@@ -583,7 +659,10 @@ async function finalizeRun(state) {
         ? `Bun ${process.versions.bun}`
         : `Node ${process.versions.node}`,
       browser: "Playwright Chromium",
-      agenticEngine: null
+      agenticEngine: state.exploration.engine,
+      ...(state.exploration.provenance
+        ? { engine: state.exploration.provenance }
+        : {})
     }
   };
 
@@ -602,9 +681,13 @@ async function finalizeRun(state) {
       { mode: 0o600 }
     ),
     writeFile(report.artifacts.report, buildMarkdown(report), { mode: 0o600 }),
-    writeFile(report.artifacts.regression, buildRegression(options), {
-      mode: 0o600
-    }),
+    writeFile(
+      report.artifacts.regression,
+      buildRegression(options, state.exploration.steps),
+      {
+        mode: 0o600
+      }
+    ),
     writeFile(report.artifacts.playwrightConfig, buildPlaywrightConfig(), {
       mode: 0o600
     }),
@@ -620,16 +703,32 @@ async function finalizeRun(state) {
   return report;
 }
 
-export function createScoutRunner({ launchBrowser } = {}) {
+export function createScoutRunner({
+  launchBrowser,
+  resolveEngine = resolveAgentEngine
+} = {}) {
   if (typeof launchBrowser !== "function") {
     throw new TypeError("createScoutRunner requires a launchBrowser function");
   }
+  if (typeof resolveEngine !== "function") {
+    throw new TypeError("createScoutRunner requires a resolveEngine function");
+  }
   return async function runScoutWithBrowser(input) {
-  const requestedAuthorization = authorizeScoutTarget(input.target);
-  const workflow = validateWorkflow({
-    permissions: input.permissions,
-    steps: input.steps
-  });
+    const requestedAuthorization = authorizeScoutTarget(input.target);
+    const workflow = validateWorkflow({
+      permissions: input.permissions,
+      steps: input.steps
+    });
+  const exploreIntent = Boolean(input.exploreIntent);
+  if (exploreIntent && workflow.steps.length) {
+    throw new Error(
+      "intent exploration cannot be combined with declared workflow steps"
+    );
+  }
+  const maxAgentSteps = Number(input.maxAgentSteps ?? 4);
+  if (!Number.isInteger(maxAgentSteps) || maxAgentSteps < 1 || maxAgentSteps > 20) {
+    throw new Error("max agent steps must be an integer from 1 to 20");
+  }
   const runId = `scout_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
   const outputDirectory = resolve(
     input.outputDirectory || join(".yellowbird", "scout", runId)
@@ -677,6 +776,10 @@ export function createScoutRunner({ launchBrowser } = {}) {
     expectedTexts: input.expectedTexts || [],
     permissions: workflow.permissions,
     steps: workflow.steps,
+    exploreIntent,
+    maxAgentSteps,
+    engineBaseUrl: input.engineBaseUrl,
+    engineModel: input.engineModel,
     ignoreConsoleErrors: Boolean(input.ignoreConsoleErrors),
     headed: Boolean(input.headed),
     timeoutMs
@@ -705,10 +808,25 @@ export function createScoutRunner({ launchBrowser } = {}) {
     workflowSteps: [],
     workflowFindings: [],
     invalidWorkflowSteps: [],
+    exploration: {
+      requested: exploreIntent,
+      mode: exploreIntent ? "agent-safe-interaction" : "not-requested",
+      status: exploreIntent ? "pending" : "not-requested",
+      coverage: exploreIntent ? "pending" : "not-requested",
+      summary: "",
+      steps: [],
+      pages: [],
+      engine: null,
+      capabilities: null,
+      provenance: null,
+      issue: null
+    },
     browserLaunch: { successful: false, diagnostic: null },
     navigationError: null,
     navigationDiagnostic: null,
     status: null,
+    assertionTitle: "",
+    assertionBodyText: "",
     title: "",
     bodyText: "",
     interactiveElements: [],
@@ -752,6 +870,12 @@ export function createScoutRunner({ launchBrowser } = {}) {
         reason: "browser-unavailable",
         durationMs: 0
       });
+    }
+    if (options.exploreIntent) {
+      state.exploration.status = "skipped";
+      state.exploration.coverage = "blocked";
+      state.exploration.summary =
+        "Intent exploration was skipped because the browser was unavailable.";
     }
     return finalizeRun(state);
   }
@@ -885,6 +1009,12 @@ export function createScoutRunner({ launchBrowser } = {}) {
         ...diagnosticUrl(page.url())
       });
       await page.waitForTimeout(250);
+      state.assertionTitle = await page.title().catch(() => "");
+      state.assertionBodyText = await page
+        .locator("body")
+        .innerText()
+        .then((value) => value.slice(0, 20_000))
+        .catch(() => "");
     } catch (error) {
       state.navigationError = cleanDiagnosticText(error.message);
       state.navigationDiagnostic = diagnoseNavigationError(
@@ -988,6 +1118,87 @@ export function createScoutRunner({ launchBrowser } = {}) {
           });
         } else {
           invalidWorkflowSteps.push(result);
+        }
+      }
+    }
+
+    if (options.exploreIntent) {
+      if (state.navigationError) {
+        state.exploration.status = "skipped";
+        state.exploration.coverage = "blocked";
+        state.exploration.summary =
+          "Intent exploration was skipped because initial navigation failed.";
+      } else {
+        record("info", "agent.engine.started", "Resolving an agent engine", {
+          mode: "safe-same-origin-interaction"
+        });
+        let resolvedEngine;
+        try {
+          resolvedEngine = await resolveEngine({
+            baseUrl: options.engineBaseUrl,
+            model: options.engineModel,
+            timeoutMs: Math.max(options.timeoutMs, 30_000)
+          });
+        } catch {
+          resolvedEngine = {
+            engine: null,
+            capabilities: null,
+            diagnostic: {
+              id: "agent-engine-resolution-failed",
+              classification: "test-mechanics",
+              title: "YellowBird could not resolve the configured agent engine.",
+              evidence:
+                "The engine resolver failed before returning a compatible binding.",
+              remediation:
+                "Check the engine configuration and runtime, then rerun or provide a deterministic scenario."
+            }
+          };
+        }
+        if (!resolvedEngine.engine) {
+          state.exploration.status = "inconclusive";
+          state.exploration.coverage = "blocked";
+          state.exploration.summary =
+            "No compatible agent engine was available for the requested intent.";
+          state.exploration.issue = resolvedEngine.diagnostic;
+          record(
+            "error",
+            "agent.engine.failed",
+            resolvedEngine.diagnostic.title,
+            {
+              code: resolvedEngine.diagnostic.id,
+              detail: resolvedEngine.diagnostic.evidence
+            }
+          );
+        } else {
+          const provenance = resolvedEngine.engine.provenance();
+          const engineName = `${provenance.adapter}:${provenance.modelReported}`;
+          state.exploration.engine = engineName;
+          state.exploration.provenance = provenance;
+          state.exploration.capabilities = resolvedEngine.capabilities;
+          record("info", "agent.engine.ready", "Agent engine is ready", {
+            adapter: provenance.adapter,
+            endpointClass: provenance.endpointClass,
+            model: provenance.modelReported,
+            capabilities: resolvedEngine.capabilities
+          });
+          const exploration = await exploreIntentWithEngine({
+            page,
+            intent: options.intent,
+            authorizedOrigin: authorization.origin,
+            engine: resolvedEngine.engine,
+            maxSteps: options.maxAgentSteps,
+            timeoutMs: options.timeoutMs,
+            record
+          });
+          state.exploration = {
+            ...state.exploration,
+            ...exploration,
+            requested: true,
+            mode: "agent-safe-interaction",
+            engine: engineName,
+            provenance,
+            capabilities: resolvedEngine.capabilities
+          };
         }
       }
     }

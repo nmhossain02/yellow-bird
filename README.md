@@ -4,10 +4,11 @@ YellowBird is an open-source, deploy-anywhere canary testing project. Its goal i
 to discover product failures before customers do, preserve the product owner's
 expected results, and return evidence that can be reproduced without YellowBird.
 
-The first executable slice is intentionally small: a local browser scout. It
-checks a loopback web target, captures runtime evidence, and generates a portable
-Playwright regression. The dashboard still demonstrates the larger orchestration
-model while that model is implemented incrementally.
+The executable product is a local browser scout. It checks a loopback web target,
+can explore a bounded non-submitting flow from natural-language intent, captures
+runtime evidence, and generates a portable Playwright regression. The dashboard
+still demonstrates the larger orchestration model while that model is implemented
+incrementally.
 
 ## Try the real scout
 
@@ -17,6 +18,21 @@ YellowBird uses [Bun](https://bun.sh/) 1.3 or newer.
 bun install
 bun run setup:browsers
 ```
+
+Natural-language exploration uses an OpenAI-compatible chat endpoint. By default,
+YellowBird probes Ollama at `http://127.0.0.1:11434/v1` and selects its first
+available model. For the currently tested local setup, install Ollama, make sure
+its service is running, and pull the model:
+
+```bash
+ollama pull qwen3.5:9b
+bun run doctor
+```
+
+`doctor` reports the selected model and whether strict JSON Schema output passed
+the harmless conformance probe. A scout with explicit `--intent` is
+`inconclusive` with exit code `3` if no compatible engine is available. It never
+falls back to an initial-page `clear` result that did not cover the intent.
 
 Start the deliberately broken demo product:
 
@@ -38,15 +54,15 @@ The scout exits `2` when it finds asserted failures and `3` when test mechanics
 make the result inconclusive. It writes an evidence bundle under
 `.yellowbird/scout/<run-id>/`:
 
-- `report.md` — human-readable findings, reproduction steps, and coverage gaps
-- `evidence.json` — versioned machine-readable observations and provenance
-- `page.png` — full-page visual evidence when a browser page was available
-- `regression.spec.js` — deterministic Playwright assertions suitable for review
-- `playwright.config.js` — makes the regression immediately replayable from the
+- `report.md` - human-readable findings, reproduction steps, and coverage gaps
+- `evidence.json` - versioned machine-readable observations and provenance
+- `page.png` - full-page visual evidence when a browser page was available
+- `regression.spec.js` - deterministic Playwright assertions suitable for review
+- `playwright.config.js` - makes the regression immediately replayable from the
   hidden evidence directory
-- `package.json` — pins the Playwright dependency needed to replay from any
+- `package.json` - pins the Playwright dependency needed to replay from any
   product repository
-- `diagnostics.jsonl` — ordered, run-correlated operational events conforming to
+- `diagnostics.jsonl` - ordered, run-correlated operational events conforming to
   [`schemas/diagnostic-event.v1.schema.json`](./schemas/diagnostic-event.v1.schema.json),
   with URL query values and console contents omitted
 
@@ -87,10 +103,28 @@ Markdown file and places the remaining evidence in `report.assets/`:
 cd /path/to/product
 yellowbird scout \
   --target http://127.0.0.1:3000 \
-  --intent "Assess the initial interface" \
+  --intent "Assess the initial interface and basic user flow" \
   --output yellowbird-report.md \
   --verbose
 ```
+
+An explicit `--intent` enables bounded agent exploration. Use `--no-agent` for
+an initial-page smoke check, or a versioned `--scenario` when the owner needs an
+exact workflow with mutation-capable actions and explicit assertions.
+
+The compatible endpoint can be selected per command:
+
+```bash
+yellowbird scout \
+  --target http://127.0.0.1:3000 \
+  --intent "Assess the basic setup flow" \
+  --engine-base-url http://127.0.0.1:11434/v1 \
+  --engine-model qwen3.5:9b
+```
+
+The equivalent environment variables are `YELLOWBIRD_ENGINE_BASE_URL`,
+`YELLOWBIRD_ENGINE_MODEL`, and `YELLOWBIRD_ENGINE_API_KEY`. The API key is sent
+only as a bearer token and is never written to the evidence bundle.
 
 An existing directory whose name ends in `.md` is diagnosed as legacy output;
 rename or remove it, choose a new Markdown filename, or pass a directory path
@@ -116,11 +150,26 @@ This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
 scoped run grants, sandboxing, and policy approval before they are enabled.
 
-The scout clicks and fills controls only when an owner-declared scenario requests
-those capabilities. It does not explore beyond declared steps, sign up external
-users, or use an LLM. A failed action is reported as `inconclusive`, not as a
-product pass or product bug, because selector healing has not been implemented.
-That distinction is part of the evidence contract.
+An explicit natural-language intent may visit supplied exact-origin links, fill
+eligible fields with YellowBird-owned synthetic values, select supplied options,
+and use non-submit buttons whose labels do not indicate a destructive or
+mutation-oriented action. Form submission, authentication, credentials,
+cross-origin navigation, and destructive controls are not exposed to the model.
+The model proposes one supplied element at a time; YellowBird validates and
+executes the action. Model text is coverage guidance, never product-failure
+evidence. If the intent needs an action outside this profile, the result is
+`inconclusive` instead of a false pass.
+
+Page text and the bounded control inventory are sent to the configured model
+endpoint. The default endpoint is loopback. Operators choosing a remote endpoint
+are responsible for that data boundary. Query values and console contents remain
+out of operational diagnostics.
+
+Owner-declared scenarios retain their explicit permission model for exact
+`fill`, `click`, `expectText`, and `expectVisible` steps. A failed action is
+reported as `inconclusive`, not as a product pass or product bug, because selector
+healing has not been implemented. That distinction is part of the evidence
+contract.
 
 Navigation and transport failures are also `inconclusive` test mechanics rather
 than product findings. The report provides a diagnostic code, remediation, and
@@ -175,6 +224,10 @@ local browser check.
 - Loopback-only target authorization and exact-origin browser network policy
 - Initial-page navigation with status, title, text, console, exception, failed
   request, screenshot, and interactive-element evidence
+- Intent-driven bounded exploration through a probed OpenAI-compatible local or
+  hosted endpoint
+- YellowBird-enforced same-origin action policy, synthetic form values, truthful
+  coverage accounting, engine provenance, and model-free replay
 - Permission-declared `fill`, `click`, `expectText`, and `expectVisible` workflow
   steps with `inconclusive` handling for invalid test mechanics
 - Loopback transport diagnosis and evidence-backed HTTPS-to-HTTP scheme repair
@@ -193,8 +246,9 @@ local browser check.
   customer code.
 - Dashboard findings and evidence are deterministic demo fixtures.
 - Remote target verification records proof state without making a network challenge.
-- Kimi, open-weight model endpoints, email, source provider, secret store, issue
-  tracker, and production sandbox integrations remain adapter boundaries.
+- A generic OpenAI-compatible model endpoint is real. A native hosted Kimi
+  adapter, email, source provider, secret store, issue tracker, and production
+  sandbox integrations remain adapter boundaries.
 - Dashboard authentication uses a fixed development principal.
 
 These seams are visible in API output and the UI so the product does not imply
@@ -203,10 +257,11 @@ security or coverage it has not earned.
 ## Engine direction
 
 YellowBird is Kimi-first and open-model-first, but its test domain is not coupled
-to one model. YellowBird will own the agent loop, tool authorization, evidence
-rules, and expected-result integrity. Model/runtime pairs must pass capability
-probes because an API shape alone does not guarantee equivalent tool calling,
-structured output, multimodal input, or cancellation behavior.
+to one model. The local scout now owns its first agent loop, action authorization,
+evidence rules, and expected-result integrity. The compatible adapter verifies
+strict JSON Schema output and records other capabilities as unverified. Additional
+probes remain necessary because an API shape alone does not guarantee equivalent
+tool calling, multimodal input, streaming, or cancellation behavior.
 
 See [the engine strategy report](./docs/research/004-open-model-first-engine-strategy.md).
 
