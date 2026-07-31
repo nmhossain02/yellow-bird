@@ -6,6 +6,7 @@ import { chromium } from "@playwright/test";
 import {
   cleanDiagnosticText,
   createDiagnosticRecorder,
+  diagnoseBrowserLaunchError,
   diagnoseNavigationError,
   diagnosticUrl,
   resolveLoopbackScheme
@@ -346,7 +347,284 @@ function buildReplayPackage() {
   )}\n`;
 }
 
-export async function runScout(input) {
+async function finalizeRun(state) {
+  const {
+    authorization,
+    blockedRequests,
+    consoleErrors,
+    diagnosticEvents,
+    failedRequests,
+    interactiveElements,
+    invalidWorkflowSteps,
+    options,
+    outputDirectory,
+    pageErrors,
+    record,
+    reportPath,
+    requestedAuthorization,
+    runId,
+    serverErrors,
+    startedAt,
+    targetResolution,
+    workflowFindings,
+    workflowSteps
+  } = state;
+  const findings = [];
+  const setupIssues = [];
+  if (!state.browserLaunch.successful) {
+    setupIssues.push({
+      id: state.browserLaunch.diagnostic.code,
+      classification: "test-mechanics",
+      title: state.browserLaunch.diagnostic.message,
+      evidence: state.browserLaunch.diagnostic.detail,
+      remediation: state.browserLaunch.diagnostic.remediation
+    });
+  } else if (state.navigationError) {
+    setupIssues.push({
+      id: state.navigationDiagnostic.code,
+      classification: "test-mechanics",
+      title: state.navigationDiagnostic.message,
+      evidence: state.navigationDiagnostic.detail,
+      remediation: state.navigationDiagnostic.remediation
+    });
+  } else if (state.status !== options.expectedStatus) {
+    findings.push({
+      id: "unexpected-status",
+      severity: state.status && state.status >= 500 ? "high" : "medium",
+      title: `Expected HTTP ${options.expectedStatus}, received ${state.status}`,
+      evidence: options.target
+    });
+  }
+
+  const productEvaluated = state.browserLaunch.successful && !state.navigationError;
+  if (productEvaluated && options.expectedTitle && state.title !== options.expectedTitle) {
+    findings.push({
+      id: "title-mismatch",
+      severity: "medium",
+      title: "Page title did not match the owner assertion",
+      evidence: `expected ${JSON.stringify(options.expectedTitle)}, received ${JSON.stringify(state.title)}`
+    });
+  }
+  for (const text of productEvaluated ? options.expectedTexts : []) {
+    if (!state.bodyText.includes(text)) {
+      findings.push({
+        id: "missing-text",
+        severity: "medium",
+        title: "Expected page text was not present",
+        evidence: JSON.stringify(text)
+      });
+    }
+  }
+  if (productEvaluated && !options.ignoreConsoleErrors && consoleErrors.length) {
+    findings.push({
+      id: "console-errors",
+      severity: "medium",
+      title: `${consoleErrors.length} browser console error(s) observed`,
+      evidence: consoleErrors.map((entry) => entry.text).join("; ").slice(0, 500)
+    });
+  }
+  if (productEvaluated && pageErrors.length) {
+    findings.push({
+      id: "page-errors",
+      severity: "high",
+      title: `${pageErrors.length} uncaught page exception(s) observed`,
+      evidence: pageErrors.map((entry) => entry.message).join("; ").slice(0, 500)
+    });
+  }
+  if (productEvaluated && failedRequests.length) {
+    findings.push({
+      id: "failed-requests",
+      severity: "medium",
+      title: `${failedRequests.length} same-origin request(s) failed`,
+      evidence: failedRequests.map((entry) => entry.url).join("; ").slice(0, 500)
+    });
+  }
+  const subresourceServerErrors = serverErrors.filter(
+    (entry) => entry.url !== options.target
+  );
+  if (productEvaluated && subresourceServerErrors.length) {
+    findings.push({
+      id: "http-errors",
+      severity: subresourceServerErrors.some((entry) => entry.status >= 500)
+        ? "high"
+        : "medium",
+      title: `${subresourceServerErrors.length} same-origin request(s) returned HTTP errors`,
+      evidence: subresourceServerErrors
+        .map((entry) => `${entry.status} ${entry.url}`)
+        .join("; ")
+        .slice(0, 500)
+    });
+  }
+  findings.push(...workflowFindings);
+
+  const coverageGaps = [
+    "No model or agent made pass/fail decisions. Findings come from explicit assertions and runtime signals."
+  ];
+  if (options.steps.length) {
+    coverageGaps.push(
+      `Only the ${options.steps.length} owner-declared workflow step(s) were exercised; YellowBird did not explore beyond them.`
+    );
+  } else {
+    coverageGaps.push(
+      "This alpha inspected only the initial page load; it did not autonomously exercise workflows."
+    );
+  }
+  if (interactiveElements.length) {
+    coverageGaps.push(
+      `${interactiveElements.length} interactive element(s) were inventoried; undeclared interactions were not exercised.`
+    );
+  }
+  if (invalidWorkflowSteps.length) {
+    coverageGaps.push(
+      `${invalidWorkflowSteps.length} workflow action(s) were invalid. YellowBird did not attempt selector healing.`
+    );
+  }
+  if (!productEvaluated) {
+    coverageGaps.push(
+      state.browserLaunch.successful
+        ? "The product was not evaluated because initial navigation did not complete."
+        : "The product was not evaluated because the browser was unavailable."
+    );
+  }
+  if (blockedRequests.length) {
+    coverageGaps.push(
+      `${blockedRequests.length} cross-origin request(s) were blocked by the exact-origin network policy.`
+    );
+  }
+
+  const outcome = findings.length
+    ? "attention"
+    : setupIssues.length || invalidWorkflowSteps.length
+      ? "inconclusive"
+      : "clear";
+  record("info", "run.completed", `Scout completed with outcome ${outcome}`, {
+    outcome,
+    findingCount: findings.length,
+    setupIssueCount: setupIssues.length,
+    invalidWorkflowStepCount: invalidWorkflowSteps.length
+  });
+  const report = {
+    schema: "yellowbird.scout-evidence.v1",
+    outcome,
+    intent: options.intent,
+    permissions: options.permissions,
+    run: {
+      id: runId,
+      startedAt: startedAt.toISOString(),
+      durationMs: Date.now() - startedAt.getTime()
+    },
+    target: {
+      requestedUrl: requestedAuthorization.target,
+      url: options.target,
+      origin: authorization.origin,
+      authorization: authorization.authorization,
+      repairs: targetResolution.repairs
+    },
+    assertions: {
+      expectedStatus: options.expectedStatus,
+      expectedTitle: options.expectedTitle,
+      expectedTexts: options.expectedTexts,
+      consoleErrorsAllowed: options.ignoreConsoleErrors
+    },
+    findings,
+    invalidTestMechanics: [
+      ...setupIssues,
+      ...invalidWorkflowSteps.map((step) => ({
+        id: step.id,
+        classification: "test-mechanics",
+        title: `Workflow action was invalid: ${step.id}`,
+        evidence: step.evidence,
+        remediation:
+          "Confirm the selector and declared capability. Selector healing was not attempted."
+      }))
+    ],
+    observations: {
+      status: state.status,
+      title: state.title,
+      browser: {
+        launch: {
+          successful: state.browserLaunch.successful,
+          diagnostic: state.browserLaunch.diagnostic
+        }
+      },
+      navigation: {
+        completed: productEvaluated,
+        status: state.browserLaunch.successful
+          ? state.navigationError
+            ? "failed"
+            : "completed"
+          : "skipped",
+        reason: state.browserLaunch.successful ? null : "browser-unavailable",
+        diagnostic: state.navigationDiagnostic
+      },
+      interactiveElements,
+      consoleErrors,
+      pageErrors,
+      failedRequests,
+      blockedRequests,
+      serverErrors,
+      workflowSteps
+    },
+    coverageGaps,
+    artifacts: {
+      evidence: join(outputDirectory, "evidence.json"),
+      report: reportPath,
+      screenshot: state.screenshotCaptured
+        ? join(outputDirectory, "page.png")
+        : null,
+      regression: join(outputDirectory, "regression.spec.js"),
+      playwrightConfig: join(outputDirectory, "playwright.config.js"),
+      replayPackage: join(outputDirectory, "package.json"),
+      diagnostics: join(outputDirectory, "diagnostics.jsonl")
+    },
+    provenance: {
+      runner: "yellowbird-local-scout",
+      runtime: process.versions.bun
+        ? `Bun ${process.versions.bun}`
+        : `Node ${process.versions.node}`,
+      browser: "Playwright Chromium",
+      agenticEngine: null
+    }
+  };
+
+  const writtenArtifacts = [
+    report.artifacts.evidence,
+    report.artifacts.report,
+    report.artifacts.regression,
+    report.artifacts.playwrightConfig,
+    report.artifacts.replayPackage,
+    report.artifacts.diagnostics
+  ];
+  await Promise.all([
+    writeFile(
+      report.artifacts.evidence,
+      `${JSON.stringify(report, null, 2)}\n`,
+      { mode: 0o600 }
+    ),
+    writeFile(report.artifacts.report, buildMarkdown(report), { mode: 0o600 }),
+    writeFile(report.artifacts.regression, buildRegression(options), {
+      mode: 0o600
+    }),
+    writeFile(report.artifacts.playwrightConfig, buildPlaywrightConfig(), {
+      mode: 0o600
+    }),
+    writeFile(report.artifacts.replayPackage, buildReplayPackage(), {
+      mode: 0o600
+    }),
+    writeFile(report.artifacts.diagnostics, diagnosticsJsonl(diagnosticEvents), {
+      mode: 0o600
+    })
+  ]);
+  if (report.artifacts.screenshot) writtenArtifacts.push(report.artifacts.screenshot);
+  await Promise.all(writtenArtifacts.map((path) => chmod(path, 0o600)));
+  return report;
+}
+
+export function createScoutRunner({ launchBrowser } = {}) {
+  if (typeof launchBrowser !== "function") {
+    throw new TypeError("createScoutRunner requires a launchBrowser function");
+  }
+  return async function runScoutWithBrowser(input) {
   const requestedAuthorization = authorizeScoutTarget(input.target);
   const workflow = validateWorkflow({
     permissions: input.permissions,
@@ -360,6 +638,15 @@ export async function runScout(input) {
   const timeoutMs = Number(input.timeoutMs ?? 15_000);
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
     throw new Error("timeout must be a positive number of milliseconds");
+  }
+
+  const expectedStatus = Number(input.expectedStatus ?? 200);
+  if (
+    !Number.isInteger(expectedStatus) ||
+    expectedStatus < 100 ||
+    expectedStatus > 599
+  ) {
+    throw new Error("expected status must be a valid HTTP status code");
   }
 
   const startedAt = new Date();
@@ -385,7 +672,7 @@ export async function runScout(input) {
   const options = {
     target: authorization.target,
     intent: input.intent || "Verify that the initial page is healthy",
-    expectedStatus: Number(input.expectedStatus ?? 200),
+    expectedStatus,
     expectedTitle: input.expectedTitle || null,
     expectedTexts: input.expectedTexts || [],
     permissions: workflow.permissions,
@@ -395,49 +682,78 @@ export async function runScout(input) {
     timeoutMs
   };
 
-  if (
-    !Number.isInteger(options.expectedStatus) ||
-    options.expectedStatus < 100 ||
-    options.expectedStatus > 599
-  ) {
-    throw new Error("expected status must be a valid HTTP status code");
-  }
-
   await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
   await mkdir(dirname(reportPath), { recursive: true, mode: 0o700 });
   await chmod(outputDirectory, 0o700);
 
-  const consoleErrors = [];
-  const pageErrors = [];
-  const failedRequests = [];
-  const blockedRequests = [];
-  const serverErrors = [];
-  const workflowSteps = [];
-  const workflowFindings = [];
-  const invalidWorkflowSteps = [];
-  let navigationError = null;
-  let navigationDiagnostic = null;
-  let status = null;
-  let title = "";
-  let bodyText = "";
-  let interactiveElements = [];
+  const state = {
+    requestedAuthorization,
+    targetResolution,
+    authorization,
+    options,
+    runId,
+    outputDirectory,
+    reportPath,
+    startedAt,
+    diagnosticEvents,
+    record,
+    consoleErrors: [],
+    pageErrors: [],
+    failedRequests: [],
+    blockedRequests: [],
+    serverErrors: [],
+    workflowSteps: [],
+    workflowFindings: [],
+    invalidWorkflowSteps: [],
+    browserLaunch: { successful: false, diagnostic: null },
+    navigationError: null,
+    navigationDiagnostic: null,
+    status: null,
+    title: "",
+    bodyText: "",
+    interactiveElements: [],
+    screenshotCaptured: false
+  };
+  const {
+    blockedRequests,
+    consoleErrors,
+    failedRequests,
+    invalidWorkflowSteps,
+    pageErrors,
+    serverErrors,
+    workflowFindings,
+    workflowSteps
+  } = state;
 
   record("debug", "browser.launch.started", "Launching Playwright Chromium", {
     headed: options.headed
   });
   let browser;
   try {
-    browser = await chromium.launch({ headless: !options.headed });
+    browser = await launchBrowser({ headless: !options.headed });
+    state.browserLaunch.successful = true;
     record("info", "browser.launch.completed", "Playwright Chromium launched");
   } catch (error) {
-    record("error", "browser.launch.failed", "Chromium could not be launched", {
-      detail: cleanDiagnosticText(error.message)
-    });
-    const diagnosticsPath = join(outputDirectory, "diagnostics.jsonl");
-    await writeFile(diagnosticsPath, diagnosticsJsonl(diagnosticEvents), {
-      mode: 0o600
-    });
-    throw error;
+    state.browserLaunch.diagnostic = diagnoseBrowserLaunchError(
+      error?.message || error
+    );
+    record(
+      "error",
+      "browser.launch.failed",
+      state.browserLaunch.diagnostic.message,
+      state.browserLaunch.diagnostic
+    );
+    for (const step of options.steps) {
+      workflowSteps.push({
+        id: step.id,
+        action: step.action,
+        status: "skipped",
+        evidence: "Browser unavailable",
+        reason: "browser-unavailable",
+        durationMs: 0
+      });
+    }
+    return finalizeRun(state);
   }
   try {
     const context = await browser.newContext({
@@ -563,29 +879,29 @@ export async function runScout(input) {
         waitUntil: "domcontentloaded",
         timeout: options.timeoutMs
       });
-      status = response?.status() ?? null;
+      state.status = response?.status() ?? null;
       record("info", "navigation.completed", "Initial navigation completed", {
-        status,
+        status: state.status,
         ...diagnosticUrl(page.url())
       });
       await page.waitForTimeout(250);
     } catch (error) {
-      navigationError = cleanDiagnosticText(error.message);
-      navigationDiagnostic = diagnoseNavigationError(
-        navigationError,
+      state.navigationError = cleanDiagnosticText(error.message);
+      state.navigationDiagnostic = diagnoseNavigationError(
+        state.navigationError,
         options.target
       );
       record(
         "error",
         "navigation.failed",
-        navigationDiagnostic.message,
-        navigationDiagnostic
+        state.navigationDiagnostic.message,
+        state.navigationDiagnostic
       );
     }
 
     for (const step of options.steps) {
       const stepStartedAt = Date.now();
-      if (navigationError) {
+      if (state.navigationError) {
         workflowSteps.push({
           id: step.id,
           action: step.action,
@@ -676,7 +992,7 @@ export async function runScout(input) {
       }
     }
 
-    title = await page.title().catch(() => "");
+    state.title = await page.title().catch(() => "");
     const snapshot = await page
       .evaluate(() => {
         const selector = "a, button, input, select, textarea";
@@ -700,233 +1016,23 @@ export async function runScout(input) {
         };
       })
       .catch(() => ({ bodyText: "", interactiveElements: [] }));
-    bodyText = snapshot.bodyText;
-    interactiveElements = snapshot.interactiveElements;
+    state.bodyText = snapshot.bodyText;
+    state.interactiveElements = snapshot.interactiveElements;
     await page.screenshot({
       path: join(outputDirectory, "page.png"),
       fullPage: true,
       timeout: Math.max(options.timeoutMs, 5_000)
     });
+    state.screenshotCaptured = true;
   } finally {
     await browser.close();
     record("debug", "browser.closed", "Playwright Chromium closed");
   }
 
-  const findings = [];
-  const setupIssues = [];
-  if (navigationError) {
-    setupIssues.push({
-      id: navigationDiagnostic.code,
-      classification: "test-mechanics",
-      title: navigationDiagnostic.message,
-      evidence: navigationDiagnostic.detail,
-      remediation: navigationDiagnostic.remediation
-    });
-  } else if (status !== options.expectedStatus) {
-    findings.push({
-      id: "unexpected-status",
-      severity: status && status >= 500 ? "high" : "medium",
-      title: `Expected HTTP ${options.expectedStatus}, received ${status}`,
-      evidence: options.target
-    });
-  }
-  if (!navigationError && options.expectedTitle && title !== options.expectedTitle) {
-    findings.push({
-      id: "title-mismatch",
-      severity: "medium",
-      title: "Page title did not match the owner assertion",
-      evidence: `expected ${JSON.stringify(options.expectedTitle)}, received ${JSON.stringify(title)}`
-    });
-  }
-  for (const text of navigationError ? [] : options.expectedTexts) {
-    if (!bodyText.includes(text)) {
-      findings.push({
-        id: "missing-text",
-        severity: "medium",
-        title: "Expected page text was not present",
-        evidence: JSON.stringify(text)
-      });
-    }
-  }
-  if (!navigationError && !options.ignoreConsoleErrors && consoleErrors.length) {
-    findings.push({
-      id: "console-errors",
-      severity: "medium",
-      title: `${consoleErrors.length} browser console error(s) observed`,
-      evidence: consoleErrors.map((entry) => entry.text).join("; ").slice(0, 500)
-    });
-  }
-  if (!navigationError && pageErrors.length) {
-    findings.push({
-      id: "page-errors",
-      severity: "high",
-      title: `${pageErrors.length} uncaught page exception(s) observed`,
-      evidence: pageErrors.map((entry) => entry.message).join("; ").slice(0, 500)
-    });
-  }
-  if (!navigationError && failedRequests.length) {
-    findings.push({
-      id: "failed-requests",
-      severity: "medium",
-      title: `${failedRequests.length} same-origin request(s) failed`,
-      evidence: failedRequests.map((entry) => entry.url).join("; ").slice(0, 500)
-    });
-  }
-  const subresourceServerErrors = serverErrors.filter(
-    (entry) => entry.url !== options.target
-  );
-  if (!navigationError && subresourceServerErrors.length) {
-    findings.push({
-      id: "http-errors",
-      severity: subresourceServerErrors.some((entry) => entry.status >= 500)
-        ? "high"
-        : "medium",
-      title: `${subresourceServerErrors.length} same-origin request(s) returned HTTP errors`,
-      evidence: subresourceServerErrors
-        .map((entry) => `${entry.status} ${entry.url}`)
-        .join("; ")
-        .slice(0, 500)
-    });
-  }
-  findings.push(...workflowFindings);
-
-  const coverageGaps = [
-    "No model or agent made pass/fail decisions. Findings come from explicit assertions and runtime signals."
-  ];
-  if (options.steps.length) {
-    coverageGaps.push(
-      `Only the ${options.steps.length} owner-declared workflow step(s) were exercised; YellowBird did not explore beyond them.`
-    );
-  } else {
-    coverageGaps.push(
-      "This alpha inspected only the initial page load; it did not autonomously exercise workflows."
-    );
-  }
-  if (interactiveElements.length) {
-    coverageGaps.push(
-      `${interactiveElements.length} interactive element(s) were inventoried; undeclared interactions were not exercised.`
-    );
-  }
-  if (invalidWorkflowSteps.length) {
-    coverageGaps.push(
-      `${invalidWorkflowSteps.length} workflow action(s) were invalid. YellowBird did not attempt selector healing.`
-    );
-  }
-  if (navigationError) {
-    coverageGaps.push(
-      "The product was not evaluated because initial navigation did not complete."
-    );
-  }
-  if (blockedRequests.length) {
-    coverageGaps.push(
-      `${blockedRequests.length} cross-origin request(s) were blocked by the exact-origin network policy.`
-    );
-  }
-
-  const outcome = findings.length
-    ? "attention"
-    : setupIssues.length || invalidWorkflowSteps.length
-      ? "inconclusive"
-      : "clear";
-  record("info", "run.completed", `Scout completed with outcome ${outcome}`, {
-    outcome,
-    findingCount: findings.length,
-    setupIssueCount: setupIssues.length,
-    invalidWorkflowStepCount: invalidWorkflowSteps.length
-  });
-  const report = {
-    schema: "yellowbird.scout-evidence.v1",
-    outcome,
-    intent: options.intent,
-    permissions: options.permissions,
-    run: {
-      id: runId,
-      startedAt: startedAt.toISOString(),
-      durationMs: Date.now() - startedAt.getTime()
-    },
-    target: {
-      requestedUrl: requestedAuthorization.target,
-      url: options.target,
-      origin: authorization.origin,
-      authorization: authorization.authorization,
-      repairs: targetResolution.repairs
-    },
-    assertions: {
-      expectedStatus: options.expectedStatus,
-      expectedTitle: options.expectedTitle,
-      expectedTexts: options.expectedTexts,
-      consoleErrorsAllowed: options.ignoreConsoleErrors
-    },
-    findings,
-    invalidTestMechanics: [
-      ...setupIssues,
-      ...invalidWorkflowSteps.map((step) => ({
-        id: step.id,
-        classification: "test-mechanics",
-        title: `Workflow action was invalid: ${step.id}`,
-        evidence: step.evidence,
-        remediation:
-          "Confirm the selector and declared capability. Selector healing was not attempted."
-      }))
-    ],
-    observations: {
-      status,
-      title,
-      navigation: {
-        completed: !navigationError,
-        diagnostic: navigationDiagnostic
-      },
-      interactiveElements,
-      consoleErrors,
-      pageErrors,
-      failedRequests,
-      blockedRequests,
-      serverErrors,
-      workflowSteps
-    },
-    coverageGaps,
-    artifacts: {
-      evidence: join(outputDirectory, "evidence.json"),
-      report: reportPath,
-      screenshot: join(outputDirectory, "page.png"),
-      regression: join(outputDirectory, "regression.spec.js"),
-      playwrightConfig: join(outputDirectory, "playwright.config.js"),
-      replayPackage: join(outputDirectory, "package.json"),
-      diagnostics: join(outputDirectory, "diagnostics.jsonl")
-    },
-    provenance: {
-      runner: "yellowbird-local-scout",
-      runtime: process.versions.bun
-        ? `Bun ${process.versions.bun}`
-        : `Node ${process.versions.node}`,
-      browser: "Playwright Chromium",
-      agenticEngine: null
-    }
+  return finalizeRun(state);
   };
-
-  await Promise.all([
-    writeFile(
-      report.artifacts.evidence,
-      `${JSON.stringify(report, null, 2)}\n`,
-      { mode: 0o600 }
-    ),
-    writeFile(report.artifacts.report, buildMarkdown(report), { mode: 0o600 }),
-    writeFile(report.artifacts.regression, buildRegression(options), {
-      mode: 0o600
-    }),
-    writeFile(report.artifacts.playwrightConfig, buildPlaywrightConfig(), {
-      mode: 0o600
-    }),
-    writeFile(report.artifacts.replayPackage, buildReplayPackage(), {
-      mode: 0o600
-    }),
-    writeFile(report.artifacts.diagnostics, diagnosticsJsonl(diagnosticEvents), {
-      mode: 0o600
-    })
-  ]);
-  await Promise.all(
-    Object.values(report.artifacts).map((path) => chmod(path, 0o600))
-  );
-
-  return report;
 }
+
+export const runScout = createScoutRunner({
+  launchBrowser: (options) => chromium.launch(options)
+});

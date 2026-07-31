@@ -195,3 +195,40 @@ export function diagnoseNavigationError(error, target) {
     detail
   };
 }
+
+export function diagnoseBrowserLaunchError(error) {
+  const detail = redactUrlValues(cleanDiagnosticText(error));
+  const lower = detail.toLowerCase();
+  if (
+    lower.includes("executable doesn't exist") ||
+    lower.includes("executable does not exist") ||
+    lower.includes("browser was not found")
+  ) {
+    return {
+      code: "browser-executable-missing",
+      message: "The Playwright Chromium executable is unavailable.",
+      remediation: "Install Chromium with `bun run setup:browsers`, then rerun the scout.",
+      detail
+    };
+  }
+  if (
+    lower.includes("host system is missing dependencies") ||
+    lower.includes("error while loading shared libraries") ||
+    lower.includes("missing dependencies to run browsers")
+  ) {
+    return {
+      code: "browser-host-dependencies-missing",
+      message: "Chromium cannot start because required host dependencies are unavailable.",
+      remediation:
+        "Install the Playwright Chromium host dependencies for this operating system, then rerun the scout.",
+      detail
+    };
+  }
+  return {
+    code: "browser-launch-failed",
+    message: "Playwright Chromium could not be launched.",
+    remediation:
+      "Review diagnostics.jsonl, confirm Chromium can start on this host, then rerun the scout.",
+    detail
+  };
+}

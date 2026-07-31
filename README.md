@@ -120,6 +120,16 @@ than product findings. The report provides a diagnostic code, remediation, and
 structured event log instead of duplicating the failed navigation as a product
 request failure.
 
+Browser launch failures follow the same contract. YellowBird distinguishes a
+missing Chromium executable, missing host dependencies, and other launch
+failures, then writes the report, evidence, diagnostics, generated regression,
+Playwright configuration, and replay package. Navigation and declared workflow
+steps are marked skipped with reason `browser-unavailable`, and the report says
+the product was not evaluated. Since no page existed, `artifacts.screenshot` is
+`null` and no screenshot file is claimed. Applications embedding the scout can
+inject a browser launcher with `createScoutRunner({ launchBrowser })`;
+`runScout(input)` uses the real Playwright Chromium launcher.
+
 ## Run the dashboard
 
 ```bash

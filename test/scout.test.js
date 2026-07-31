@@ -6,18 +6,21 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, test } from "bun:test";
 import {
   authorizeScoutTarget,
+  createScoutRunner,
   runScout,
   validateWorkflow
 } from "../src/scout/scout.js";
+import { diagnoseBrowserLaunchError } from "../src/scout/diagnostics.js";
 import { resolveOutputOption } from "../src/scout/output.js";
 
 let server;
 let target;
 
-async function runCommand(command, cwd) {
+async function runCommand(command, cwd, env) {
   const child = Bun.spawn({
     cmd: command,
     cwd,
+    env: env ? { ...process.env, ...env } : undefined,
     stdout: "pipe",
     stderr: "pipe"
   });
@@ -92,6 +95,102 @@ test("workflow capabilities must be declared before a run", () => {
       }),
     /requires undeclared capability browser.click/
   );
+});
+
+test("browser launch errors have actionable test-mechanics diagnostics", () => {
+  assert.equal(
+    diagnoseBrowserLaunchError("Executable doesn't exist at /tmp/chromium").code,
+    "browser-executable-missing"
+  );
+  assert.equal(
+    diagnoseBrowserLaunchError(
+      "Host system is missing dependencies to run browsers"
+    ).code,
+    "browser-host-dependencies-missing"
+  );
+  assert.equal(
+    diagnoseBrowserLaunchError("spawn failed unexpectedly").code,
+    "browser-launch-failed"
+  );
+});
+
+test("browser launch failure finalizes an inconclusive run", async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-launch-"));
+  const runWithUnavailableBrowser = createScoutRunner({
+    launchBrowser: async () => {
+      throw new Error(
+        `Executable doesn't exist at /tmp/chromium for ${target}/?secret=hidden`
+      );
+    }
+  });
+  const report = await runWithUnavailableBrowser({
+    target,
+    expectedTexts: ["Checkout ready"],
+    permissions: ["browser.navigate", "browser.read", "browser.click"],
+    steps: [{ id: "checkout", action: "click", selector: "#checkout" }],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.deepEqual(report.findings, []);
+  assert.equal(report.invalidTestMechanics[0].id, "browser-executable-missing");
+  assert.equal(report.observations.browser.launch.successful, false);
+  assert.equal(report.observations.navigation.status, "skipped");
+  assert.equal(report.observations.navigation.reason, "browser-unavailable");
+  assert.deepEqual(
+    report.observations.workflowSteps.map(({ status, reason }) => ({ status, reason })),
+    [{ status: "skipped", reason: "browser-unavailable" }]
+  );
+  assert.ok(
+    report.coverageGaps.some((gap) =>
+      gap.includes("product was not evaluated because the browser was unavailable")
+    )
+  );
+  assert.equal(report.artifacts.screenshot, null);
+  await assert.rejects(stat(join(outputDirectory, "page.png")));
+  await Promise.all(
+    Object.entries(report.artifacts)
+      .filter(([name]) => name !== "screenshot")
+      .map(([, path]) => stat(path))
+  );
+
+  const events = (await readFile(report.artifacts.diagnostics, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    events.slice(-2).map((event) => event.event),
+    ["browser.launch.failed", "run.completed"]
+  );
+  assert.doesNotMatch(JSON.stringify(events), /secret=hidden/);
+});
+
+test("CLI persists an inconclusive run when Chromium is not installed", async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-cli-launch-"));
+  const emptyBrowserDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-empty-browsers-")
+  );
+  const result = await runCommand(
+    [
+      process.execPath,
+      resolve("bin/yellowbird.js"),
+      "scout",
+      "--target",
+      target,
+      "--output",
+      outputDirectory
+    ],
+    resolve("."),
+    { PLAYWRIGHT_BROWSERS_PATH: emptyBrowserDirectory }
+  );
+
+  assert.equal(result.exitCode, 3, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /browser-executable-missing/);
+  const evidence = JSON.parse(
+    await readFile(join(outputDirectory, "evidence.json"), "utf8")
+  );
+  assert.equal(evidence.outcome, "inconclusive");
+  assert.equal(evidence.artifacts.screenshot, null);
 });
 
 test("scout writes portable evidence and a deterministic regression", async () => {

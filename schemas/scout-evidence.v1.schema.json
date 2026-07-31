@@ -12,6 +12,7 @@
     "target",
     "assertions",
     "findings",
+    "invalidTestMechanics",
     "observations",
     "coverageGaps",
     "artifacts",
@@ -132,7 +133,49 @@
       }
     },
     "observations": {
-      "type": "object"
+      "type": "object",
+      "required": ["browser", "navigation", "workflowSteps"],
+      "properties": {
+        "browser": {
+          "type": "object",
+          "required": ["launch"],
+          "properties": {
+            "launch": {
+              "type": "object",
+              "required": ["successful", "diagnostic"],
+              "properties": {
+                "successful": { "type": "boolean" },
+                "diagnostic": { "type": ["object", "null"] }
+              }
+            }
+          }
+        },
+        "navigation": {
+          "type": "object",
+          "required": ["completed", "status", "reason", "diagnostic"],
+          "properties": {
+            "completed": { "type": "boolean" },
+            "status": { "enum": ["completed", "failed", "skipped"] },
+            "reason": { "type": ["string", "null"] },
+            "diagnostic": { "type": ["object", "null"] }
+          }
+        },
+        "workflowSteps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "action", "status", "evidence", "durationMs"],
+            "properties": {
+              "id": { "type": "string" },
+              "action": { "type": "string" },
+              "status": { "enum": ["passed", "failed", "invalid", "skipped"] },
+              "evidence": { "type": "string" },
+              "reason": { "type": "string" },
+              "durationMs": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
     },
     "coverageGaps": {
       "type": "array",
@@ -145,9 +188,16 @@
         "report",
         "screenshot",
         "regression",
-        "playwrightConfig"
+        "playwrightConfig",
+        "replayPackage",
+        "diagnostics"
       ],
       "properties": {
+        "evidence": { "type": "string" },
+        "report": { "type": "string" },
+        "screenshot": { "type": ["string", "null"] },
+        "regression": { "type": "string" },
+        "playwrightConfig": { "type": "string" },
         "diagnostics": { "type": "string" },
         "replayPackage": { "type": "string" }
       }
