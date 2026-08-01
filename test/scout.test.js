@@ -7,7 +7,6 @@ import { afterAll, beforeAll, test } from "bun:test";
 import {
   authorizeScoutTarget,
   createScoutRunner,
-  runScout,
   validateWorkflow
 } from "../src/scout/scout.js";
 import {
@@ -218,6 +217,7 @@ beforeAll(async () => {
           <body>
             <a href="http://localhost:${server.address().port}/agent-flow">External setup</a>
             <a href="/login">Sign in</a>
+            <a href="/auth">Account help</a>
             <form action="/create-monitor">
               <label>Name <input name="name"></label>
               <label>Password <input name="password" type="password"></label>
@@ -349,6 +349,7 @@ beforeAll(async () => {
           <body>
             <p>${"Oversized body content ".repeat(10_000)}</p>
             <select aria-label="Inspect choices">${options}</select>
+            <button type="button">View ${"padding ".repeat(60)} delete account</button>
             <a href="/agent-flow">Setup route</a>
           </body>
         </html>`);
@@ -400,6 +401,10 @@ async function launchSharedBrowser() {
     }
   };
 }
+
+const runSharedScout = createScoutRunner({
+  launchBrowser: launchSharedBrowser
+});
 
 function createAgentRunner(decide, resolveEngineOverride) {
   return createScoutRunner({
@@ -1260,6 +1265,12 @@ test("agent snapshots bound page fields, select options, and total prompt size",
   assert.equal(select.options.length, 40);
   assert.ok(select.options.every((option) => option.label.length <= 120));
   assert.ok(select.options.every((option) => option.value.length <= 200));
+  assert.equal(
+    firstPlannerInput.page.availableElements.some(
+      (element) => element.allowedAction === "click"
+    ),
+    false
+  );
   assert.ok(JSON.stringify(firstPlannerInput.page).length < 50_000);
   assert.equal(report.observations.exploration.steps.length, 1);
 });
@@ -1849,7 +1860,7 @@ test(
 
 test("scout writes portable evidence and a deterministic regression", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-clear-"));
-  const report = await runScout({
+  const report = await runSharedScout({
     target,
     expectedTitle: "Feather Shop",
     expectedTexts: ["Checkout ready"],
@@ -1927,7 +1938,7 @@ test("historical v1 scout evidence remains valid", async () => {
 
 test("scout reports explicit failures without changing expected results", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-attention-"));
-  const report = await runScout({
+  const report = await runSharedScout({
     target: `${target}/failing`,
     expectedTitle: "Feather Shop",
     expectedTexts: ["Checkout ready"],
@@ -1949,7 +1960,7 @@ test("scout repairs a loopback HTTPS-to-HTTP transport mismatch with diagnostics
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-repair-"));
   const reportPath = join(outputDirectory, "price-scout.md");
   const requestedTarget = `${target.replace("http:", "https:")}/?token=not-for-logs`;
-  const report = await runScout({
+  const report = await runSharedScout({
     target: requestedTarget,
     expectedTitle: "Feather Shop",
     expectedTexts: ["Checkout ready"],
@@ -2007,7 +2018,7 @@ test("navigation setup failures are inconclusive and not duplicate product findi
   });
 
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-unavailable-"));
-  const report = await runScout({
+  const report = await runSharedScout({
     target: `http://127.0.0.1:${unavailablePort}`,
     timeoutMs: 250,
     outputDirectory
@@ -2042,7 +2053,7 @@ test("a markdown output option separates the report from its evidence bundle", a
 
 test("scout executes a permission-declared workflow and generates its regression", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-workflow-"));
-  const report = await runScout({
+  const report = await runSharedScout({
     target,
     intent: "Prepare an order",
     permissions: [
@@ -2090,7 +2101,7 @@ test("scout executes a permission-declared workflow and generates its regression
 
 test("an unexecutable owner action is inconclusive rather than a product pass", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-invalid-"));
-  const report = await runScout({
+  const report = await runSharedScout({
     target,
     permissions: ["browser.navigate", "browser.read", "browser.click"],
     steps: [

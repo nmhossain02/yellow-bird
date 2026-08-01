@@ -8,13 +8,11 @@ const SAFE_FILL_TYPES = new Set([
   "text",
   "url"
 ]);
-export const PROHIBITED_AGENT_ACTION_PATTERN = String.raw`\b(?:accept|activate|add|apply|approve|authenticate|authorize|buy|check[ -]?(?:now|out)|compile|confirm|create|delete|log[ -]?(?:in|out)|order|pay|pause|purchase|register|reject|remove|resume|run|save|sign[ -]?(?:in|out|up)|submit|subscribe|update|upload)\b`;
+export const PROHIBITED_AGENT_ACTION_PATTERN = String.raw`\b(?:accept|activate|add|apply|approve|auth(?:enticate|orize)?|buy|check[ -]?(?:now|out)|compile|confirm|create|delete|log[ -]?(?:in|out)|order|pay|pause|purchase|register|reject|remove|resume|run|save|sign[ -]?(?:in|out|up)|submit|subscribe|update|upload)\b`;
 const PROHIBITED_ACTION_TEXT = new RegExp(
   PROHIBITED_AGENT_ACTION_PATTERN,
   "i"
 );
-const AUTHENTICATION_CONTEXT =
-  /\b(?:auth(?:enticate|orize)?|log[ -]?(?:in|out)|register|sign[ -]?(?:in|out|up))\b/i;
 const READ_ONLY_BUTTON_TEXT =
   /^\s*(?:collapse|details?|expand|hide|inspect|preview|reveal|show|toggle|view)\b/i;
 const SNAPSHOT_LIMITS = Object.freeze({
@@ -83,12 +81,12 @@ function hasProhibitedSemantics(element) {
     element.label,
     element.name,
     element.ariaLabel,
-    element.href
+    element.href,
+    element.formAction,
+    element.pageUrl
   ];
   return (
     element.formHasPassword ||
-    AUTHENTICATION_CONTEXT.test(element.formAction || "") ||
-    AUTHENTICATION_CONTEXT.test(element.pageUrl || "") ||
     values.some((value) => {
       if (!value) return false;
       try {
@@ -191,8 +189,17 @@ function syntheticValue(element) {
 }
 
 async function snapshotPage(page, authorizedOrigin) {
-  const raw = await page.evaluate((limits) => {
+  const raw = await page.evaluate(({ limits, prohibitedPattern }) => {
     let remainingCharacters = limits.totalCharacters;
+    const prohibited = new RegExp(prohibitedPattern, "i");
+    const hasProhibitedText = (value) => {
+      if (!value) return false;
+      try {
+        return prohibited.test(decodeURIComponent(String(value)));
+      } catch {
+        return prohibited.test(String(value));
+      }
+    };
     const takeText = (value, maximum) => {
       const text = String(value ?? "");
       const length = Math.min(text.length, maximum, remainingCharacters);
@@ -216,9 +223,7 @@ async function snapshotPage(page, authorizedOrigin) {
       ...document.querySelectorAll("a[href], button, input, textarea, select")
     ]
       .slice(0, limits.elementCount)
-      .map((element, index) => {
-        const ref = `element-${index + 1}`;
-        element.setAttribute("data-yellowbird-agent-ref", ref);
+      .flatMap((element, index) => {
         const tag = element.tagName.toLowerCase();
         const label =
           element.getAttribute("aria-label") ||
@@ -239,6 +244,25 @@ async function snapshotPage(page, authorizedOrigin) {
                   ? "spinbutton"
                   : "textbox";
         const form = element.form || element.closest("form");
+        const safetyFields = [
+          [label, limits.fieldText],
+          [element.getAttribute("name"), limits.fieldText],
+          [element.getAttribute("aria-label"), limits.fieldText],
+          [element.href, limits.url],
+          [form?.action, limits.url],
+          [window.location.href, limits.url]
+        ].filter(([value]) => value !== null && value !== undefined);
+        if (
+          form?.querySelector('input[type="password"]') ||
+          safetyFields.some(
+            ([value, maximum]) =>
+              String(value).length > maximum || hasProhibitedText(value)
+          )
+        ) {
+          return [];
+        }
+        const ref = `element-${index + 1}`;
+        element.setAttribute("data-yellowbird-agent-ref", ref);
         const options =
           tag === "select"
             ? [...element.options]
@@ -261,7 +285,7 @@ async function snapshotPage(page, authorizedOrigin) {
                       ];
                 })
             : [];
-        return {
+        return [{
           ref,
           tag,
           role,
@@ -282,10 +306,13 @@ async function snapshotPage(page, authorizedOrigin) {
             : null,
           formHasPassword: Boolean(form?.querySelector('input[type="password"]')),
           options
-        };
+        }];
       });
     return { url, title, bodyText, elements };
-  }, SNAPSHOT_LIMITS);
+  }, {
+    limits: SNAPSHOT_LIMITS,
+    prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN
+  });
   const elements = [];
   for (const rawElement of raw.elements) {
     const action = elementAction(
