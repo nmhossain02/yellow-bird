@@ -37,9 +37,9 @@ Yellow Bird will be **Kimi-first and open-model-first, but model-independent**.
 The initial implementation order is:
 
 1. a Yellow Bird-owned agent loop and normalized engine contract;
-2. a Moonshot-hosted Kimi adapter;
-3. a generic OpenAI-compatible endpoint adapter for customer-hosted Kimi and other open-weight models;
-4. conformance probes and capability manifests for every configured model/runtime pair;
+2. a generic OpenAI-compatible endpoint adapter for customer-hosted Kimi and other open-weight models;
+3. conformance probes and capability manifests for every configured model/runtime pair;
+4. a Moonshot-hosted Kimi adapter;
 5. additional native provider adapters only where the common protocol loses a capability Yellow Bird needs;
 6. subscription-backed agent CLIs as an optional local compatibility tier, not the core engine.
 
@@ -256,9 +256,9 @@ Kimi's frontier open weights are large. Kimi K3 has 2.8 trillion total parameter
 
 The same capability probes decide whether a smaller local model is suitable for a particular run profile. Deterministic scenarios may need little or no agent inference; exploratory, multimodal, and adversarial profiles may require a stronger binding.
 
-### 4. Model output is not evidence by itself
+### 4. Model output does not create findings or assertions
 
-Kimi or another model may identify a promising failure, but Yellow Bird reports a product bug only after collecting target observations and replayable actions. A model assertion without target evidence becomes a hypothesis or an inconclusive result.
+Kimi or another model may choose where to inspect, but it does not create product findings or change owner assertions. Yellow Bird reports a product bug only from owner-defined assertions and runtime signals backed by target observations and replayable actions. Model text remains coverage guidance rather than a finding or hypothesis.
 
 For high-severity findings, configurable verification should support:
 

@@ -378,13 +378,13 @@ export async function resolveAgentEngine(config = {}) {
         unavailable && explicitlyConfigured
           ? "The configured agent engine is unavailable."
           : unavailable
-          ? "No compatible local agent engine is available."
-          : "The configured agent engine could not be used.",
+            ? "No compatible local agent engine is available."
+            : "The configured agent engine could not be used.",
         unavailable && explicitlyConfigured
           ? "Start the configured engine endpoint and check its URL, credentials, and model, then rerun the scout."
           : unavailable
             ? "Start Ollama with a tool-capable model, or set YELLOWBIRD_ENGINE_BASE_URL and YELLOWBIRD_ENGINE_MODEL."
-          : "Check the engine endpoint, model name, credentials, and structured-output support, then rerun the scout.",
+            : "Check the engine endpoint, model name, credentials, and structured-output support, then rerun the scout.",
         detail
       )
     };

@@ -75,8 +75,9 @@ The original
 remains available unchanged for historical evidence, so integrations can migrate
 between explicit contract versions without depending on YellowBird internals.
 
-The demo has a fixed state at `http://127.0.0.1:4321/?fixed`, so the same command
-with that target should complete with `clear`.
+The demo has a fixed state at `http://127.0.0.1:4321/?fixed`. To verify the fixed
+assertions as an initial-page smoke check, use that target and add `--no-agent`;
+the run should complete with `clear`.
 
 To run a real multi-step canary, use the versioned example scenario:
 
@@ -111,7 +112,8 @@ yellowbird scout \
 ```
 
 Outside a versioned scenario, an explicit `--intent` enables bounded agent
-exploration. The interaction budget defaults to four steps; `--max-agent-steps`
+exploration. `--agent` opts into the same loop with the default initial-page
+intent. The interaction budget defaults to four steps; `--max-agent-steps`
 accepts values from `1` through `20`. Use `--no-agent` for an initial-page smoke
 check, or a versioned `--scenario` when the owner needs an exact workflow with
 mutation-capable actions and explicit assertions.
@@ -163,18 +165,22 @@ outbound WebSocket messages throughout agent exploration. Form submission,
 authentication, credential use, cross-origin navigation, and destructive
 controls are not available to the model as actions. The model proposes one
 supplied element at a time; YellowBird validates and executes the action. Model
-text is coverage guidance, never product-failure evidence. Partial planner
-coverage remains partial unless a named YellowBird-owned profile satisfies every
-machine-readable observed criterion. The initial-interface basic-flow profile,
-for example, requires the initial page, a passed visit to a distinct authorized
-route, safe controls observed on that destination, and no failed agent action.
-An intent needing server-side mutation or another action outside this profile
-produces an `inconclusive` result instead of a false pass.
+text is coverage guidance, never product-failure evidence. An intent-exploration
+run can be `clear` only after an explicit planner completion with `covered`
+coverage and at least one passed action, or when a named YellowBird-owned profile
+satisfies every machine-readable observed criterion. The initial-interface
+basic-flow profile, for example, requires the initial page, a passed visit to a
+distinct authorized route, safe controls observed on that destination, and no
+failed agent action. An intent needing server-side mutation or another action
+outside the safe interaction authority produces an `inconclusive` result instead
+of a false pass.
 
-Page text and the bounded control inventory are sent to the configured model
-endpoint. The default endpoint is loopback. Operators choosing a remote endpoint
-are responsible for that data boundary. Query values and console contents remain
-out of operational diagnostics.
+The current page URL, title, text, and bounded control inventory, including
+supplied link URLs and select options, are sent to the configured model endpoint.
+URLs are sent exactly and can include query values. The default endpoint is
+loopback. Operators choosing a remote endpoint are responsible for that data
+boundary. Query values and console contents remain out of operational
+diagnostics.
 
 Owner-declared scenarios retain their explicit permission model for exact
 `fill`, `click`, `expectText`, and `expectVisible` steps. A failed action is

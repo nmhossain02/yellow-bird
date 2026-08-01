@@ -612,7 +612,7 @@ export async function exploreIntentWithEngine({
           { round, elementRef: fallback.ref, action: fallback.allowedAction }
         );
       } else {
-      feedback =
+        feedback =
           "Finish is invalid because no browser action was exercised. Choose action act and select one supplied allowedAction visit, preferring a New, Start, or Setup path that materially assesses the requested flow.";
         continue;
       }
