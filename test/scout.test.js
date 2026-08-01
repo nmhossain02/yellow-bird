@@ -26,7 +26,9 @@ let sharedBrowser;
 let mutationRequestCount = 0;
 let readMutationRequestCount = 0;
 let delayedReadMutationRequestCount = 0;
+let initialVisitReadRequestCount = 0;
 let initialDelayedVisitMutationRequestCount = 0;
+let visitReadRequestCount = 0;
 let delayedVisitMutationRequestCount = 0;
 let visitEventSourceRequestCount = 0;
 let visitWebSocketUpgradeCount = 0;
@@ -142,11 +144,29 @@ beforeAll(async () => {
     }
     if (
       request.method === "GET" &&
+      request.url === "/agent-initial-visit-data"
+    ) {
+      initialVisitReadRequestCount += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+      return;
+    }
+    if (
+      request.method === "GET" &&
       request.url === "/agent-initial-delayed-visit-mutation"
     ) {
       initialDelayedVisitMutationRequestCount += 1;
       response.writeHead(204);
       response.end();
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      request.url === "/agent-visit-data"
+    ) {
+      visitReadRequestCount += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
       return;
     }
     if (
@@ -339,6 +359,7 @@ beforeAll(async () => {
           <body>
             <a href="/agent-delayed-visit-destination">Setup route</a>
             <script>
+              fetch("/agent-initial-visit-data");
               setTimeout(() => {
                 fetch("/agent-initial-delayed-visit-mutation");
               }, 200);
@@ -354,6 +375,7 @@ beforeAll(async () => {
           <body>
             <input name="query" aria-label="Query">
             <script>
+              fetch("/agent-visit-data");
               const events = new EventSource("/agent-visit-events");
               events.onmessage = () => events.close();
               setTimeout(() => {
@@ -1393,8 +1415,10 @@ test("agent action guards block effects delayed between planning rounds", async 
   );
 });
 
-test("visit authority blocks delayed active requests in live and replay", async () => {
+test("visit authority allows bounded load requests and blocks delayed effects in live and replay", async () => {
+  initialVisitReadRequestCount = 0;
   initialDelayedVisitMutationRequestCount = 0;
+  visitReadRequestCount = 0;
   delayedVisitMutationRequestCount = 0;
   visitEventSourceRequestCount = 0;
   visitWebSocketUpgradeCount = 0;
@@ -1434,7 +1458,9 @@ test("visit authority blocks delayed active requests in live and replay", async 
     outputDirectory
   });
 
+  assert.equal(initialVisitReadRequestCount, 1);
   assert.equal(initialDelayedVisitMutationRequestCount, 0);
+  assert.equal(visitReadRequestCount, 1);
   assert.equal(delayedVisitMutationRequestCount, 0);
   assert.equal(visitEventSourceRequestCount, 1);
   assert.equal(visitWebSocketUpgradeCount, 0);
@@ -1453,7 +1479,9 @@ test("visit authority blocks delayed active requests in live and replay", async 
     outputDirectory
   );
   assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.equal(initialVisitReadRequestCount, 2);
   assert.equal(initialDelayedVisitMutationRequestCount, 0);
+  assert.equal(visitReadRequestCount, 2);
   assert.equal(delayedVisitMutationRequestCount, 0);
   assert.equal(visitEventSourceRequestCount, 2);
   assert.equal(visitWebSocketUpgradeCount, 0);

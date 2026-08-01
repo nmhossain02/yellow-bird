@@ -31,10 +31,8 @@ bun run doctor
 
 `doctor` reports the selected model and whether strict JSON Schema output passed
 the harmless conformance probe. The first probe may wait up to two minutes for a
-local model to load cold. A scout with explicit `--intent` is `inconclusive`
-with exit code `3` if no compatible engine is available. Explicit intent takes
-precedence over `--no-agent`, so the run never falls back to an initial-page
-`clear` result that did not cover the intent.
+local model to load cold. A scout running intent exploration is `inconclusive`
+with exit code `3` if no compatible engine is available.
 
 Start the deliberately broken demo product:
 
@@ -114,10 +112,11 @@ yellowbird scout \
 Outside a versioned scenario, an explicit `--intent` enables bounded agent
 exploration. `--agent` opts into the same loop with the default initial-page
 intent. The interaction budget defaults to four steps; `--max-agent-steps`
-accepts values from `1` through `20`. Use `--no-agent` without an explicit
-intent for an initial-page smoke check, or a versioned `--scenario` when the
-owner needs an exact workflow with mutation-capable actions and explicit
-assertions.
+accepts values from `1` through `20`. `--no-agent` is an explicit opt-out even
+when combined with `--intent`; that combination performs only an initial-page
+smoke check and does not claim intent coverage. Use a versioned `--scenario`
+when the owner needs an exact workflow with mutation-capable actions and
+explicit assertions.
 
 The compatible endpoint can be selected per command:
 
@@ -178,6 +177,18 @@ controls observed on that destination, and no failed agent action. Intents that
 do not match an owned profile, need server-side mutation, or require another
 action outside the safe interaction authority produce an `inconclusive` result
 instead of an unverified pass.
+
+Before authorizing controls or requests, YellowBird repeatedly percent-decodes
+URL and control semantics, considers computed accessible names including
+`aria-labelledby`, and fails closed when encoded text or a referenced label
+cannot be resolved. Browser guards are installed before destination scripts
+run. Agent document visits are mediated with automatic redirects disabled so
+each redirect must pass policy before its destination can load. During the
+initial target load and each authorized visit, exact-origin `GET` and `HEAD`
+non-document requests, including `EventSource`, are allowed only through a
+bounded settlement interval after `DOMContentLoaded`. Later network requests
+outside an explicitly mediated visit document chain are blocked, and WebSockets
+are blocked throughout agent mode.
 
 The generated regression re-enforces exact-origin and read-only agent guards,
 including submission and outbound WebSocket blocking, without calling the model.

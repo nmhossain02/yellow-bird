@@ -26,16 +26,6 @@ const STEP_CAPABILITIES = {
   expectVisible: "browser.read"
 };
 const SUPPORTED_STEP_ACTIONS = new Set(Object.keys(STEP_CAPABILITIES));
-const AGENT_PASSIVE_RESOURCE_TYPES = new Set([
-  "eventsource",
-  "font",
-  "image",
-  "manifest",
-  "media",
-  "script",
-  "stylesheet",
-  "texttrack"
-]);
 const AGENT_NAVIGATION_SETTLEMENT_MS = 150;
 const require = createRequire(import.meta.url);
 const PLAYWRIGHT_VERSION = require("@playwright/test/package.json").version;
@@ -329,10 +319,9 @@ function buildRegression(options, explorationSteps = []) {
     "    requestedUrl: yellowbirdTargetRequestUrl.href,",
     "    navigationStarted: false,",
     "    navigationRequests: new Set(),",
-    "    passiveResourcesAllowed: true",
+    "    navigationWindowOpen: true",
     "  } : null;",
     `  const yellowbirdUnsafeRequest = new RegExp(${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, "i");`,
-    '  const yellowbirdPassiveResourceTypes = new Set(["eventsource", "font", "image", "manifest", "media", "script", "stylesheet", "texttrack"]);',
     "  const yellowbirdDecodeAgentText = value => {",
     "    let decoded = String(value ?? \"\");",
     "    const maximumPasses = decoded.length + 1;",
@@ -456,7 +445,7 @@ function buildRegression(options, explorationSteps = []) {
     "            yellowbirdAgentAction.navigationStarted = true;",
     "            yellowbirdAgentAction.navigationRequests.add(request);",
     "          }",
-    "        } else safeAgentAction = yellowbirdAgentAction.passiveResourcesAllowed && yellowbirdPassiveResourceTypes.has(request.resourceType());",
+    "        } else safeAgentAction = yellowbirdAgentAction.navigationWindowOpen;",
     "      }",
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
     '        (!yellowbirdAgentMode || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl && safeAgentAction));',
@@ -518,12 +507,12 @@ function buildRegression(options, explorationSteps = []) {
     "      requestedUrl,",
     "      navigationStarted: false,",
     "      navigationRequests: new Set(),",
-    '      passiveResourcesAllowed: action === "visit"',
+    '      navigationWindowOpen: action === "visit"',
     "    };",
     "    await yellowbirdActivateAgentGuard(action);",
     "  };",
     "  const yellowbirdFinishAgentNavigation = async () => {",
-    "    yellowbirdAgentAction.passiveResourcesAllowed = false;",
+    "    yellowbirdAgentAction.navigationWindowOpen = false;",
     '    await yellowbirdActivateAgentGuard("visit");',
     "  };",
     "  const yellowbirdAssertAgentGuard = async () => {",
@@ -1232,7 +1221,7 @@ export function createScoutRunner({
           requestedUrl: targetRequestUrl.href,
           navigationStarted: false,
           navigationRequests: new Set(),
-          passiveResourcesAllowed: true
+          navigationWindowOpen: true
         }
       : null;
     let latestAgentEffectBlock = null;
@@ -1350,9 +1339,7 @@ export function createScoutRunner({
             agentActionContext.navigationRequests.add(route.request());
           }
         } else {
-          agentActionAllowed =
-            agentActionContext.passiveResourcesAllowed &&
-            AGENT_PASSIVE_RESOURCE_TYPES.has(route.request().resourceType());
+          agentActionAllowed = agentActionContext.navigationWindowOpen;
         }
       }
       if (
@@ -1643,7 +1630,7 @@ export function createScoutRunner({
     }
     async function closeAgentNavigationWindow() {
       if (agentActionContext) {
-        agentActionContext.passiveResourcesAllowed = false;
+        agentActionContext.navigationWindowOpen = false;
       }
       await page
         .evaluate(() => {
@@ -1879,7 +1866,7 @@ export function createScoutRunner({
                     ...action,
                     navigationStarted: false,
                     navigationRequests: new Set(),
-                    passiveResourcesAllowed: action.action === "visit"
+                    navigationWindowOpen: action.action === "visit"
                   };
                   await page.evaluate((activeAction) => {
                     const guard = globalThis.__yellowbirdAgentActionGuard;
