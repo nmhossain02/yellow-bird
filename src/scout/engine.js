@@ -119,10 +119,18 @@ async function requestJson(fetchImpl, url, options, timeoutMs) {
   try {
     response = await fetchImpl(url, {
       ...options,
+      redirect: "manual",
       signal: AbortSignal.timeout(timeoutMs)
     });
   } catch (error) {
     throw new Error(`connection failed: ${cleanDiagnosticText(error?.message || error)}`);
+  }
+  if (
+    response.redirected ||
+    (response.url && new URL(response.url).href !== new URL(url).href) ||
+    (response.status >= 300 && response.status < 400)
+  ) {
+    throw new Error("endpoint redirects are not allowed");
   }
   if (!response.ok) {
     throw new Error(`endpoint returned HTTP ${response.status}`);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { test } from "bun:test";
 import {
@@ -12,6 +13,20 @@ function jsonResponse(value, init = {}) {
     status: 200,
     headers: { "content-type": "application/json" },
     ...init
+  });
+}
+
+async function listen(server) {
+  await new Promise((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
+async function closeServer(server) {
+  await new Promise((resolveClose, reject) => {
+    server.close((error) => (error ? reject(error) : resolveClose()));
   });
 }
 
@@ -96,6 +111,40 @@ test("compatible engine proves JSON Schema output and normalizes provenance", as
     modelReported: "local-planner:resolved",
     capabilityManifestVersion: "yellowbird.engine-capabilities.v1"
   });
+});
+
+test("compatible engine rejects redirects without forwarding planning data", async () => {
+  let forwardedRequests = 0;
+  const captureServer = createServer((_request, response) => {
+    forwardedRequests += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  const captureOrigin = await listen(captureServer);
+  const endpointServer = createServer((request, response) => {
+    if (request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "local-planner" }] }));
+      return;
+    }
+    response.writeHead(307, { location: `${captureOrigin}/capture` });
+    response.end();
+  });
+  const endpointOrigin = await listen(endpointServer);
+
+  try {
+    const engine = createCompatibleEngine({
+      baseUrl: `${endpointOrigin}/v1`,
+      model: "local-planner"
+    });
+    await assert.rejects(engine.probe(), /redirects are not allowed/);
+    assert.equal(forwardedRequests, 0);
+  } finally {
+    await Promise.all([
+      closeServer(endpointServer),
+      closeServer(captureServer)
+    ]);
+  }
 });
 
 test("missing default local engine resolves to actionable test mechanics", async () => {

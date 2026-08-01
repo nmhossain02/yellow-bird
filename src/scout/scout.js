@@ -361,7 +361,10 @@ function buildRegression(options, explorationSteps = []) {
     "    if (candidateToken !== yellowbirdFetchBindingToken ||",
     '        typeof occurrence?.url !== "string") return null;',
     "    yellowbirdFetchOccurrenceSequence += 1;",
-    "    return `${yellowbirdFetchOccurrencePrefix}${yellowbirdFetchOccurrenceSequence}`;",
+    "    const occurrenceId = `${yellowbirdFetchOccurrencePrefix}${yellowbirdFetchOccurrenceSequence}`;",
+    "    if (occurrence.policyRejected === true)",
+    "      yellowbirdBlockedFetchOccurrences.add(occurrenceId);",
+    "    return occurrenceId;",
     "  });",
     '  page.on("console", (message) => {',
     "    const text = message.text();",
@@ -511,17 +514,23 @@ function buildRegression(options, explorationSteps = []) {
     "      let occurrenceId = null;",
     "      let requestInput = input;",
     "      let requestInit = init;",
+    "      let request = null;",
     "      try {",
-    "        requestUrl = new URL(input instanceof Request ? input.url : String(input), globalThis.location.href).href;",
+    "        request = new Request(input, init);",
+    "        requestUrl = request.url;",
     "      } catch {}",
-    "      if (active && requestUrl) {",
-    "        occurrenceId = await recordFetchOccurrence(fetchBindingToken, { url: requestUrl });",
+    "      if (active && request) {",
+    '        const localResource = requestUrl.startsWith("data:") || requestUrl.startsWith("blob:");',
+    '        const policyRejected = !localResource && (!["GET", "HEAD"].includes(request.method) ||',
+    '          !urlAllowed(requestUrl) || action !== "visit");',
+    "        occurrenceId = await recordFetchOccurrence(fetchBindingToken, { url: requestUrl, policyRejected });",
     '        if (typeof occurrenceId === "string" && occurrenceId.startsWith(fetchOccurrencePrefix)) {',
-    "          const request = new Request(input, init);",
-    "          const headers = new Headers(request.headers);",
-    "          headers.set(fetchOccurrenceHeader, occurrenceId);",
-    "          requestInput = new Request(request, { headers });",
-    "          requestInit = undefined;",
+    "          if (!policyRejected) {",
+    "            const headers = new Headers(request.headers);",
+    "            headers.set(fetchOccurrenceHeader, occurrenceId);",
+    "            requestInput = new Request(request, { headers });",
+    "            requestInit = undefined;",
+    "          }",
     "        } else occurrenceId = null;",
     "      }",
     "      try {",
@@ -988,6 +997,9 @@ async function finalizeRun(state) {
     const browserCloseIssue = state.operationalIssues.find(
       (issue) => issue.id === "browser-close-failed"
     );
+    const browserOperationIssue = state.operationalIssues.find(
+      (issue) => issue.id === "browser-operation-failed"
+    );
     state.exploration.status = "inconclusive";
     state.exploration.coverage = state.exploration.steps.some(
       (step) => step.status === "passed"
@@ -1002,7 +1014,9 @@ async function finalizeRun(state) {
           ? "Intent coverage was inconclusive because visual evidence capture failed."
           : browserCloseIssue
             ? "Intent coverage was inconclusive because browser cleanup could not be confirmed."
-            : "Intent coverage could not begin because browser setup did not complete.";
+            : browserOperationIssue
+              ? "Intent coverage was inconclusive because browser execution stopped before evidence collection completed."
+              : "Intent coverage could not begin because browser setup did not complete.";
     state.exploration.issue ||= state.operationalIssues[0];
   }
   const findings = [];
@@ -1165,6 +1179,15 @@ async function finalizeRun(state) {
   ) {
     coverageGaps.push(
       "Browser cleanup could not be confirmed after product evaluation."
+    );
+  }
+  if (
+    state.operationalIssues.some(
+      (issue) => issue.id === "browser-operation-failed"
+    )
+  ) {
+    coverageGaps.push(
+      "Browser execution stopped before all requested evidence could be collected."
     );
   }
   if (!productEvaluated) {
@@ -1511,7 +1534,7 @@ export function createScoutRunner({
     workflowSteps
   } = state;
   const noteNetworkGuardFailure = (error, stage) => {
-    const detail = cleanDiagnosticText(error?.message || error);
+    const detail = sanitizeDiagnosticText(error?.message || error);
     if (
       !state.operationalIssues.some(
         (issue) => issue.id === "browser-network-guard-failed"
@@ -1578,6 +1601,23 @@ export function createScoutRunner({
       "error",
       "browser.close.failed",
       "Playwright Chromium cleanup failed",
+      { detail }
+    );
+  };
+  const noteBrowserOperationFailure = (error) => {
+    const detail = sanitizeDiagnosticText(error?.message || error);
+    state.operationalIssues.push({
+      id: "browser-operation-failed",
+      classification: "test-mechanics",
+      title: "YellowBird could not complete browser execution.",
+      evidence: detail,
+      remediation:
+        "Rerun the scout. If browser execution fails again, inspect the browser and action-policy diagnostics."
+    });
+    record(
+      "error",
+      "browser.operation.failed",
+      "Browser execution stopped before evidence collection completed",
       { detail }
     );
   };
@@ -1707,7 +1747,12 @@ export function createScoutRunner({
               return null;
             }
             agentFetchOccurrenceSequence += 1;
-            return `${agentFetchOccurrencePrefix}${agentFetchOccurrenceSequence}`;
+            const occurrenceId =
+              `${agentFetchOccurrencePrefix}${agentFetchOccurrenceSequence}`;
+            if (occurrence.policyRejected === true) {
+              blockedAgentFetchOccurrences.add(occurrenceId);
+            }
+            return occurrenceId;
           }
         )
     );
@@ -2068,25 +2113,33 @@ export function createScoutRunner({
         let occurrenceId = null;
         let requestInput = input;
         let requestInit = init;
+        let request = null;
         try {
-          requestUrl = new URL(
-            input instanceof Request ? input.url : String(input),
-            globalThis.location.href
-          ).href;
+          request = new Request(input, init);
+          requestUrl = request.url;
         } catch {}
-        if (active && requestUrl) {
+        if (active && request) {
+          const localResource =
+            requestUrl.startsWith("data:") || requestUrl.startsWith("blob:");
+          const policyRejected =
+            !localResource &&
+            (!["GET", "HEAD"].includes(request.method) ||
+              !urlAllowed(requestUrl) ||
+              action !== "visit");
           occurrenceId = await recordFetchOccurrence(fetchBindingToken, {
-            url: requestUrl
+            url: requestUrl,
+            policyRejected
           });
           if (
             typeof occurrenceId === "string" &&
             occurrenceId.startsWith(fetchOccurrencePrefix)
           ) {
-            const request = new Request(input, init);
-            const headers = new Headers(request.headers);
-            headers.set(fetchOccurrenceHeader, occurrenceId);
-            requestInput = new Request(request, { headers });
-            requestInit = undefined;
+            if (!policyRejected) {
+              const headers = new Headers(request.headers);
+              headers.set(fetchOccurrenceHeader, occurrenceId);
+              requestInput = new Request(request, { headers });
+              requestInit = undefined;
+            }
           } else {
             occurrenceId = null;
           }
@@ -2823,7 +2876,7 @@ export function createScoutRunner({
       ...element,
       href: element.href ? evidenceUrl(element.href) : null
     }));
-    let screenshot = null;
+    screenshot = null;
     try {
       screenshot = await page.screenshot({
         fullPage: true,
@@ -2832,23 +2885,30 @@ export function createScoutRunner({
     } catch (error) {
       noteScreenshotCaptureFailure(error);
     }
-    if (screenshot) {
-      await writeFile(join(outputDirectory, "page.png"), screenshot, {
-        mode: 0o600
-      });
-      state.screenshotCaptured = true;
-    }
     await collectAgentGuardAttempts();
   }
+  let screenshot = null;
+  let browserRunError = null;
+  let browserCloseError = null;
   try {
     await executeBrowserRun();
+  } catch (error) {
+    browserRunError = error;
   } finally {
     try {
       await browser.close();
       record("debug", "browser.closed", "Playwright Chromium closed");
     } catch (error) {
-      noteBrowserCloseFailure(error);
+      browserCloseError = error;
     }
+  }
+  if (browserRunError) noteBrowserOperationFailure(browserRunError);
+  if (browserCloseError) noteBrowserCloseFailure(browserCloseError);
+  if (screenshot) {
+    await writeFile(join(outputDirectory, "page.png"), screenshot, {
+      mode: 0o600
+    });
+    state.screenshotCaptured = true;
   }
 
   return finalizeRun(state);

@@ -595,7 +595,7 @@ beforeAll(async () => {
             <button id="preview" type="button">View preview</button>
             <script>
               document.querySelector("#preview").addEventListener("click", () => {
-                fetch("http://localhost:${server.address().port}/agent-cross-origin-read").catch(() => {});
+                fetch("http://localhost:${server.address().port}/agent-cross-origin-read");
               });
             </script>
           </body>
@@ -1072,12 +1072,45 @@ async function launchBrowserWithFailingNetworkGuard() {
             const result = await session.send(method, parameters);
             if (method === "Fetch.continueRequest" && !injected) {
               injected = true;
-              throw new Error("injected network guard failure");
+              throw new Error(
+                `injected network guard failure at ${target}/?token=hidden-value`
+              );
             }
             return result;
           }
         };
         return proxy;
+      };
+      return context;
+    },
+    async close() {
+      await context?.close();
+    }
+  };
+}
+
+async function launchBrowserWithFailingAgentCleanup() {
+  let context;
+  return {
+    async newContext(options) {
+      context = await sharedBrowser.newContext(options);
+      const newPage = context.newPage.bind(context);
+      context.newPage = async () => {
+        const page = await newPage();
+        const evaluate = page.evaluate.bind(page);
+        let idleTransitions = 0;
+        page.evaluate = async (callback, argument) => {
+          if (argument?.action === "idle") {
+            idleTransitions += 1;
+            if (idleTransitions === 3) {
+              throw new Error(
+                `injected action cleanup failure at ${target}/?token=hidden-value`
+              );
+            }
+          }
+          return evaluate(callback, argument);
+        };
+        return page;
       };
       return context;
     },
@@ -1597,6 +1630,57 @@ test("a browser network guard failure cannot produce a clear report", async () =
     await readFile(report.artifacts.diagnostics, "utf8"),
     /browser\.network-guard\.failed/
   );
+  assert.doesNotMatch(
+    await readFile(report.artifacts.diagnostics, "utf8"),
+    /hidden-value/
+  );
+});
+
+test("action-policy cleanup failures retain findings and durable evidence", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-cleanup-failure-")
+  );
+  const report = await createAgentRunner(
+    (request) => {
+      const availableElements = JSON.parse(
+        request.messages.at(-1).content
+      ).page.availableElements;
+      return {
+        action: "act",
+        elementRef: availableElements[0].ref,
+        value: null,
+        rationale: "Inspect the supplied setup route.",
+        coverage: "continue",
+        summary: ""
+      };
+    },
+    undefined,
+    launchBrowserWithFailingAgentCleanup
+  )({
+    target: `${target}/failing`,
+    intent: "Assess the setup route",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "attention");
+  assert.ok(report.findings.some((finding) => finding.id === "console-errors"));
+  assert.ok(
+    report.invalidTestMechanics.some(
+      (issue) => issue.id === "browser-operation-failed"
+    )
+  );
+  assert.equal(report.observations.exploration.status, "inconclusive");
+  assert.equal(report.artifacts.screenshot, null);
+  await assert.rejects(stat(join(outputDirectory, "page.png")));
+  await Promise.all(
+    Object.entries(report.artifacts)
+      .filter(([name]) => name !== "screenshot")
+      .map(([, path]) => stat(path))
+  );
+  const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
+  assert.match(diagnostics, /browser\.operation\.failed/);
+  assert.doesNotMatch(diagnostics, /hidden-value/);
 });
 
 test("network guard initialization failures persist inconclusive reports", async () => {
@@ -3088,7 +3172,16 @@ test("cross-origin effects attempted during exploration are inconclusive", async
       (request) => request.reason === "agent-cross-origin"
     )
   );
-});
+  assert.deepEqual(report.observations.pageErrors, []);
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.equal(crossOriginRequestCount, 0);
+}, 30_000);
 
 test("product findings take precedence when related targets make coverage inconclusive", async () => {
   relatedTargetEffectCount = 0;
