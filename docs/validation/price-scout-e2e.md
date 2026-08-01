@@ -50,13 +50,15 @@ asset prefixes declared as prefix load routes, and `/api/v1/monitors` plus
 provenance and requires the observed
 `initial-interface-basic-flow.v1` profile, requires a passed visit to
 `/monitors/new`, requires the destination to expose the Price Scout form's
-heading, product URL, tracking instruction, and frequency text, and verifies
-that the evidence retains the declared primary and API load-route authority.
-Those destination assertions are preserved in the generated replay before the
-validator installs and runs it from its independent temporary artifact
-directory. The validator leaves that artifact directory intact. On success, it
-prints the path together with the verified Price Scout commit and Compose
-project name.
+heading text, and requires exactly one visible `Product URL` URL textbox,
+`Tracking instruction` textarea, `Frequency` combobox, and `Compile monitor`
+submit button. It also verifies that the evidence retains the declared primary
+and API load-route authority. Those destination assertions are preserved as
+role, accessible-name, visibility, uniqueness, and control-type checks in the
+generated replay before the validator installs and runs it from its independent
+temporary artifact directory. The validator leaves that artifact directory
+intact. On success, it prints the path together with the verified Price Scout
+commit and Compose project name.
 
 The default external checkout remains uncommitted because
 `test/fixtures/external/` is ignored. Target and health endpoint overrides are

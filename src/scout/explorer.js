@@ -222,9 +222,10 @@ function syntheticValue(element) {
 async function snapshotPage(
   page,
   authorizedOrigin,
-  authorizedNavigationRoutes
+  authorizedNavigationRoutes,
+  expectedDestinationControls
 ) {
-  const raw = await page.evaluate(({ limits, prohibitedPattern }) => {
+  const raw = await page.evaluate(({ expectedControls, limits, prohibitedPattern }) => {
     let remainingCharacters = limits.totalCharacters;
     const prohibited = new RegExp(prohibitedPattern, "i");
     const canonicalizeSemanticText = (value) =>
@@ -304,6 +305,155 @@ async function snapshotPage(
       }
       return hiddenState.get(element);
     };
+    const isHiddenByClosedContainer = (element) => {
+      let inspected = 0;
+      let current = element;
+      while (current) {
+        inspected += 1;
+        if (inspected > limits.traversalNodeCount) return true;
+        if (current.tagName === "DIALOG" && !current.open) return true;
+        if (
+          current.hasAttribute("popover") &&
+          !current.matches(":popover-open")
+        ) {
+          return true;
+        }
+        const parent = current.parentElement;
+        if (parent?.tagName === "DETAILS" && !parent.open) {
+          let summary = parent.firstElementChild;
+          while (summary && summary.tagName !== "SUMMARY") {
+            inspected += 1;
+            if (inspected > limits.traversalNodeCount) return true;
+            summary = summary.nextElementSibling;
+          }
+          if (!summary || current !== summary) {
+            return true;
+          }
+        }
+        current = parent;
+      }
+      return false;
+    };
+    const positiveArea = (rect) =>
+      Number.isFinite(rect?.width) &&
+      Number.isFinite(rect?.height) &&
+      rect.width > 0 &&
+      rect.height > 0;
+    const remainsVisibleThroughClipping = (rect, element) => {
+      let visibleRect = {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left
+      };
+      let inspected = 0;
+      let current = element;
+      while (current) {
+        inspected += 1;
+        if (inspected > limits.traversalNodeCount) return false;
+        let style;
+        try {
+          style = window.getComputedStyle(current);
+        } catch {
+          return false;
+        }
+        if (
+          (style.clip && style.clip !== "auto") ||
+          (style.clipPath && style.clipPath !== "none") ||
+          (style.maskImage && style.maskImage !== "none") ||
+          (style.webkitMaskImage && style.webkitMaskImage !== "none") ||
+          /opacity\(\s*0(?:\.0*)?\s*\)/i.test(style.filter || "")
+        ) {
+          return false;
+        }
+        if (
+          [style.overflowX, style.overflowY].some((value) =>
+            ["auto", "clip", "hidden", "scroll"].includes(value)
+          )
+        ) {
+          const clippingRect = current.getBoundingClientRect();
+          if (!positiveArea(clippingRect)) {
+            return false;
+          }
+          visibleRect = {
+            top: Math.max(visibleRect.top, clippingRect.top),
+            right: Math.min(visibleRect.right, clippingRect.right),
+            bottom: Math.min(visibleRect.bottom, clippingRect.bottom),
+            left: Math.max(visibleRect.left, clippingRect.left)
+          };
+          if (
+            visibleRect.right <= visibleRect.left ||
+            visibleRect.bottom <= visibleRect.top
+          ) {
+            return false;
+          }
+        }
+        current = current.parentElement;
+      }
+      return true;
+    };
+    const passesVisibilityApi = (element) => {
+      if (typeof element.checkVisibility !== "function") return true;
+      try {
+        return element.checkVisibility({
+          checkOpacity: true,
+          checkVisibilityCSS: true
+        });
+      } catch {
+        return false;
+      }
+    };
+    const isRenderedElement = (element) => {
+      if (
+        !element ||
+        isHiddenInTree(element) ||
+        isHiddenByClosedContainer(element) ||
+        !passesVisibilityApi(element)
+      ) {
+        return false;
+      }
+      try {
+        return Array.from(element.getClientRects()).some(
+          (rect) =>
+            positiveArea(rect) &&
+            remainsVisibleThroughClipping(rect, element.parentElement)
+        );
+      } catch {
+        return false;
+      }
+    };
+    const isRenderedTextNode = (textNode) => {
+      const parent = textNode?.parentElement;
+      if (
+        !parent ||
+        isHiddenInTree(parent) ||
+        isHiddenByClosedContainer(parent) ||
+        !passesVisibilityApi(parent)
+      ) {
+        return false;
+      }
+      try {
+        const style = window.getComputedStyle(parent);
+        if (
+          style.fontSize === "0px" ||
+          style.color === "transparent" ||
+          /rgba\([^)]*,\s*0\s*\)$/i.test(style.color)
+        ) {
+          return false;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(textNode);
+        const visible = Array.from(range.getClientRects()).some(
+          (rect) =>
+            positiveArea(rect) &&
+            remainsVisibleThroughClipping(rect, parent)
+        );
+        range.detach();
+        return visible;
+      } catch {
+        return false;
+      }
+    };
     const boundedNodeText = (root, maximum) => {
       if (!root || maximum <= 0 || isHiddenInTree(root)) return "";
       const chunks = [];
@@ -324,8 +474,7 @@ async function snapshotPage(
           isHiddenInTree(textNode);
           continue;
         }
-        const parent = textNode.parentElement;
-        if (isHiddenInTree(parent)) continue;
+        if (!isRenderedTextNode(textNode)) continue;
         const text = String(textNode.nodeValue || "");
         if (!text) continue;
         const separatorLength = chunks.length ? 1 : 0;
@@ -352,15 +501,19 @@ async function snapshotPage(
       NodeFilter.SHOW_ELEMENT
     );
     let visitedElementNodes = 0;
+    let candidateTraversalComplete = false;
     while (
       candidateElements.length < limits.elementCount &&
       visitedElementNodes < limits.traversalNodeCount
     ) {
       const candidate = walker.nextNode();
-      if (!candidate) break;
+      if (!candidate) {
+        candidateTraversalComplete = true;
+        break;
+      }
       visitedElementNodes += 1;
       if (
-        !isHiddenInTree(candidate) &&
+        isRenderedElement(candidate) &&
         candidate.matches("a[href], button, input, textarea, select")
       ) {
         candidateElements.push(candidate);
@@ -371,12 +524,15 @@ async function snapshotPage(
       document.documentElement,
       NodeFilter.SHOW_ELEMENT
     );
+    let replayTraversalComplete = false;
     while (replayElements.length < limits.traversalNodeCount) {
       const candidate = replayWalker.nextNode();
-      if (!candidate) break;
+      if (!candidate) {
+        replayTraversalComplete = true;
+        break;
+      }
       replayElements.push(candidate);
     }
-    const replayTraversalComplete = replayWalker.nextNode() === null;
     const structuralReplayLocator = (element) => {
       if (!element.isConnected) return null;
       const segments = [];
@@ -432,9 +588,12 @@ async function snapshotPage(
       }
       return structuralReplayLocator(element);
     };
+    const controlMatchCounts = expectedControls.map(() => 0);
+    const normalizeControlName = (value) =>
+      String(value ?? "").replaceAll(/\s+/g, " ").trim();
     const elements = candidateElements
       .flatMap((element, index) => {
-        if (!element.isConnected || isHiddenInTree(element)) return [];
+        if (!element.isConnected || !isRenderedElement(element)) return [];
         const tag = element.tagName.toLowerCase();
         if ((element.labels?.length || 0) > limits.labelCount) return [];
         const labelTexts = Array.from(element.labels || [], (labelElement) =>
@@ -474,6 +633,7 @@ async function snapshotPage(
                 : tag === "input" && element.type === "number"
                   ? "spinbutton"
                   : "textbox";
+        const controlType = String(element.type || "").toLowerCase();
         const form = element.form || element.closest("form");
         let formHasPassword = false;
         if (form) {
@@ -491,6 +651,20 @@ async function snapshotPage(
                 break;
               }
             }
+          }
+        }
+        if (!formHasPassword) {
+          const controlName = normalizeControlName(label);
+          if (controlName.length <= limits.fieldText) {
+            expectedControls.forEach((expected, expectedIndex) => {
+              if (
+                expected.role === role &&
+                expected.type === controlType &&
+                expected.name === controlName
+              ) {
+                controlMatchCounts[expectedIndex] += 1;
+              }
+            });
           }
         }
         if (tag === "select" && element.options.length > limits.optionCount) {
@@ -560,8 +734,15 @@ async function snapshotPage(
         element.setAttribute("data-yellowbird-agent-ref", ref);
         return [candidate];
       });
-    return { url, title, bodyText, elements };
+    const controlAssertions = expectedControls.map((expected, index) => ({
+      ...expected,
+      matchCount: controlMatchCounts[index],
+      satisfied:
+        candidateTraversalComplete && controlMatchCounts[index] === 1
+    }));
+    return { url, title, bodyText, controlAssertions, elements };
   }, {
+    expectedControls: expectedDestinationControls,
     limits: SNAPSHOT_LIMITS,
     prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN
   });
@@ -626,6 +807,7 @@ async function snapshotPage(
     url: raw.url,
     title: normalizeText(raw.title, 200),
     bodyText: normalizeText(raw.bodyText, 8_000),
+    controlAssertions: raw.controlAssertions,
     elements: elements.slice(0, 60)
   };
 }
@@ -760,7 +942,8 @@ function verifyOwnedCoverageProfile(
   steps,
   pages,
   authorizedPrimaryRoutes,
-  expectedDestinationTexts
+  expectedDestinationTexts,
+  expectedDestinationControls
 ) {
   const initialInterfaceFlow =
     /^\s*(?:assess|evaluate|inspect|review)(?:\s+the)?\s+initial\s+interface\s+and(?:\s+the)?\s+basic\s+user\s+flow\s*[.!]?\s*$/i.test(
@@ -827,6 +1010,19 @@ function verifyOwnedCoverageProfile(
               )
           }
         ]
+      : []),
+    ...(expectedDestinationControls.length
+      ? [
+          {
+            id: "owner-declared-destination-controls-observed",
+            satisfied:
+              passedVisit?.destinationControlAssertions?.length ===
+                expectedDestinationControls.length &&
+              passedVisit.destinationControlAssertions.every(
+                (assertion) => assertion.satisfied
+              )
+          }
+        ]
       : [])
   ];
   const satisfied = criteria.every((criterion) => criterion.satisfied);
@@ -836,8 +1032,12 @@ function verifyOwnedCoverageProfile(
     satisfied,
     criteria,
     summary: satisfied
-      ? expectedDestinationTexts.length
-        ? "YellowBird observed the initial page, visited a distinct authorized setup route, and matched the owner-declared destination text."
+      ? expectedDestinationControls.length
+        ? expectedDestinationTexts.length
+          ? "YellowBird observed the initial page, visited a distinct authorized setup route, and matched the owner-declared destination text and semantic controls."
+          : "YellowBird observed the initial page, visited a distinct authorized setup route, and matched the owner-declared semantic controls."
+        : expectedDestinationTexts.length
+          ? "YellowBird observed the initial page, visited a distinct authorized setup route, and matched the owner-declared destination text."
         : "YellowBird observed the initial page, visited a distinct authorized setup route, and inventoried safe controls on the destination."
       : "YellowBird could not satisfy every observed criterion for the initial-interface basic-flow profile."
   };
@@ -868,7 +1068,8 @@ export async function exploreIntentWithEngine({
   actionPolicy = null,
   authorizedNavigationRoutes = new Set(),
   authorizedPrimaryRoutes = new Set(),
-  expectedDestinationTexts = []
+  expectedDestinationTexts = [],
+  expectedDestinationControls = []
 }) {
   const steps = [];
   const pages = [];
@@ -881,7 +1082,8 @@ export async function exploreIntentWithEngine({
     snapshot = await snapshotPage(
       page,
       authorizedOrigin,
-      authorizedNavigationRoutes
+      authorizedNavigationRoutes,
+      expectedDestinationControls
     );
     visited.add(new URL(snapshot.url).href);
     pages.push({
@@ -1014,7 +1216,8 @@ export async function exploreIntentWithEngine({
         steps,
         pages,
         authorizedPrimaryRoutes,
-        expectedDestinationTexts
+        expectedDestinationTexts,
+        expectedDestinationControls
       );
       const coverage = verification
         ? verification.satisfied
@@ -1154,7 +1357,8 @@ export async function exploreIntentWithEngine({
       snapshot = await snapshotPage(
         page,
         authorizedOrigin,
-        authorizedNavigationRoutes
+        authorizedNavigationRoutes,
+        expectedDestinationControls
       );
       if (!pages.some((entry) => entry.url === snapshot.url)) {
         pages.push({
@@ -1177,6 +1381,8 @@ export async function exploreIntentWithEngine({
           action === "visit"
             ? destinationAssertions(snapshot, expectedDestinationTexts)
             : [],
+        destinationControlAssertions:
+          action === "visit" ? snapshot.controlAssertions : [],
         httpStatus: response?.status() ?? null,
         evidence:
           response && response.status() >= 400
@@ -1221,6 +1427,7 @@ export async function exploreIntentWithEngine({
         title: "",
         destinationControlCount: null,
         destinationAssertions: [],
+        destinationControlAssertions: [],
         httpStatus: response?.status() ?? null,
         evidence: detail,
         rationale: normalizeText(proposed.rationale, 500),

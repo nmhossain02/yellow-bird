@@ -182,6 +182,74 @@ function normalizeAgentExpectedTexts(value) {
   });
 }
 
+const AGENT_EXPECTED_CONTROL_TYPES = new Map([
+  ["button", new Set(["button", "reset", "submit"])],
+  ["combobox", new Set(["select-multiple", "select-one"])],
+  ["spinbutton", new Set(["number"])],
+  [
+    "textbox",
+    new Set(["email", "search", "tel", "text", "textarea", "url"])
+  ]
+]);
+
+function normalizeAgentExpectedControls(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("agent destination control assertions must be an array");
+  }
+  if (value.length > 20) {
+    throw new Error(
+      "agent destination control assertions are limited to 20 entries"
+    );
+  }
+  let totalCharacters = 0;
+  return value.map((declaration, index) => {
+    let role;
+    let type;
+    let name;
+    if (typeof declaration === "string") {
+      const firstSeparator = declaration.indexOf(":");
+      const secondSeparator = declaration.indexOf(":", firstSeparator + 1);
+      if (firstSeparator < 1 || secondSeparator <= firstSeparator + 1) {
+        throw new Error(
+          `agent destination control assertion ${index + 1} must use role:type:name`
+        );
+      }
+      role = declaration.slice(0, firstSeparator);
+      type = declaration.slice(firstSeparator + 1, secondSeparator);
+      name = declaration.slice(secondSeparator + 1);
+    } else if (declaration && typeof declaration === "object") {
+      ({ role, type, name } = declaration);
+    } else {
+      throw new Error(
+        `agent destination control assertion ${index + 1} must be an object or role:type:name string`
+      );
+    }
+    role = String(role ?? "").trim().toLowerCase();
+    type = String(type ?? "").trim().toLowerCase();
+    name = cleanDiagnosticText(name)
+      .replaceAll(/\s+/g, " ")
+      .trim();
+    if (!AGENT_EXPECTED_CONTROL_TYPES.get(role)?.has(type)) {
+      throw new Error(
+        `agent destination control assertion ${index + 1} uses unsupported role/type ${role || "(empty)"}:${type || "(empty)"}`
+      );
+    }
+    if (!name || name.length > 400) {
+      throw new Error(
+        `agent destination control assertion ${index + 1} name must contain 1 to 400 characters`
+      );
+    }
+    totalCharacters += role.length + type.length + name.length;
+    if (totalCharacters > 4_000) {
+      throw new Error(
+        "agent destination control assertions are limited to 4000 total characters"
+      );
+    }
+    return { role, type, name };
+  });
+}
+
 function markdownEscape(value) {
   return cleanDiagnosticText(value)
     .replaceAll("\\", "\\\\")
@@ -235,6 +303,9 @@ function buildMarkdown(report) {
         )
         .join("\n")
     : "| - | - | No agent navigation executed | - |";
+  const destinationControlAssertions = exploration.steps.flatMap(
+    (step) => step.destinationControlAssertions || []
+  );
 
   return `# YellowBird scout report
 
@@ -283,6 +354,8 @@ ${workflowRows}
 - Primary route authority: ${exploration.routePolicy?.primaryRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
 - Navigation route authority: ${exploration.routePolicy?.navigationRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
 - Load route authority: ${exploration.routePolicy?.loadRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
+- Destination text assertions: ${report.assertions.agentExpectedTexts.map((text) => `\`${markdownEscape(text)}\``).join(", ") || "none"}
+- Destination control assertions: ${destinationControlAssertions.map((assertion) => `\`${markdownEscape(`${assertion.role}:${assertion.type}:${assertion.name}`)}=${assertion.satisfied ? "satisfied" : "unsatisfied"}\``).join(", ") || "none"}
 - Engine: ${markdownEscape(exploration.engine || "not used")}
 - Coverage summary: ${markdownEscape(exploration.summary || "none")}
 
@@ -961,6 +1034,17 @@ function buildRegression(options, explorationSteps = []) {
           `  await expect(page.locator("body")).toContainText(${quoteForJavaScript(assertion.text)});`
         );
       }
+      for (const [assertionIndex, assertion] of (
+        step.destinationControlAssertions || []
+      ).entries()) {
+        const assertionLocator = `yellowbirdDestinationControl${index + 1}_${assertionIndex + 1}`;
+        lines.push(
+          `  const ${assertionLocator} = page.getByRole(${quoteForJavaScript(assertion.role)}, { name: ${quoteForJavaScript(assertion.name)}, exact: true });`,
+          `  await expect(${assertionLocator}).toHaveCount(1);`,
+          `  await expect(${assertionLocator}).toBeVisible();`,
+          `  await expect(${assertionLocator}).toHaveJSProperty("type", ${quoteForJavaScript(assertion.type)});`
+        );
+      }
       return;
     }
     lines.push(
@@ -1369,6 +1453,7 @@ async function finalizeRun(state) {
       expectedTitle: options.expectedTitle,
       expectedTexts: options.expectedTexts,
       agentExpectedTexts: options.agentExpectedTexts,
+      agentExpectedControls: options.agentExpectedControls,
       consoleErrorsAllowed: options.ignoreConsoleErrors
     },
     findings,
@@ -1522,9 +1607,15 @@ export function createScoutRunner({
   const agentExpectedTexts = normalizeAgentExpectedTexts(
     input.agentExpectedTexts
   );
-  if (agentExpectedTexts.length && !exploreIntent) {
+  const agentExpectedControls = normalizeAgentExpectedControls(
+    input.agentExpectedControls
+  );
+  if (
+    (agentExpectedTexts.length || agentExpectedControls.length) &&
+    !exploreIntent
+  ) {
     throw new Error(
-      "agent destination text assertions require intent exploration"
+      "agent destination assertions require intent exploration"
     );
   }
   const runId = `scout_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
@@ -1627,6 +1718,7 @@ export function createScoutRunner({
     ],
     agentLoadRoutes,
     agentExpectedTexts,
+    agentExpectedControls,
     ignoreConsoleErrors: Boolean(input.ignoreConsoleErrors),
     headed: Boolean(input.headed),
     timeoutMs
@@ -3021,6 +3113,7 @@ export function createScoutRunner({
               authorizedNavigationRoutes: agentNavigationRoutes,
               authorizedPrimaryRoutes: agentPrimaryRoutes,
               expectedDestinationTexts: options.agentExpectedTexts,
+              expectedDestinationControls: options.agentExpectedControls,
               engine: resolvedEngine.engine,
               maxSteps: options.maxAgentSteps,
               timeoutMs: options.timeoutMs,

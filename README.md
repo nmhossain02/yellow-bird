@@ -110,7 +110,11 @@ yellowbird scout \
   --target http://127.0.0.1:3000 \
   --intent "Assess the initial interface and basic user flow" \
   --agent-primary-route /monitors/new \
-  --agent-expect-text "Product URL" \
+  --agent-expect-text "Track any public product page" \
+  --agent-expect-control "textbox:url:Product URL" \
+  --agent-expect-control "textbox:textarea:Tracking instruction" \
+  --agent-expect-control "combobox:select-one:Frequency" \
+  --agent-expect-control "button:submit:Compile monitor" \
   --output yellowbird-report.md \
   --verbose
 ```
@@ -137,7 +141,11 @@ declaration must remain on its exact origin.
 Repeated `--agent-expect-text` declarations bind the owned coverage profile to
 text the owner expects on the visited primary destination. YellowBird records
 whether each bounded destination assertion was satisfied and preserves the same
-assertions in the portable replay.
+assertions in the portable replay. Repeated `--agent-expect-control`
+declarations use `role:type:name` and require one visible semantic control with
+that exact accessible name and DOM control type. These structural assertions
+prevent static copy from impersonating a working form, and replay preserves the
+same role, name, visibility, uniqueness, and type checks.
 
 The compatible endpoint can be selected per command:
 
@@ -244,10 +252,12 @@ remain product signals.
 
 A bounded snapshot of the current page URL, title, text, and control inventory,
 including supplied link URLs and select options, is sent to the configured model
-endpoint. URLs are sent exactly and can include query values. The default
-endpoint is loopback. Planning requests never follow endpoint redirects.
-Operators choosing a remote endpoint are responsible for that data boundary.
-Query values and console contents remain out of operational diagnostics.
+endpoint. Text and controls must pass ancestor visibility, rendered geometry,
+closed-container, and clipping checks before entering that snapshot. URLs are
+sent exactly and can include query values. The default endpoint is loopback.
+Planning requests never follow endpoint redirects. Operators choosing a remote
+endpoint are responsible for that data boundary. Query values and console
+contents remain out of operational diagnostics.
 
 Owner-declared scenarios retain their explicit permission model for exact
 `fill`, `click`, `expectText`, and `expectVisible` steps. A failed action is

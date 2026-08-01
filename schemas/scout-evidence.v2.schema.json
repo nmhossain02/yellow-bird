@@ -101,6 +101,26 @@
           "maxItems": 20,
           "items": { "type": "string", "minLength": 1, "maxLength": 400 }
         },
+        "agentExpectedControls": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "type", "name"],
+            "properties": {
+              "role": {
+                "enum": ["button", "combobox", "spinbutton", "textbox"]
+              },
+              "type": { "type": "string" },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 400
+              }
+            }
+          }
+        },
         "consoleErrorsAllowed": { "type": "boolean" }
       }
     },
@@ -390,6 +410,43 @@
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 400
+                        },
+                        "satisfied": { "type": "boolean" }
+                      }
+                    }
+                  },
+                  "destinationControlAssertions": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "role",
+                        "type",
+                        "name",
+                        "matchCount",
+                        "satisfied"
+                      ],
+                      "properties": {
+                        "role": {
+                          "enum": [
+                            "button",
+                            "combobox",
+                            "spinbutton",
+                            "textbox"
+                          ]
+                        },
+                        "type": { "type": "string" },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 400
+                        },
+                        "matchCount": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 120
                         },
                         "satisfied": { "type": "boolean" }
                       }

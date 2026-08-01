@@ -15,10 +15,13 @@ const priceScoutDirectory = resolve(
     "test/fixtures/external/price-scout"
 );
 const priceScoutExpectedDestinationTexts = [
-  "Track any public product page",
-  "Product URL",
-  "Tracking instruction",
-  "Frequency"
+  "Track any public product page"
+];
+const priceScoutExpectedDestinationControls = [
+  { role: "textbox", type: "url", name: "Product URL" },
+  { role: "textbox", type: "textarea", name: "Tracking instruction" },
+  { role: "combobox", type: "select-one", name: "Frequency" },
+  { role: "button", type: "submit", name: "Compile monitor" }
 ];
 const composeControlledEnvironmentNames = [
   "ALERT_WEBHOOK_SECRET",
@@ -288,6 +291,10 @@ async function main() {
           "--agent-expect-text",
           text
         ]),
+        ...priceScoutExpectedDestinationControls.flatMap((control) => [
+          "--agent-expect-control",
+          `${control.role}:${control.type}:${control.name}`
+        ]),
         "--agent-load-route",
         "/assets/*",
         "--agent-load-route",
@@ -369,7 +376,22 @@ async function main() {
             (assertion) => assertion.text === text && assertion.satisfied
           )
         ),
-      "The /monitors/new flow did not expose the declared Price Scout form controls"
+      "The /monitors/new flow did not expose the declared Price Scout heading text"
+    );
+    requireCondition(
+      passedMonitorVisit.destinationControlAssertions?.length ===
+        priceScoutExpectedDestinationControls.length &&
+        priceScoutExpectedDestinationControls.every((expected) =>
+          passedMonitorVisit.destinationControlAssertions.some(
+            (assertion) =>
+              assertion.role === expected.role &&
+              assertion.type === expected.type &&
+              assertion.name === expected.name &&
+              assertion.matchCount === 1 &&
+              assertion.satisfied
+          )
+        ),
+      "The /monitors/new flow did not expose the declared semantic Price Scout form controls"
     );
     requireCondition(
       evidence.observations.title === "Price Scout",
@@ -398,6 +420,7 @@ async function main() {
       coverageProfile: evidence.observations.exploration.verification.profile,
       visitedPath: "/monitors/new",
       destinationAssertions: priceScoutExpectedDestinationTexts,
+      destinationControls: priceScoutExpectedDestinationControls,
       composeProject: composeProjectName,
       artifacts: outputDirectory
     };

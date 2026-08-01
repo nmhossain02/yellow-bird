@@ -449,7 +449,36 @@ beforeAll(async () => {
     const unrelatedRouteSurface = request.url?.startsWith(
       "/agent-unrelated-route-surface"
     );
+    const staticControlCopySurface = request.url?.startsWith(
+      "/agent-static-control-copy-surface"
+    );
+    const staticControlCopyDestination = request.url?.startsWith(
+      "/agent-static-control-copy-destination"
+    );
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    if (staticControlCopySurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Control assertion boundary</title></head>
+          <body><a href="/agent-static-control-copy-destination">New monitor</a></body>
+        </html>`);
+      return;
+    }
+    if (staticControlCopyDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Static form copy</title></head>
+          <body>
+            <h1>Track any public product page</h1>
+            <p>Product URL</p>
+            <p>Tracking instruction</p>
+            <p>Frequency</p>
+            <p>Compile monitor</p>
+            <a href="/">Home</a>
+          </body>
+        </html>`);
+      return;
+    }
     if (undeclaredNavigationSurface) {
       response.end(`<!doctype html>
         <html>
@@ -529,6 +558,19 @@ beforeAll(async () => {
             <section style="display: none">
               <p>css-copy-secret</p>
               <a href="/agent-flow">CSS hidden setup choice</a>
+            </section>
+            <details>
+              <summary>Private details</summary>
+              <p>closed-details-secret</p>
+              <a href="/agent-flow">Closed details setup choice</a>
+            </details>
+            <section style="width: 0; height: 0; overflow: hidden">
+              <p>zero-clipped-secret</p>
+              <a href="/agent-flow">Clipped setup choice</a>
+            </section>
+            <section style="clip-path: inset(50%)">
+              <p>clip-path-secret</p>
+              <a href="/agent-flow">Clip path setup choice</a>
             </section>
             <a href="/agent-flow">Inspect setup</a>
           </body>
@@ -2234,6 +2276,70 @@ test("owned coverage rejects a primary destination missing declared text", async
     ).satisfied,
     false
   );
+});
+
+test("owned coverage rejects static copy without declared semantic controls", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-control-assertion-")
+  );
+  const report = await createAgentRunner(() => ({
+    action: "finish",
+    elementRef: null,
+    value: null,
+    rationale: "No action is needed.",
+    coverage: "partial",
+    summary: "The planner remained conservative."
+  }))({
+    target: `${target}/agent-static-control-copy-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentPrimaryRoutes: ["/agent-static-control-copy-destination"],
+    agentNavigationRoutes: ["/"],
+    agentExpectedTexts: [
+      "Track any public product page",
+      "Product URL",
+      "Tracking instruction",
+      "Frequency"
+    ],
+    agentExpectedControls: [
+      "textbox:url:Product URL",
+      "textbox:textarea:Tracking instruction",
+      "combobox:select-one:Frequency",
+      "button:submit:Compile monitor"
+    ],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.verification.satisfied, false);
+  const visit = report.observations.exploration.steps[0];
+  assert.ok(visit.destinationControlCount > 0);
+  assert.ok(visit.destinationAssertions.every((assertion) => assertion.satisfied));
+  assert.deepEqual(
+    visit.destinationControlAssertions,
+    [
+      ["textbox", "url", "Product URL"],
+      ["textbox", "textarea", "Tracking instruction"],
+      ["combobox", "select-one", "Frequency"],
+      ["button", "submit", "Compile monitor"]
+    ].map(([role, type, name]) => ({
+      role,
+      type,
+      name,
+      matchCount: 0,
+      satisfied: false
+    }))
+  );
+  assert.equal(
+    report.observations.exploration.verification.criteria.find(
+      (criterion) =>
+        criterion.id === "owner-declared-destination-controls-observed"
+    ).satisfied,
+    false
+  );
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(regression, /getByRole\("textbox", \{ name: "Product URL"/);
+  assert.match(regression, /toHaveJSProperty\("type", "url"\)/);
 });
 
 test("owned coverage profile links a distinct destination to its visit", async () => {
@@ -4396,6 +4502,8 @@ test("standalone intent fixture runs end to end including replay", async () => {
         "Intent flow fixture",
         "--agent-primary-route",
         "/watch",
+        "--agent-expect-control",
+        "textbox:url:Item URL",
         "--engine-base-url",
         `http://127.0.0.1:${engineServer.address().port}/v1`,
         "--engine-model",
@@ -4412,6 +4520,9 @@ test("standalone intent fixture runs end to end including replay", async () => {
     );
     assert.equal(evidence.outcome, "clear");
     assert.equal(evidence.observations.exploration.status, "completed");
+    assert.deepEqual(evidence.assertions.agentExpectedControls, [
+      { role: "textbox", type: "url", name: "Item URL" }
+    ]);
     assert.deepEqual(
       evidence.observations.exploration.steps.map(
         ({ action, status }) => ({ action, status })
@@ -4424,6 +4535,18 @@ test("standalone intent fixture runs end to end including replay", async () => {
     assert.equal(
       evidence.observations.exploration.steps[0].url,
       `${intentFlow.url}/watch`
+    );
+    assert.deepEqual(
+      evidence.observations.exploration.steps[0].destinationControlAssertions,
+      [
+        {
+          role: "textbox",
+          type: "url",
+          name: "Item URL",
+          matchCount: 1,
+          satisfied: true
+        }
+      ]
     );
 
     const install = await runCommand(
@@ -4578,6 +4701,7 @@ test("historical v2 evidence without exploration remains valid", async () => {
   });
   delete evidence.observations.exploration;
   delete evidence.assertions.agentExpectedTexts;
+  delete evidence.assertions.agentExpectedControls;
   const schema = JSON.parse(
     await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
   );
