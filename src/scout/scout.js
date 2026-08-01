@@ -304,18 +304,47 @@ function buildRegression(options, explorationSteps = []) {
     "",
     `test(${quoteForJavaScript(`YellowBird scout: ${options.intent}`)}, async ({ page }) => {`,
     "  const consoleErrors = [];",
+    "  const pageErrors = [];",
     "  const yellowbirdGuardControlName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
     "  const yellowbirdGuardControlToken = randomUUID();",
     "  const yellowbirdGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;",
+    "  const yellowbirdFetchFailurePrefix = `__yellowbird_fetch_failure__${randomUUID()}:`;",
     "  let yellowbirdAgentViolation = null;",
+    "  const yellowbirdParseFetchFailure = detail => {",
+    "    const text = String(detail || \"\");",
+    "    const markerIndex = text.indexOf(yellowbirdFetchFailurePrefix);",
+    "    if (markerIndex < 0) return null;",
+    "    const encodedStart = markerIndex + yellowbirdFetchFailurePrefix.length;",
+    '    const separator = text.indexOf(":", encodedStart);',
+    "    if (separator < 0) return null;",
+    "    try {",
+    "      return {",
+    "        url: decodeURIComponent(text.slice(encodedStart, separator)),",
+    '        message: text.slice(separator + 1) || "Failed to fetch"',
+    "      };",
+    "    } catch { return null; }",
+    "  };",
     '  page.on("console", (message) => {',
     "    const text = message.text();",
     "    if (text.startsWith(yellowbirdGuardPrefix)) {",
     "      try { yellowbirdAgentViolation ||= JSON.parse(text.slice(yellowbirdGuardPrefix.length)); } catch {}",
     "      return;",
     "    }",
-    '    if (message.type() === "error")',
-    "      consoleErrors.push({ text, location: message.location() });",
+    '    if (message.type() === "error") {',
+    "      const fetchFailure = yellowbirdParseFetchFailure(text);",
+    "      consoleErrors.push({",
+    "        text: fetchFailure?.message || text,",
+    "        fetchFailureUrl: fetchFailure?.url || null,",
+    "        location: message.location()",
+    "      });",
+    "    }",
+    "  });",
+    '  page.on("pageerror", error => {',
+    "    const fetchFailure = yellowbirdParseFetchFailure(error.message);",
+    "    pageErrors.push({",
+    "      message: fetchFailure?.message || error.message,",
+    "      fetchFailureUrl: fetchFailure?.url || null",
+    "    });",
     "  });",
     "",
     `  const yellowbirdTarget = new URL(${quoteForJavaScript(options.target)});`,
@@ -342,6 +371,9 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     "    return null;",
     "  };",
+    "  const yellowbirdCanonicalizeAgentText = value => String(value ?? \"\")",
+    '    .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")',
+    '    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");',
     "  const yellowbirdDecodeAgentUrlText = url => {",
     "    const components = [",
     "      yellowbirdDecodeAgentText(url.pathname),",
@@ -356,11 +388,14 @@ function buildRegression(options, explorationSteps = []) {
     "      const decoded = yellowbirdDecodeAgentUrlText(url);",
     '      return ["http:", "https:"].includes(url.protocol) &&',
     "        url.origin === yellowbirdTarget.origin && !url.username && !url.password &&",
-    "        decoded !== null && !yellowbirdUnsafeRequest.test(decoded);",
+    "        decoded !== null && !yellowbirdUnsafeRequest.test(yellowbirdCanonicalizeAgentText(decoded));",
     "    } catch { return false; }",
     "  };",
-    "  await page.context().addInitScript(({ authorizedOrigin, controlName, controlToken, guardPrefix, prohibitedPattern, startActive }) => {",
+    "  await page.context().addInitScript(({ authorizedOrigin, controlName, controlToken, fetchFailurePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
     "    const prohibited = new RegExp(prohibitedPattern, \"i\");",
+    "    const canonicalizeSemanticText = value => String(value ?? \"\")",
+    '      .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")',
+    '      .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");',
     "    const decodeText = value => {",
     "      let decoded = String(value ?? \"\");",
     "      const maximumPasses = decoded.length + 1;",
@@ -386,7 +421,7 @@ function buildRegression(options, explorationSteps = []) {
     "        const decoded = decodeUrlText(url);",
     '        return ["http:", "https:"].includes(url.protocol) &&',
     "          url.origin === authorizedOrigin && !url.username && !url.password &&",
-    "          decoded !== null && !prohibited.test(decoded);",
+    "          decoded !== null && !prohibited.test(canonicalizeSemanticText(decoded));",
     "      } catch { return false; }",
     "    };",
     "    const active = Boolean(startActive);",
@@ -397,7 +432,7 @@ function buildRegression(options, explorationSteps = []) {
     "      writable: false,",
     "      value: (candidateToken, nextAction) => {",
     "        if (candidateToken !== controlToken) return false;",
-    '        if (!["visit", "fill", "select", "click"].includes(nextAction)) return false;',
+    '        if (!["idle", "visit", "fill", "select", "click"].includes(nextAction)) return false;',
     "        action = nextAction;",
     "        return true;",
     "      }",
@@ -409,6 +444,20 @@ function buildRegression(options, explorationSteps = []) {
     "    };",
     "    const observeCurrentUrl = () => {",
     '      if (active && !urlAllowed(globalThis.location.href)) blocked("prohibited-navigation");',
+    "    };",
+    "    const originalFetch = globalThis.fetch.bind(globalThis);",
+    "    globalThis.fetch = async function (input, init) {",
+    "      let requestUrl = null;",
+    "      try {",
+    "        requestUrl = new URL(input instanceof Request ? input.url : String(input), globalThis.location.href).href;",
+    "      } catch {}",
+    "      try {",
+    "        return await originalFetch(input, init);",
+    "      } catch (error) {",
+    "        if (!active || !requestUrl) throw error;",
+    '        const message = error instanceof Error ? error.message : String(error || "Failed to fetch");',
+    "        throw new TypeError(`${fetchFailurePrefix}${encodeURIComponent(requestUrl)}:${message}`);",
+    "      }",
     "    };",
     '    globalThis.addEventListener("submit", event => {',
     '      if (!blocked("form-submission")) return;',
@@ -442,7 +491,14 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     '    globalThis.addEventListener("hashchange", observeCurrentUrl);',
     '    globalThis.addEventListener("popstate", observeCurrentUrl);',
-    `  }, { authorizedOrigin: yellowbirdTarget.origin, controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
+    `  }, { authorizedOrigin: yellowbirdTarget.origin, controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, fetchFailurePrefix: yellowbirdFetchFailurePrefix, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
+    "  const yellowbirdRecordBlockedRequest = (request, ...additionalUrls) => {",
+    "    const redirectChain = [];",
+    "    for (let current = request; current; current = current.redirectedFrom())",
+    "      redirectChain.unshift(current.url());",
+    "    for (const url of [...redirectChain, ...additionalUrls])",
+    "      yellowbirdBlockedUrls.add(url);",
+    "  };",
     '  await page.context().route("**/*", async (route) => {',
     "    const request = route.request();",
     "    const requestUrl = request.url();",
@@ -475,8 +531,13 @@ function buildRegression(options, explorationSteps = []) {
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
     '        (!yellowbirdAgentMode || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl && safeAgentAction));',
     "    } catch {}",
-    '    if (allowed && yellowbirdAgentAction?.action === "visit" && request.resourceType() === "document") {',
-    "      const response = await route.fetch({ maxRedirects: 0 });",
+    '    if (allowed && yellowbirdAgentAction?.action === "visit") {',
+    "      let response;",
+    "      try {",
+    "        response = await route.fetch({ maxRedirects: 0 });",
+    "      } catch {",
+    '        return route.abort("failed");',
+    "      }",
     '      const location = response.headers()["location"];',
     "      if ([301, 302, 303, 307, 308].includes(response.status()) && location) {",
     "        let redirectUrl = location;",
@@ -487,15 +548,14 @@ function buildRegression(options, explorationSteps = []) {
     "          safeRedirect = yellowbirdAgentUrlAllowed(parsedRedirect.href);",
     "        } catch {}",
     "        if (!safeRedirect) {",
-    "          yellowbirdBlockedUrls.add(requestUrl);",
-    "          yellowbirdBlockedUrls.add(redirectUrl);",
+    "          yellowbirdRecordBlockedRequest(request, redirectUrl);",
     '          return route.abort("blockedbyclient");',
     "        }",
     "      }",
     "      return route.fulfill({ response });",
     "    }",
     "    if (allowed) return route.continue();",
-    "    yellowbirdBlockedUrls.add(requestUrl);",
+    "    yellowbirdRecordBlockedRequest(request);",
     '    return route.abort("blockedbyclient");',
     "  });",
     "  const yellowbirdSocketProtocol = yellowbirdTarget.protocol === \"https:\" ? \"wss:\" : \"ws:\";",
@@ -534,23 +594,59 @@ function buildRegression(options, explorationSteps = []) {
     "    await yellowbirdActivateAgentGuard(action);",
     "  };",
     "  const yellowbirdFinishAgentNavigation = async () => {",
-    "    yellowbirdAgentAction.navigationWindowOpen = false;",
-    '    await yellowbirdActivateAgentGuard("visit");',
+    "    if (yellowbirdAgentAction) {",
+    '      yellowbirdAgentAction.action = "idle";',
+    "      yellowbirdAgentAction.requestedUrl = null;",
+    "      yellowbirdAgentAction.navigationStarted = false;",
+    "      yellowbirdAgentAction.navigationRequests.clear();",
+    "      yellowbirdAgentAction.navigationWindowOpen = false;",
+    "    }",
+    '    await yellowbirdActivateAgentGuard("idle");',
+    "  };",
+    "  const yellowbirdRunAgentAction = async (action, requestedUrl, operation) => {",
+    "    let actionFailure = null;",
+    "    try {",
+    "      await yellowbirdBeginAgentAction(action, requestedUrl);",
+    "      return await operation();",
+    "    } catch (error) {",
+    "      actionFailure = error;",
+    "      throw error;",
+    "    } finally {",
+    "      try {",
+    "        await yellowbirdFinishAgentNavigation();",
+    "      } catch (error) {",
+    "        if (!actionFailure) throw error;",
+    "      }",
+    "    }",
     "  };",
     "  const yellowbirdAssertAgentGuard = async () => {",
     "    expect(yellowbirdAgentUrlAllowed(page.url())).toBe(true);",
     "    expect(yellowbirdAgentViolation).toBeNull();",
     "  };",
     "",
-    `  const response = await page.goto(yellowbirdTarget.href, { waitUntil: "domcontentloaded" });`,
+    "  let response;",
     ...(options.exploreIntent
       ? [
+          "  let yellowbirdInitialNavigationFailure = null;",
+          "  try {",
+          `    response = await page.goto(yellowbirdTarget.href, { waitUntil: "domcontentloaded" });`,
           `  await page.waitForTimeout(${AGENT_NAVIGATION_SETTLEMENT_MS});`,
-          "  await yellowbirdFinishAgentNavigation();",
+          "  } catch (error) {",
+          "    yellowbirdInitialNavigationFailure = error;",
+          "    throw error;",
+          "  } finally {",
+          "    try {",
+          "      await yellowbirdFinishAgentNavigation();",
+          "    } catch (error) {",
+          "      if (!yellowbirdInitialNavigationFailure) throw error;",
+          "    }",
+          "  }",
           "  await page.waitForTimeout(100);",
           "  await yellowbirdAssertAgentGuard();"
         ]
-      : []),
+      : [
+          `  response = await page.goto(yellowbirdTarget.href, { waitUntil: "domcontentloaded" });`
+        ]),
     `  expect(response?.status()).toBe(${options.expectedStatus});`
   ];
 
@@ -586,16 +682,15 @@ function buildRegression(options, explorationSteps = []) {
     }
   });
   replaySteps.forEach((step, index) => {
-    lines.push(
-      `  await yellowbirdBeginAgentAction(${quoteForJavaScript(step.action)}, ${quoteForJavaScript(step.requestedUrl)});`
-    );
     if (step.action === "visit") {
       const response = `yellowbirdAgentResponse${index + 1}`;
       lines.push(
-        `  const ${response} = await page.goto(${quoteForJavaScript(step.requestedUrl)}, { waitUntil: "domcontentloaded" });`,
-        `  await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`,
-        `  await page.waitForTimeout(${AGENT_NAVIGATION_SETTLEMENT_MS});`,
-        "  await yellowbirdFinishAgentNavigation();",
+        `  const ${response} = await yellowbirdRunAgentAction("visit", ${quoteForJavaScript(step.requestedUrl)}, async () => {`,
+        `    const actionResponse = await page.goto(${quoteForJavaScript(step.requestedUrl)}, { waitUntil: "domcontentloaded" });`,
+        `    await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`,
+        `    await page.waitForTimeout(${AGENT_NAVIGATION_SETTLEMENT_MS});`,
+        "    return actionResponse;",
+        "  });",
         "  await page.waitForTimeout(100);",
         "  await yellowbirdAssertAgentGuard();"
       );
@@ -606,6 +701,9 @@ function buildRegression(options, explorationSteps = []) {
       }
       return;
     }
+    lines.push(
+      `  await yellowbirdRunAgentAction(${quoteForJavaScript(step.action)}, ${quoteForJavaScript(step.requestedUrl)}, async () => {`
+    );
     if (
       !step.locator ||
       !Number.isInteger(step.locator.ordinal) ||
@@ -637,6 +735,7 @@ function buildRegression(options, explorationSteps = []) {
       lines.push(`  await ${selectedLocator}.click();`);
     }
     lines.push(
+      "  });",
       "  await page.waitForTimeout(250);",
       "  await yellowbirdAssertAgentGuard();"
     );
@@ -644,11 +743,18 @@ function buildRegression(options, explorationSteps = []) {
   if (!options.ignoreConsoleErrors) {
     lines.push(
       "  const yellowbirdProductConsoleErrors = consoleErrors.filter(entry =>",
+      "    !(entry.fetchFailureUrl && yellowbirdBlockedUrls.has(entry.fetchFailureUrl)) &&",
       "    !(yellowbirdBlockedUrls.has(entry.location?.url) && /ERR_BLOCKED_BY_CLIENT/i.test(entry.text))",
       "  );",
       "  expect(yellowbirdProductConsoleErrors).toEqual([]);"
     );
   }
+  lines.push(
+    "  const yellowbirdProductPageErrors = pageErrors.filter(entry =>",
+    "    !(entry.fetchFailureUrl && yellowbirdBlockedUrls.has(entry.fetchFailureUrl))",
+    "  );",
+    "  expect(yellowbirdProductPageErrors).toEqual([]);"
+  );
   lines.push("});", "");
   return lines.join("\n");
 }
@@ -783,9 +889,7 @@ async function finalizeRun(state) {
     }
   }
   const policyBlockedUrls = new Set(
-    blockedRequests.flatMap((request) =>
-      [request.url, request.requestUrl].filter(Boolean)
-    )
+    blockedRequests.flatMap((request) => request.redirectChain || [])
   );
   const productConsoleErrors = consoleErrors.filter(
     (entry) =>
@@ -1246,14 +1350,31 @@ export function createScoutRunner({
     const agentFetchFailurePrefix = `__yellowbird_fetch_failure__${randomUUID()}:`;
     const agentGuardAttempts = [];
     const observedAgentGuardAttempts = new Set();
-    const addBlockedRequest = (request) => {
-      blockedRequests.push(request);
+    const redirectedRequestUrls = (request) => {
+      const urls = [];
+      for (let current = request; current; current = current.redirectedFrom()) {
+        urls.unshift(evidenceUrl(current.url()));
+      }
+      return urls;
+    };
+    const addBlockedRequest = (request, interceptedRequest = null) => {
+      const redirectChain = [
+        ...(interceptedRequest
+          ? redirectedRequestUrls(interceptedRequest)
+          : []),
+        request.requestUrl,
+        request.url
+      ].filter(Boolean);
+      blockedRequests.push({
+        ...request,
+        redirectChain: [...new Set(redirectChain)]
+      });
     };
     const isBlockedAgentUrl = (url) =>
       blockedRequests.some(
         (request) =>
           request.reason?.startsWith("agent-") &&
-          (request.url === url || request.requestUrl === url)
+          request.redirectChain.includes(url)
       );
     const parseAgentFetchFailure = (detail) => {
       const text = String(detail || "");
@@ -1399,10 +1520,15 @@ export function createScoutRunner({
       ) {
         if (
           agentNetworkPolicyActive &&
-          agentActionContext?.action === "visit" &&
-          route.request().resourceType() === "document"
+          agentActionContext?.action === "visit"
         ) {
-          const response = await route.fetch({ maxRedirects: 0 });
+          let response;
+          try {
+            response = await route.fetch({ maxRedirects: 0 });
+          } catch {
+            await route.abort("failed");
+            return;
+          }
           const location = response.headers().location;
           if (
             [301, 302, 303, 307, 308].includes(response.status()) &&
@@ -1433,7 +1559,7 @@ export function createScoutRunner({
                 requestUrl: evidenceUrl(requestUrl),
                 url: evidenceUrl(redirectUrl),
                 reason
-              });
+              }, route.request());
               record(
                 "warn",
                 "network.request.blocked",
@@ -1476,7 +1602,7 @@ export function createScoutRunner({
         resourceType: route.request().resourceType(),
         url: evidenceUrl(requestUrl),
         reason
-      });
+      }, route.request());
       record("warn", "network.request.blocked", "Blocked a request outside policy", {
         method: requestMethod,
         resourceType: route.request().resourceType(),
@@ -1496,6 +1622,10 @@ export function createScoutRunner({
       startActive
     }) => {
       const prohibited = new RegExp(prohibitedPattern, "i");
+      const canonicalizeSemanticText = (value) =>
+        String(value ?? "")
+          .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
+          .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
       const decodeText = (value) => {
         let decoded = String(value ?? "");
         const maximumPasses = decoded.length + 1;
@@ -1531,7 +1661,7 @@ export function createScoutRunner({
             !url.username &&
             !url.password &&
             decoded !== null &&
-            !prohibited.test(decoded)
+            !prohibited.test(canonicalizeSemanticText(decoded))
           );
         } catch {
           return false;
@@ -1545,7 +1675,7 @@ export function createScoutRunner({
         writable: false,
         value: (candidateToken, nextAction) => {
           if (candidateToken !== controlToken) return false;
-          if (!["visit", "fill", "select", "click"].includes(nextAction)) {
+          if (!["idle", "visit", "fill", "select", "click"].includes(nextAction)) {
             return false;
           }
           action = nextAction;
@@ -1692,8 +1822,7 @@ export function createScoutRunner({
       if (
         requestUrl.startsWith(authorization.origin) &&
         !blockedRequests.some(
-          (blocked) =>
-            blocked.url === requestUrl || blocked.requestUrl === requestUrl
+          (blocked) => blocked.redirectChain.includes(requestUrl)
         )
       ) {
         failedRequests.push({
@@ -1754,9 +1883,13 @@ export function createScoutRunner({
     }
     async function closeAgentNavigationWindow(requireGuard = true) {
       if (agentActionContext) {
+        agentActionContext.action = "idle";
+        agentActionContext.requestedUrl = null;
+        agentActionContext.navigationStarted = false;
+        agentActionContext.navigationRequests.clear();
         agentActionContext.navigationWindowOpen = false;
       }
-      if (requireGuard) await activateAgentGuard("visit");
+      if (requireGuard) await activateAgentGuard("idle");
     }
     page.on("response", (response) => {
       if (
@@ -1786,7 +1919,7 @@ export function createScoutRunner({
         ...diagnosticUrl(page.url())
       });
       await page.waitForTimeout(AGENT_NAVIGATION_SETTLEMENT_MS);
-      if (agentNetworkPolicyActive) await closeAgentNavigationWindow(false);
+      if (agentNetworkPolicyActive) await closeAgentNavigationWindow();
       state.assertionTitle = await page.title().catch(() => "");
       state.assertionBodyText = await page
         .locator("body")
@@ -1991,11 +2124,13 @@ export function createScoutRunner({
                   await closeAgentNavigationWindow();
                 },
                 async end() {
+                  await closeAgentNavigationWindow();
                   await collectAgentGuardAttempts();
                 }
               }
             });
           } finally {
+            await closeAgentNavigationWindow(false);
             await collectAgentGuardAttempts();
           }
           const finalProvenance = resolvedEngine.engine.provenance();

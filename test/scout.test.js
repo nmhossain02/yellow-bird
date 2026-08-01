@@ -15,6 +15,7 @@ import {
   resolveLoopbackScheme
 } from "../src/scout/diagnostics.js";
 import {
+  exploreIntentWithEngine,
   isAgentUrlAllowed,
   PROHIBITED_AGENT_ACTION_PATTERN
 } from "../src/scout/explorer.js";
@@ -32,9 +33,11 @@ let visitReadRequestCount = 0;
 let delayedVisitMutationRequestCount = 0;
 let visitEventSourceRequestCount = 0;
 let visitWebSocketUpgradeCount = 0;
+let failedVisitDelayedRequestCount = 0;
 let submissionRequestCount = 0;
 let crossOriginRequestCount = 0;
 let prohibitedRedirectRequestCount = 0;
+let failVisitNavigation = false;
 
 async function runCommand(command, cwd, env) {
   const captureDirectory = await mkdtemp(
@@ -209,6 +212,21 @@ beforeAll(async () => {
       response.end();
       return;
     }
+    if (request.url === "/agent-fetch-redirect") {
+      response.writeHead(302, { location: "/deleteAccount" });
+      response.end();
+      return;
+    }
+    if (request.url === "/agent-failed-visit-delayed") {
+      failedVisitDelayedRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (request.url === "/agent-failed-visit-destination" && failVisitNavigation) {
+      request.socket.destroy();
+      return;
+    }
     if (request.url === "/auth_callback") {
       prohibitedRedirectRequestCount += 1;
       response.writeHead(204);
@@ -247,6 +265,18 @@ beforeAll(async () => {
     const redirectSurface = request.url?.startsWith("/agent-redirect-surface");
     const prohibitedRedirectSurface = request.url?.startsWith(
       "/agent-prohibited-redirect-surface"
+    );
+    const fetchRedirectSurface = request.url?.startsWith(
+      "/agent-fetch-redirect-surface"
+    );
+    const fetchRedirectDestination = request.url?.startsWith(
+      "/agent-fetch-redirect-destination"
+    );
+    const failedVisitSurface = request.url?.startsWith(
+      "/agent-failed-visit-surface"
+    );
+    const failedVisitDestination = request.url?.startsWith(
+      "/agent-failed-visit-destination"
     );
     const historySurface = request.url?.startsWith("/history-surface");
     const sameDocumentSurface = request.url?.startsWith(
@@ -298,6 +328,9 @@ beforeAll(async () => {
             <a href="/auth">Account help</a>
             <a href="/user_auth">Account support</a>
             <a href="/auth_callback">Account callback</a>
+            <a href="/authCallback">Inspect callback</a>
+            <a href="/deleteAccount">Inspect account</a>
+            <a href="/createMonitor">Inspect monitor</a>
             <a href="http://user:secret@127.0.0.1:${server.address().port}/agent-flow">Credentialed setup</a>
             <span id="dangerous-name"><img alt="Delete account"></span>
             <a aria-label="Inspect setup" aria-labelledby="dangerous-name" href="/agent-flow">Setup</a>
@@ -447,6 +480,43 @@ beforeAll(async () => {
         </html>`);
       return;
     }
+    if (fetchRedirectSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Fetch redirect surface</title></head>
+          <body><a href="/agent-fetch-redirect-destination">Inspect setup</a></body>
+        </html>`);
+      return;
+    }
+    if (fetchRedirectDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Fetch redirect destination</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <script>fetch("/agent-fetch-redirect");</script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (failedVisitSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Failed visit surface</title></head>
+          <body>
+            <a href="/agent-failed-visit-destination">Inspect unavailable route</a>
+          </body>
+        </html>`);
+      return;
+    }
+    if (failedVisitDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Recovered visit destination</title></head>
+          <body><input name="query" aria-label="Query"></body>
+        </html>`);
+      return;
+    }
     if (historySurface) {
       response.end(`<!doctype html>
         <html>
@@ -478,7 +548,7 @@ beforeAll(async () => {
           <body>
             <input name="query" aria-label="Query">
             <script>
-              history.pushState({}, "", "/auth_callback");
+              history.pushState({}, "", "/authCallback");
               history.replaceState({}, "", "/agent-same-document-destination");
             </script>
           </body>
@@ -513,7 +583,7 @@ beforeAll(async () => {
                 attempts: [],
                 observeCurrentUrl() {}
               };
-              history.pushState({}, "", "/auth_callback");
+              history.pushState({}, "", "/authCallback");
             </script>
           </body>
         </html>`);
@@ -632,13 +702,57 @@ async function launchSharedBrowser() {
   };
 }
 
+async function launchBrowserWithDelayedScreenshot() {
+  let context;
+  return {
+    async newContext(options) {
+      context = await sharedBrowser.newContext(options);
+      const newPage = context.newPage.bind(context);
+      context.newPage = async () => {
+        const page = await newPage();
+        const goto = page.goto.bind(page);
+        const screenshot = page.screenshot.bind(page);
+        page.goto = async (url, gotoOptions) => {
+          try {
+            return await goto(url, gotoOptions);
+          } catch (error) {
+            if (String(url).includes("/agent-failed-visit-destination")) {
+              setTimeout(() => {
+                page
+                  .evaluate((requestUrl) => {
+                    fetch(requestUrl).catch(() => {});
+                  }, `${target}/agent-failed-visit-delayed`)
+                  .catch(() => {});
+              }, 50);
+            }
+            throw error;
+          }
+        };
+        page.screenshot = async (screenshotOptions) => {
+          await page.waitForTimeout(400);
+          return screenshot(screenshotOptions);
+        };
+        return page;
+      };
+      return context;
+    },
+    async close() {
+      await context?.close();
+    }
+  };
+}
+
 const runSharedScout = createScoutRunner({
   launchBrowser: launchSharedBrowser
 });
 
-function createAgentRunner(decide, resolveEngineOverride) {
+function createAgentRunner(
+  decide,
+  resolveEngineOverride,
+  launchBrowser = launchSharedBrowser
+) {
   return createScoutRunner({
-    launchBrowser: launchSharedBrowser,
+    launchBrowser,
     resolveEngine:
       resolveEngineOverride ||
       (async () => ({
@@ -680,6 +794,9 @@ test("agent URL policy rejects credentials, auth shorthand, and fragments", () =
   assert.equal(isAgentUrlAllowed(`${target}/setup`, target), true);
   assert.equal(isAgentUrlAllowed(`${target}/user_auth`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/auth_callback`, target), false);
+  assert.equal(isAgentUrlAllowed(`${target}/authCallback`, target), false);
+  assert.equal(isAgentUrlAllowed(`${target}/deleteAccount`, target), false);
+  assert.equal(isAgentUrlAllowed(`${target}/createMonitor`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/setup#auth_callback`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/%25252561uth`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/%ZZauth`, target), false);
@@ -692,6 +809,57 @@ test("agent URL policy rejects credentials, auth shorthand, and fragments", () =
     ),
     false
   );
+});
+
+test("action cleanup runs after a failed begin without masking its error", async () => {
+  const context = await sharedBrowser.newContext();
+  const page = await context.newPage();
+  let authorityOpen = false;
+  try {
+    await page.goto(`${target}/agent-redirect-surface`);
+    const exploration = await exploreIntentWithEngine({
+      page,
+      intent: "Assess the setup route",
+      authorizedOrigin: target,
+      engine: {
+        completeStructured: async (request) => {
+          const availableElements = JSON.parse(
+            request.messages.at(-1).content
+          ).page.availableElements;
+          return {
+            output: {
+              action: "act",
+              elementRef: availableElements[0].ref,
+              value: null,
+              rationale: "Inspect the supplied route.",
+              coverage: "continue",
+              summary: ""
+            }
+          };
+        }
+      },
+      maxSteps: 1,
+      timeoutMs: 1_000,
+      record: () => {},
+      actionPolicy: {
+        async begin() {
+          authorityOpen = true;
+          throw new Error("primary begin failure");
+        },
+        async end() {
+          authorityOpen = false;
+          throw new Error("cleanup failure");
+        }
+      }
+    });
+
+    assert.equal(authorityOpen, false);
+    assert.equal(exploration.steps.length, 1);
+    assert.match(exploration.steps[0].evidence, /primary begin failure/);
+    assert.doesNotMatch(exploration.steps[0].evidence, /cleanup failure/);
+  } finally {
+    await context.close();
+  }
 });
 
 test("workflow capabilities must be declared before a run", () => {
@@ -1177,6 +1345,62 @@ test("agent redirect chains use the canonical prohibited-action policy", async (
   );
 });
 
+test("blocked fetch redirects retain exact attribution in live and replay", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-fetch-redirect-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Inspect the supplied setup route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The setup route was inspected.",
+          coverage: "covered",
+          summary: "The setup route was inspected."
+        };
+  })({
+    target: `${target}/agent-fetch-redirect-surface`,
+    intent: "Assess the setup route",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.deepEqual(report.findings, []);
+  assert.deepEqual(report.observations.pageErrors, []);
+  assert.deepEqual(report.observations.failedRequests, []);
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) =>
+        request.reason === "agent-prohibited-url" &&
+        request.url === `${target}/deleteAccount` &&
+        request.redirectChain.includes(`${target}/agent-fetch-redirect`) &&
+        request.redirectChain.includes(`${target}/deleteAccount`)
+    )
+  );
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+}, 30_000);
+
 test("same-document auth routing invalidates an agent visit", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-same-document-")
@@ -1610,6 +1834,57 @@ test("agent action guards block effects delayed between planning rounds", async 
   );
 });
 
+test("failed visits close authority before delayed requests", async () => {
+  failedVisitDelayedRequestCount = 0;
+  failVisitNavigation = true;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-failed-visit-")
+  );
+  try {
+    const report = await createAgentRunner(
+      (request) => {
+        const availableElements = JSON.parse(
+          request.messages.at(-1).content
+        ).page.availableElements;
+        return {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Inspect the supplied route.",
+          coverage: "continue",
+          summary: ""
+        };
+      },
+      undefined,
+      launchBrowserWithDelayedScreenshot
+    )({
+      target: `${target}/agent-failed-visit-surface`,
+      intent: "Assess the setup route",
+      exploreIntent: true,
+      outputDirectory
+    });
+
+    assert.equal(failedVisitDelayedRequestCount, 0);
+    assert.equal(report.outcome, "attention");
+    assert.match(
+      report.observations.exploration.steps[0].evidence,
+      /ERR_FAILED|ERR_CONNECTION_RESET|ERR_EMPTY_RESPONSE/
+    );
+    assert.ok(
+      report.observations.blockedRequests.some(
+        (request) =>
+          request.url === `${target}/agent-failed-visit-delayed` &&
+          request.reason === "agent-non-visit-request"
+      )
+    );
+    const regression = await readFile(report.artifacts.regression, "utf8");
+    assert.match(regression, /yellowbirdRunAgentAction/);
+    assert.match(regression, /finally \{/);
+  } finally {
+    failVisitNavigation = false;
+  }
+});
+
 test("visit authority allows bounded load requests and blocks delayed effects in live and replay", async () => {
   initialVisitReadRequestCount = 0;
   initialDelayedVisitMutationRequestCount = 0;
@@ -1664,7 +1939,7 @@ test("visit authority allows bounded load requests and blocks delayed effects in
   assert.deepEqual(report.observations.pageErrors, []);
   assert.ok(
     report.observations.blockedRequests.some(
-      (request) => request.reason === "agent-active-request"
+      (request) => request.reason === "agent-non-visit-request"
     )
   );
   const install = await runCommand([process.execPath, "install"], outputDirectory);
@@ -1888,7 +2163,10 @@ test("agent policy omits cross-origin and authentication controls", async () => 
   });
 
   assert.deepEqual(exposedLabels[0], ["Inspect setup"]);
-  assert.doesNotMatch(plannerInputs.join("\n"), /secret|user_auth|auth_callback/);
+  assert.doesNotMatch(
+    plannerInputs.join("\n"),
+    /secret|user_auth|auth_callback|authCallback|deleteAccount|createMonitor/
+  );
   assert.equal(report.outcome, "clear");
   assert.equal(report.observations.exploration.steps[0].action, "visit");
   assert.equal(report.observations.exploration.steps[0].url, `${target}/agent-flow`);

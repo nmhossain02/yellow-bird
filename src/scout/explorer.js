@@ -92,6 +92,20 @@ function decodeAgentText(value) {
   return null;
 }
 
+function canonicalizeAgentSemanticText(value) {
+  return String(value ?? "")
+    .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+}
+
+function hasProhibitedAgentText(value) {
+  const decoded = decodeAgentText(value);
+  return (
+    decoded === null ||
+    PROHIBITED_ACTION_TEXT.test(canonicalizeAgentSemanticText(decoded))
+  );
+}
+
 function decodeAgentUrlText(url) {
   const components = [
     decodeAgentText(url.pathname),
@@ -113,7 +127,7 @@ export function isAgentUrlAllowed(value, authorizedOrigin) {
       !url.username &&
       !url.password &&
       decoded !== null &&
-      !PROHIBITED_ACTION_TEXT.test(decoded)
+      !PROHIBITED_ACTION_TEXT.test(canonicalizeAgentSemanticText(decoded))
     );
   } catch {
     return false;
@@ -137,8 +151,7 @@ function hasProhibitedSemantics(element) {
     element.formHasPassword ||
     values.some((value) => {
       if (!value) return false;
-      const decoded = decodeAgentText(value);
-      return decoded === null || PROHIBITED_ACTION_TEXT.test(decoded);
+      return hasProhibitedAgentText(value);
     })
   );
 }
@@ -229,6 +242,10 @@ async function snapshotPage(page, authorizedOrigin) {
   const raw = await page.evaluate(({ limits, prohibitedPattern }) => {
     let remainingCharacters = limits.totalCharacters;
     const prohibited = new RegExp(prohibitedPattern, "i");
+    const canonicalizeSemanticText = (value) =>
+      String(value ?? "")
+        .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
+        .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
     const decodeText = (value) => {
       let decoded = String(value ?? "");
       const maximumPasses = decoded.length + 1;
@@ -247,7 +264,9 @@ async function snapshotPage(page, authorizedOrigin) {
     const hasProhibitedText = (value) => {
       if (!value) return false;
       const decoded = decodeText(value);
-      return decoded === null || prohibited.test(decoded);
+      return (
+        decoded === null || prohibited.test(canonicalizeSemanticText(decoded))
+      );
     };
     const takeText = (value, maximum) => {
       const text = String(value ?? "");
@@ -388,7 +407,9 @@ async function snapshotPage(page, authorizedOrigin) {
     const decodedAccessibleSnapshot = decodeAgentText(accessibleSnapshot);
     if (
       decodedAccessibleSnapshot === null ||
-      PROHIBITED_ACTION_TEXT.test(decodedAccessibleSnapshot)
+      PROHIBITED_ACTION_TEXT.test(
+        canonicalizeAgentSemanticText(decodedAccessibleSnapshot)
+      )
     ) {
       continue;
     }
@@ -870,14 +891,15 @@ export async function exploreIntentWithEngine({
       action,
       ...(selected.href ? diagnosticUrl(selected.href) : {})
     });
-    let actionPolicyStarted = false;
+    let actionPolicyAttempted = false;
+    let actionFailed = false;
     try {
+      actionPolicyAttempted = Boolean(actionPolicy);
       await actionPolicy?.begin({
         id,
         action,
         requestedUrl: selected.href || null
       });
-      actionPolicyStarted = Boolean(actionPolicy);
       let response = null;
       const locator = page.locator(selected.runtimeSelector);
       if (action === "visit") {
@@ -943,6 +965,7 @@ export async function exploreIntentWithEngine({
       );
       feedback = "";
     } catch (error) {
+      actionFailed = true;
       const detail = safeDetail(error?.message || error);
       record("error", "agent.action.failed", "The authorized interaction failed", {
         id,
@@ -978,7 +1001,13 @@ export async function exploreIntentWithEngine({
         )
       });
     } finally {
-      if (actionPolicyStarted) await actionPolicy.end();
+      if (actionPolicyAttempted) {
+        try {
+          await actionPolicy.end();
+        } catch (error) {
+          if (!actionFailed) throw error;
+        }
+      }
     }
   }
 
