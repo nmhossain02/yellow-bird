@@ -1792,19 +1792,16 @@ test("action-policy cleanup failures retain findings and durable evidence", asyn
   assert.ok(report.findings.some((finding) => finding.id === "console-errors"));
   assert.ok(
     report.invalidTestMechanics.some(
-      (issue) => issue.id === "browser-operation-failed"
+      (issue) => issue.id === "agent-action-cleanup-failed"
     )
   );
   assert.equal(report.observations.exploration.status, "inconclusive");
-  assert.equal(report.artifacts.screenshot, null);
-  await assert.rejects(stat(join(outputDirectory, "page.png")));
-  await Promise.all(
-    Object.entries(report.artifacts)
-      .filter(([name]) => name !== "screenshot")
-      .map(([, path]) => stat(path))
-  );
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.equal(report.observations.exploration.steps[0].status, "passed");
+  assert.ok(report.artifacts.screenshot);
+  await Promise.all(Object.values(report.artifacts).map((path) => stat(path)));
   const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
-  assert.match(diagnostics, /browser\.operation\.failed/);
+  assert.match(diagnostics, /agent\.action\.cleanup\.failed/);
   assert.doesNotMatch(diagnostics, /hidden-value/);
 });
 

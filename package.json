@@ -18,9 +18,9 @@
     "scout": "bun bin/yellowbird.js scout",
     "demo:target": "bun examples/demo-target.js",
     "setup:browsers": "bunx playwright install chromium",
-    "test": "bun test --timeout 15000",
+    "test": "bun test --timeout 15000 test/*.test.js",
     "test:price-scout": "bun scripts/validate-price-scout-e2e.js",
-    "check": "bun test --timeout 15000"
+    "check": "bun test --timeout 15000 test/*.test.js"
   },
   "type": "module",
   "dependencies": {
