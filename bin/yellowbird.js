@@ -3,7 +3,10 @@
 import { access, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
-import { diagnosticUrl } from "../src/scout/diagnostics.js";
+import {
+  cleanDiagnosticText,
+  diagnosticUrl
+} from "../src/scout/diagnostics.js";
 import { resolveOutputOption } from "../src/scout/output.js";
 import { startServer } from "../src/server.js";
 
@@ -24,6 +27,10 @@ function argumentsFor(name) {
 
 function flag(name) {
   return process.argv.includes(`--${name}`);
+}
+
+function terminalText(value) {
+  return cleanDiagnosticText(value).replaceAll(/\s+/g, " ");
 }
 
 async function doctor() {
@@ -210,7 +217,7 @@ async function scout() {
     );
     if (report.observations.exploration.summary) {
       console.log(
-        `Agent summary (coverage only): ${report.observations.exploration.summary}`
+        `Agent summary (coverage only): ${terminalText(report.observations.exploration.summary)}`
       );
     }
   }

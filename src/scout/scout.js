@@ -142,7 +142,10 @@ export function validateWorkflow(input = {}) {
 }
 
 function markdownEscape(value) {
-  return String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
+  return cleanDiagnosticText(value)
+    .replaceAll("\\", "\\\\")
+    .replaceAll(/([`*_[\]{}<>#|])/g, "\\$1")
+    .replaceAll(/\s+/g, " ");
 }
 
 function diagnosticsJsonl(events) {
@@ -235,9 +238,9 @@ ${workflowRows}
 - Mode: ${exploration.mode}
 - Status: ${exploration.status}
 - Coverage: ${exploration.coverage}
-- Coverage authority: ${exploration.verification?.satisfied ? `${exploration.verification.authority} (${exploration.verification.profile})` : "model-guided within YellowBird policy"}
+- Coverage authority: ${exploration.verification ? `${exploration.verification.authority} (${exploration.verification.profile}, ${exploration.verification.satisfied ? "satisfied" : "unsatisfied"})` : "model-guided within YellowBird policy"}
 - Engine: ${exploration.engine || "not used"}
-- Coverage summary: ${exploration.summary || "none"}
+- Coverage summary: ${markdownEscape(exploration.summary || "none")}
 
 Coverage summaries and model proposals are not product-failure evidence. A named
 YellowBird-observed profile lists its completion criteria in machine-readable evidence.
@@ -278,31 +281,85 @@ function quoteForJavaScript(value) {
 }
 
 function buildRegression(options, explorationSteps = []) {
+  const replaySteps = explorationSteps.filter(
+    (candidate) => candidate.status !== "invalid"
+  );
   const lines = [
     'import { test, expect } from "@playwright/test";',
     "",
     `test(${quoteForJavaScript(`YellowBird scout: ${options.intent}`)}, async ({ page }) => {`,
     "  const consoleErrors = [];",
     '  page.on("console", (message) => {',
-    '    if (message.type() === "error") consoleErrors.push(message.text());',
+    '    if (message.type() === "error")',
+    "      consoleErrors.push({ text: message.text(), location: message.location() });",
     "  });",
     "",
     `  const yellowbirdTarget = new URL(${quoteForJavaScript(options.target)});`,
-    "  let yellowbirdAgentReplay = false;",
+    "  const yellowbirdBlockedUrls = new Set();",
+    "  let yellowbirdAgentAction = null;",
     "  const yellowbirdUnsafeRequest = /\\b(?:activate|approve|buy|check[ -]?out|confirm|delete|log[ -]?out|order|pay|purchase|remove|save|submit|subscribe|update)\\b/i;",
+    "  await page.context().addInitScript(() => {",
+    "    const state = { active: false, action: null };",
+    '    Object.defineProperty(globalThis, "__yellowbirdAgentReplayGuard", {',
+    "      value: state,",
+    "      configurable: false",
+    "    });",
+    "    const blocked = () => state.active;",
+    '    globalThis.addEventListener("submit", event => {',
+    '      if (!blocked()) return;',
+    "      event.preventDefault();",
+    "      event.stopImmediatePropagation();",
+    "    }, true);",
+    '    for (const method of ["submit", "requestSubmit"]) {',
+    "      const original = HTMLFormElement.prototype[method];",
+    '      if (typeof original !== "function") continue;',
+    "      HTMLFormElement.prototype[method] = function (...args) {",
+    "        if (blocked()) return undefined;",
+    "        return original.apply(this, args);",
+    "      };",
+    "    }",
+    '    for (const method of ["pushState", "replaceState"]) {',
+    "      const original = history[method];",
+    "      history[method] = function (...args) {",
+    '        if (state.active && state.action !== "visit") return undefined;',
+    "        return original.apply(this, args);",
+    "      };",
+    "    }",
+    "  });",
     '  await page.context().route("**/*", async (route) => {',
-    "    const requestUrl = route.request().url();",
-    "    const requestMethod = route.request().method();",
+    "    const request = route.request();",
+    "    const requestUrl = request.url();",
+    "    const requestMethod = request.method();",
     '    if (requestUrl.startsWith("data:") || requestUrl.startsWith("blob:"))',
     "      return route.continue();",
     "    let allowed = false;",
     "    try {",
     "      const parsedRequestUrl = new URL(requestUrl);",
     "      const safeAgentUrl = !yellowbirdUnsafeRequest.test(decodeURIComponent(parsedRequestUrl.pathname + parsedRequestUrl.search));",
+    "      let safeAgentAction = true;",
+    "      if (yellowbirdAgentAction) {",
+    '        if (yellowbirdAgentAction.action !== "visit") {',
+    "          safeAgentAction = false;",
+    '        } else if (request.resourceType() === "document") {',
+    "          const redirectedFrom = request.redirectedFrom();",
+    "          if (!yellowbirdAgentAction.navigationStarted) {",
+    "            safeAgentAction = requestUrl === yellowbirdAgentAction.requestedUrl;",
+    "          } else {",
+    "            safeAgentAction = Boolean(redirectedFrom) &&",
+    "              yellowbirdAgentAction.navigationRequests.has(redirectedFrom);",
+    "          }",
+    "          if (safeAgentAction) {",
+    "            yellowbirdAgentAction.navigationStarted = true;",
+    "            yellowbirdAgentAction.navigationRequests.add(request);",
+    "          }",
+    "        }",
+    "      }",
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
-    '        (!yellowbirdAgentReplay || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl));',
+    '        (!yellowbirdAgentAction || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl && safeAgentAction));',
     "    } catch {}",
-    "    return allowed ? route.continue() : route.abort(\"blockedbyclient\");",
+    "    if (allowed) return route.continue();",
+    "    yellowbirdBlockedUrls.add(requestUrl);",
+    '    return route.abort("blockedbyclient");',
     "  });",
     "  const yellowbirdSocketProtocol = yellowbirdTarget.protocol === \"https:\" ? \"wss:\" : \"ws:\";",
     "  const yellowbirdSocketPort = yellowbirdTarget.port || (yellowbirdTarget.protocol === \"https:\" ? \"443\" : \"80\");",
@@ -315,11 +372,24 @@ function buildRegression(options, explorationSteps = []) {
     "      return socket.close({ code: 1008, reason: \"Blocked by YellowBird exact-origin policy\" });",
     "    const server = socket.connectToServer();",
     "    socket.onMessage(message => {",
-    "      if (yellowbirdAgentReplay)",
+    "      if (yellowbirdAgentAction)",
     "        return socket.close({ code: 1008, reason: \"Blocked by YellowBird read-only agent policy\" });",
     "      server.send(message);",
     "    });",
     "  });",
+    "  const yellowbirdBeginAgentAction = async (action, requestedUrl = null) => {",
+    "    yellowbirdAgentAction = {",
+    "      action,",
+    "      requestedUrl,",
+    "      navigationStarted: false,",
+    "      navigationRequests: new Set()",
+    "    };",
+    "    await page.evaluate(activeAction => {",
+    "      const guard = globalThis.__yellowbirdAgentReplayGuard;",
+    "      guard.active = true;",
+    "      guard.action = activeAction;",
+    "    }, action);",
+    "  };",
     "",
     `  const response = await page.goto(yellowbirdTarget.href, { waitUntil: "domcontentloaded" });`,
     `  expect(response?.status()).toBe(${options.expectedStatus});`
@@ -356,58 +426,62 @@ function buildRegression(options, explorationSteps = []) {
       lines.push(`  await expect(${locator}).toBeVisible();`);
     }
   });
-  if (explorationSteps.some((candidate) => candidate.status !== "invalid")) {
-    lines.push("  yellowbirdAgentReplay = true;");
-  }
-  explorationSteps
-    .filter((candidate) => candidate.status !== "invalid")
-    .forEach((step, index) => {
-      if (step.action === "visit") {
-        const response = `yellowbirdAgentResponse${index + 1}`;
-        lines.push(
-          `  const ${response} = await page.goto(${quoteForJavaScript(step.requestedUrl)}, { waitUntil: "domcontentloaded" });`,
-          `  await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`
-        );
-        if (step.httpStatus) {
-          lines.push(
-            `  expect(${response}?.status()).toBe(${step.httpStatus});`
-          );
-        }
-        return;
-      }
-      if (
-        !step.locator ||
-        !Number.isInteger(step.locator.ordinal) ||
-        !Number.isInteger(step.locator.matchCount) ||
-        step.locator.ordinal < 0 ||
-        step.locator.matchCount <= step.locator.ordinal
-      ) {
-        throw new Error(`agent replay step ${step.id} has no verified locator`);
-      }
-      const locator =
-        step.locator?.kind === "css"
-          ? `page.locator(${quoteForJavaScript(step.locator.selector)})`
-          : `page.getByRole(${quoteForJavaScript(step.locator?.role)}, { name: ${quoteForJavaScript(step.locator?.name)}, exact: true })`;
-      const locatorVariable = `yellowbirdAgentLocator${index + 1}`;
+  replaySteps.forEach((step, index) => {
+    lines.push(
+      `  await yellowbirdBeginAgentAction(${quoteForJavaScript(step.action)}, ${quoteForJavaScript(step.requestedUrl)});`
+    );
+    if (step.action === "visit") {
+      const response = `yellowbirdAgentResponse${index + 1}`;
       lines.push(
-        `  const ${locatorVariable} = ${locator};`,
-        `  await expect(${locatorVariable}).toHaveCount(${step.locator.matchCount});`
+        `  const ${response} = await page.goto(${quoteForJavaScript(step.requestedUrl)}, { waitUntil: "domcontentloaded" });`,
+        `  await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`
       );
-      const selectedLocator = `${locatorVariable}.nth(${step.locator.ordinal})`;
-      if (step.action === "fill") {
+      if (step.httpStatus) {
         lines.push(
-          `  await ${selectedLocator}.fill(${quoteForJavaScript(step.value)});`
+          `  expect(${response}?.status()).toBe(${step.httpStatus});`
         );
-      } else if (step.action === "select") {
-        lines.push(
-          `  await ${selectedLocator}.selectOption(${quoteForJavaScript(step.value)});`
-        );
-      } else if (step.action === "click") {
-        lines.push(`  await ${selectedLocator}.click();`);
       }
-    });
+      return;
+    }
+    if (
+      !step.locator ||
+      !Number.isInteger(step.locator.ordinal) ||
+      !Number.isInteger(step.locator.matchCount) ||
+      step.locator.ordinal < 0 ||
+      step.locator.matchCount <= step.locator.ordinal
+    ) {
+      throw new Error(`agent replay step ${step.id} has no verified locator`);
+    }
+    const locator =
+      step.locator?.kind === "css"
+        ? `page.locator(${quoteForJavaScript(step.locator.selector)})`
+        : `page.getByRole(${quoteForJavaScript(step.locator?.role)}, { name: ${quoteForJavaScript(step.locator?.name)}, exact: true })`;
+    const locatorVariable = `yellowbirdAgentLocator${index + 1}`;
+    lines.push(
+      `  const ${locatorVariable} = ${locator};`,
+      `  await expect(${locatorVariable}).toHaveCount(${step.locator.matchCount});`
+    );
+    const selectedLocator = `${locatorVariable}.nth(${step.locator.ordinal})`;
+    if (step.action === "fill") {
+      lines.push(
+        `  await ${selectedLocator}.fill(${quoteForJavaScript(step.value)});`
+      );
+    } else if (step.action === "select") {
+      lines.push(
+        `  await ${selectedLocator}.selectOption(${quoteForJavaScript(step.value)});`
+      );
+    } else if (step.action === "click") {
+      lines.push(`  await ${selectedLocator}.click();`);
+    }
+  });
   if (!options.ignoreConsoleErrors) {
-    lines.push("  expect(consoleErrors).toEqual([]);");
+    lines.push(
+      "  const yellowbirdProductConsoleErrors = consoleErrors.filter(entry =>",
+      "    !yellowbirdBlockedUrls.has(entry.location?.url) ||",
+      "    !/ERR_BLOCKED_BY_CLIENT/i.test(entry.text)",
+      "  );",
+      "  expect(yellowbirdProductConsoleErrors).toEqual([]);"
+    );
   }
   lines.push("});", "");
   return lines.join("\n");

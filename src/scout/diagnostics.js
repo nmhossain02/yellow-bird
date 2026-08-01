@@ -1,7 +1,13 @@
-const ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const TERMINAL_SEQUENCE_PATTERN =
+  /\u001b(?:\][\s\S]*?(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~]|[PX^_][\s\S]*?\u001b\\|[@-_])/g;
+const CONTROL_CHARACTER_PATTERN =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 
 export function cleanDiagnosticText(value) {
-  return String(value || "").replace(ANSI_PATTERN, "").trim();
+  return String(value || "")
+    .replace(TERMINAL_SEQUENCE_PATTERN, "")
+    .replace(CONTROL_CHARACTER_PATTERN, "")
+    .trim();
 }
 
 function redactUrlValues(value) {

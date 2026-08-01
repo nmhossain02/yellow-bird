@@ -59,7 +59,7 @@ function safeDetail(value) {
 }
 
 function normalizeText(value, limit) {
-  return String(value || "")
+  return cleanDiagnosticText(value)
     .replaceAll(/\s+/g, " ")
     .trim()
     .slice(0, limit);
@@ -623,18 +623,20 @@ export async function exploreIntentWithEngine({
         steps,
         pages
       );
-      const coverage = verification?.satisfied
-        ? "covered"
+      const coverage = verification
+        ? verification.satisfied
+          ? "covered"
+          : steps.some((step) => step.status === "passed")
+            ? "partial"
+            : "blocked"
         : normalizedCoverage(intent, proposed.coverage, steps);
-      const summary = verification?.satisfied
+      const summary = verification
         ? verification.summary
         : normalizeText(proposed.summary, 1_000);
       record("info", "agent.completed", "Intent exploration completed", {
         coverage,
         plannerCoverage: proposed.coverage,
-        coverageAuthority: verification?.satisfied
-          ? verification.authority
-          : "model-guided",
+        coverageAuthority: verification?.authority || "model-guided",
         coverageProfile: verification?.profile || null,
         visitedPageCount: pages.length,
         stepCount: steps.length

@@ -690,8 +690,8 @@ test("owned coverage profile links a distinct destination to its visit", async (
       elementRef: null,
       value: null,
       rationale: "The route returned to the initial page.",
-      coverage: "partial",
-      summary: "No distinct setup destination was observed."
+      coverage: "covered",
+      summary: "The entire basic flow was covered."
     }
   ];
   const report = await createAgentRunner(() => decisions.shift())({
@@ -711,6 +711,12 @@ test("owned coverage profile links a distinct destination to its visit", async (
   );
   assert.equal(report.observations.exploration.steps[0].sourceUrl, `${target}/history-surface`);
   assert.equal(report.observations.exploration.steps[0].url, `${target}/history-surface`);
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(
+    markdown,
+    /yellowbird-observed-criteria \(initial-interface-basic-flow\.v1, unsatisfied\)/
+  );
+  assert.doesNotMatch(markdown, /model-guided within YellowBird policy/);
 });
 
 test("agent replay preserves selected and observed redirect URLs", async () => {
@@ -947,7 +953,7 @@ test("agent policy omits destructive controls and blocks write requests", async 
   );
 });
 
-test("agent action broker blocks read-method mutation behind safe-looking controls", async () => {
+test("agent action broker and replay block read-method mutation behind safe-looking controls", async () => {
   readMutationRequestCount = 0;
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-read-mutation-")
@@ -992,7 +998,16 @@ test("agent action broker blocks read-method mutation behind safe-looking contro
       (request) => request.reason === "agent-non-visit-request"
     )
   );
-});
+  readMutationRequestCount = 0;
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.equal(readMutationRequestCount, 0);
+}, 30_000);
 
 test("agent action broker blocks GET form submission", async () => {
   submissionRequestCount = 0;
@@ -1408,7 +1423,8 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
             value: null,
             rationale: "The read-only route was inspected.",
             coverage: "covered",
-            summary: "The landing page and setup route were inspected."
+            summary:
+              "The setup route was inspected.\u001b]0;owned\u0007 | <script>alert(1)</script>"
           };
     response.end(
       JSON.stringify({
@@ -1439,7 +1455,7 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
         "--target",
         target,
         "--intent",
-        "Assess the initial interface and basic user flow",
+        "Assess the setup flow",
         "--engine-base-url",
         `http://127.0.0.1:${engineServer.address().port}/v1`,
         "--engine-model",
@@ -1453,6 +1469,10 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
     assert.equal(result.exitCode, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /Agent: completed/);
     assert.match(result.stdout, /2 bounded agent interaction step/);
+    assert.doesNotMatch(
+      result.stdout,
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/
+    );
     const evidence = JSON.parse(
       await readFile(join(outputDirectory, "evidence.json"), "utf8")
     );
@@ -1467,6 +1487,12 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
       evidence.provenance.agenticEngine,
       "openai-compatible-chat:planner-fixture"
     );
+    assert.equal(
+      evidence.observations.exploration.summary,
+      "The setup route was inspected. | <script>alert(1)</script>"
+    );
+    const markdown = await readFile(join(outputDirectory, "report.md"), "utf8");
+    assert.match(markdown, /\\\| \\<script\\>alert\(1\)\\<\/script\\>/);
     const schema = JSON.parse(
       await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
     );
