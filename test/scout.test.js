@@ -463,6 +463,21 @@ beforeAll(async () => {
     const semanticSpoofDestination = request.url?.startsWith(
       "/agent-semantic-spoof-destination"
     );
+    const semanticBoundSurface = request.url?.startsWith(
+      "/agent-semantic-bound-surface"
+    );
+    const semanticBoundDestination = request.url?.startsWith(
+      "/agent-semantic-bound-destination"
+    );
+    const verifiedPolicySurface = request.url?.startsWith(
+      "/agent-verified-policy-surface"
+    );
+    const verifiedPolicyDestination = request.url?.startsWith(
+      "/agent-verified-policy-destination"
+    );
+    const optionReferenceSurface = request.url?.startsWith(
+      "/agent-option-reference-surface"
+    );
     const peerTransportSurface = request.url?.startsWith(
       "/agent-peer-transport-surface"
     );
@@ -482,7 +497,65 @@ beforeAll(async () => {
           <body>
             <h1>Track any public product page</h1>
             <input role="button" type="url" name="Product URL">
+            <input id="semantic-decoy" type="text" aria-label="Product URL">
             <button type="submit">Compile monitor</button>
+            <script>
+              const nativeQuerySelector = document.querySelector.bind(document);
+              document.querySelector = (selector) =>
+                String(selector).includes("yellowbird")
+                  ? nativeQuerySelector("#semantic-decoy")
+                  : nativeQuerySelector(selector);
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (semanticBoundSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Semantic traversal boundary</title></head>
+          <body><a href="/agent-semantic-bound-destination">New monitor</a></body>
+        </html>`);
+      return;
+    }
+    if (semanticBoundDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Bounded semantic destination</title></head>
+          <body>
+            <input type="url" aria-label="Product URL">
+            ${"<div></div>".repeat(6_000)}
+          </body>
+        </html>`);
+      return;
+    }
+    if (verifiedPolicySurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Verified policy boundary</title></head>
+          <body><a href="/agent-verified-policy-destination">New monitor</a></body>
+        </html>`);
+      return;
+    }
+    if (verifiedPolicyDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Verified policy destination</title></head>
+          <body>
+            <input type="text" aria-label="Query">
+            <script>fetch("/agent-write", { method: "POST" }).catch(() => {});</script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (optionReferenceSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Opaque option boundary</title></head>
+          <body>
+            <select aria-label="Inspect interval">
+              <option value="internal-secret-92">Weekly</option>
+            </select>
           </body>
         </html>`);
       return;
@@ -1767,16 +1840,30 @@ test("browser launch failure finalizes an inconclusive run", async () => {
       );
     }
   });
-  const report = await runWithUnavailableBrowser({
-    target,
-    expectedTexts: ["Checkout ready"],
-    permissions: ["browser.navigate", "browser.read", "browser.click"],
-    steps: [{ id: "checkout", action: "click", selector: "#checkout" }],
-    outputDirectory
-  });
+  const previousEngineKey = process.env.YELLOWBIRD_ENGINE_API_KEY;
+  process.env.YELLOWBIRD_ENGINE_API_KEY = "planner-secret";
+  let report;
+  try {
+    report = await runWithUnavailableBrowser({
+      target,
+      expectedTexts: ["Checkout ready"],
+      permissions: ["browser.navigate", "browser.read", "browser.click"],
+      steps: [{ id: "checkout", action: "click", selector: "#checkout" }],
+      outputDirectory
+    });
+  } finally {
+    if (previousEngineKey === undefined) {
+      delete process.env.YELLOWBIRD_ENGINE_API_KEY;
+    } else {
+      process.env.YELLOWBIRD_ENGINE_API_KEY = previousEngineKey;
+    }
+  }
 
   assert.equal(report.outcome, "inconclusive");
-  assert.deepEqual(launchOptions, { headless: true, timeout: 15_000 });
+  assert.equal(launchOptions.headless, true);
+  assert.equal(launchOptions.timeout, 15_000);
+  assert.equal(launchOptions.env.YELLOWBIRD_ENGINE_API_KEY, undefined);
+  assert.equal(launchOptions.env.PATH, process.env.PATH);
   assert.deepEqual(report.findings, []);
   assert.equal(report.invalidTestMechanics[0].id, "browser-executable-missing");
   assert.equal(report.observations.browser.launch.successful, false);
@@ -2434,8 +2521,9 @@ test("owned coverage rejects static copy without declared semantic controls", as
     false
   );
   const regression = await readFile(report.artifacts.regression, "utf8");
-  assert.match(regression, /getByRole\("textbox", \{ name: "Product URL"/);
-  assert.match(regression, /toHaveJSProperty\("type", "url"\)/);
+  assert.match(regression, /yellowbirdReadSemanticControls/);
+  assert.match(regression, /candidateTraversalComplete/);
+  assert.doesNotMatch(regression, /getByRole\(/);
 });
 
 test("owned coverage uses browser accessibility semantics for controls", async () => {
@@ -2485,6 +2573,237 @@ test("owned coverage uses browser accessibility semantics for controls", async (
   assert.equal(
     report.observations.exploration.verification.satisfied,
     false
+  );
+});
+
+test("semantic controls ignore page-controlled selector resolution", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-semantic-selector-spoof-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the supplied setup route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The route was inspected.",
+      coverage: "covered",
+      summary: "The route was inspected."
+    }
+  ];
+  const report = await createAgentRunner(() => decisions.shift())({
+    target: `${target}/agent-semantic-spoof-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentPrimaryRoutes: ["/agent-semantic-spoof-destination"],
+    agentExpectedControls: ["textbox:url:Product URL"],
+    outputDirectory
+  });
+
+  assert.deepEqual(
+    report.observations.exploration.steps[0].destinationControlAssertions,
+    [
+      {
+        role: "textbox",
+        type: "url",
+        name: "Product URL",
+        matchCount: 0,
+        satisfied: false
+      }
+    ]
+  );
+  assert.equal(report.observations.exploration.verification.satisfied, false);
+});
+
+test("semantic replay fails closed at the live traversal bound", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-semantic-replay-bound-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the supplied setup route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The route was inspected.",
+      coverage: "covered",
+      summary: "The route was inspected."
+    }
+  ];
+  const report = await createAgentRunner(() => decisions.shift())({
+    target: `${target}/agent-semantic-bound-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentPrimaryRoutes: ["/agent-semantic-bound-destination"],
+    agentExpectedControls: ["textbox:url:Product URL"],
+    outputDirectory
+  });
+
+  assert.equal(report.observations.exploration.verification.satisfied, false);
+  assert.equal(
+    report.observations.exploration.steps[0].destinationControlAssertions[0]
+      .matchCount,
+    0
+  );
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.doesNotMatch(regression, /getByRole\(/);
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.notEqual(replay.exitCode, 0, "Replay must preserve the live bound");
+  assert.match(
+    `${replay.stdout}\n${replay.stderr}`,
+    /candidateTraversalComplete|Expected: true/i
+  );
+}, 30_000);
+
+test("select option values stay outside planner input", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-option-reference-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    planningCall += 1;
+    assert.doesNotMatch(
+      request.messages.at(-1).content,
+      /internal-secret-92/
+    );
+    if (planningCall > 1) {
+      return {
+        action: "finish",
+        elementRef: null,
+        value: null,
+        rationale: "The choice interaction was inspected.",
+        coverage: "partial",
+        summary: "The choice interaction was inspected."
+      };
+    }
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    const select = availableElements.find(
+      (element) => element.allowedAction === "select"
+    );
+    assert.deepEqual(select.options, [
+      { ref: "option-1", label: "Weekly" }
+    ]);
+    return {
+      action: "act",
+      elementRef: select.ref,
+      value: select.options[0].ref,
+      rationale: "Inspect the supplied interval choice.",
+      coverage: "continue",
+      summary: ""
+    };
+  })({
+    target: `${target}/agent-option-reference-surface`,
+    intent: "Assess the available choice interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.observations.exploration.steps[0].status, "passed");
+  assert.equal(
+    report.observations.exploration.steps[0].value,
+    "internal-secret-92"
+  );
+});
+
+test("policy effects invalidate otherwise verified coverage", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-verified-policy-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the supplied setup route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The setup route was inspected.",
+      coverage: "covered",
+      summary: "The setup route was inspected."
+    }
+  ];
+  const report = await createAgentRunner(() => decisions.shift())({
+    target: `${target}/agent-verified-policy-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentPrimaryRoutes: ["/agent-verified-policy-destination"],
+    agentExpectedControls: ["textbox:text:Query"],
+    outputDirectory
+  });
+
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.equal(report.observations.exploration.verification.satisfied, false);
+  assert.deepEqual(
+    report.observations.exploration.verification.criteria.at(-1),
+    { id: "final-evidence-integrity", satisfied: false }
+  );
+});
+
+test("operational failures invalidate otherwise verified coverage", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-verified-operation-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the supplied setup route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The setup route was inspected.",
+      coverage: "covered",
+      summary: "The setup route was inspected."
+    }
+  ];
+  const report = await createAgentRunner(
+    () => decisions.shift(),
+    undefined,
+    launchBrowserWithFailingScreenshot
+  )({
+    target,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentExpectedControls: ["textbox:text:Email"],
+    outputDirectory
+  });
+
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.equal(report.observations.exploration.verification.satisfied, false);
+  assert.deepEqual(
+    report.observations.exploration.verification.criteria.at(-1),
+    { id: "final-evidence-integrity", satisfied: false }
   );
 });
 
@@ -4248,6 +4567,7 @@ test("scout refreshes provenance and rejects planner model transitions", async (
   });
 
   assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.coverage, "partial");
   assert.equal(report.invalidTestMechanics[0].id, "agent-model-transition");
   assert.equal(report.provenance.engine.modelReported, "planner-model");
   assert.equal(

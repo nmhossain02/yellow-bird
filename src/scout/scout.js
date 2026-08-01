@@ -17,12 +17,15 @@ import {
   validateAgentEngineConfig
 } from "./engine.js";
 import {
+  browserSemanticControlCandidates,
   browserRenderedTextSnapshot,
   exploreIntentWithEngine,
   isAgentRouteAuthorized,
   isAgentUrlAllowed,
   PROHIBITED_AGENT_ACTION_PATTERN,
-  RENDERED_TEXT_LIMITS
+  RENDERED_TEXT_LIMITS,
+  SEMANTIC_CONTROL_LIMITS,
+  verifyBrowserSemanticCandidates
 } from "./explorer.js";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
@@ -473,6 +476,22 @@ function buildRegression(options, explorationSteps = []) {
     "  const yellowbirdReadRenderedBodyText = async (maximum, normalizedMaximum = maximum) =>",
     `    (await page.evaluate(yellowbirdRenderedTextSnapshot, { maximum, traversalNodeCount: ${RENDERED_TEXT_LIMITS.traversalNodeCount} }))`,
     '      .replaceAll(/\\s+/g, " ").trim().slice(0, normalizedMaximum);',
+    `  const yellowbirdBrowserSemanticControlCandidates = ${browserSemanticControlCandidates.toString()};`,
+    `  const yellowbirdVerifyBrowserSemanticCandidates = ${verifyBrowserSemanticCandidates.toString()};`,
+    "  const yellowbirdReadSemanticControls = async expectedControls => {",
+    "    const rawControls = await page.evaluate(yellowbirdBrowserSemanticControlCandidates, {",
+    '      attributeName: "data-yellowbird-semantic-ref",',
+    `      elementCount: ${SEMANTIC_CONTROL_LIMITS.elementCount},`,
+    "      refToken: randomUUID(),",
+    `      traversalNodeCount: ${SEMANTIC_CONTROL_LIMITS.traversalNodeCount}`,
+    "    });",
+    "    return yellowbirdVerifyBrowserSemanticCandidates(page, {",
+    "      ...rawControls,",
+    `      ancestorCount: ${SEMANTIC_CONTROL_LIMITS.ancestorCount},`,
+    "      expectedControls,",
+    `      fieldText: ${SEMANTIC_CONTROL_LIMITS.fieldText}`,
+    "    });",
+    "  };",
     "  const yellowbirdGuardControlName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
     "  const yellowbirdGuardControlToken = randomUUID();",
     "  const yellowbirdGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;",
@@ -1083,12 +1102,15 @@ function buildRegression(options, explorationSteps = []) {
       for (const [assertionIndex, assertion] of (
         step.destinationControlAssertions || []
       ).entries()) {
-        const assertionLocator = `yellowbirdDestinationControl${index + 1}_${assertionIndex + 1}`;
+        const assertionSnapshot = `yellowbirdDestinationControls${index + 1}`;
+        if (assertionIndex === 0) {
+          lines.push(
+            `  const ${assertionSnapshot} = await yellowbirdReadSemanticControls(${quoteForJavaScript((step.destinationControlAssertions || []).map(({ role, type, name }) => ({ role, type, name })))});`,
+            `  expect(${assertionSnapshot}.candidateTraversalComplete).toBe(true);`
+          );
+        }
         lines.push(
-          `  const ${assertionLocator} = page.getByRole(${quoteForJavaScript(assertion.role)}, { name: ${quoteForJavaScript(assertion.name)}, exact: true });`,
-          `  await expect(${assertionLocator}).toHaveCount(1);`,
-          `  await expect(${assertionLocator}).toBeVisible();`,
-          `  await expect(${assertionLocator}).toHaveJSProperty("type", ${quoteForJavaScript(assertion.type)});`
+          `  expect(${assertionSnapshot}.controlAssertions[${assertionIndex}]).toEqual(${quoteForJavaScript({ role: assertion.role, type: assertion.type, name: assertion.name, matchCount: 1, satisfied: true })});`
         );
       }
       return;
@@ -1267,6 +1289,22 @@ async function finalizeRun(state) {
               ? "Intent coverage was inconclusive because browser execution stopped before evidence collection completed."
               : "Intent coverage could not begin because browser setup did not complete.";
     state.exploration.issue ||= state.operationalIssues[0];
+  }
+  if (
+    state.exploration.verification?.satisfied &&
+    (state.exploration.status !== "completed" ||
+      state.exploration.coverage !== "covered")
+  ) {
+    state.exploration.verification = {
+      ...state.exploration.verification,
+      satisfied: false,
+      criteria: [
+        ...state.exploration.verification.criteria,
+        { id: "final-evidence-integrity", satisfied: false }
+      ],
+      summary:
+        "YellowBird could not retain verified coverage because final safety or operational checks were inconclusive."
+    };
   }
   const findings = [];
   const setupIssues = [];
@@ -1932,7 +1970,12 @@ export function createScoutRunner({
   });
   let browser;
   try {
+    const {
+      YELLOWBIRD_ENGINE_API_KEY: _engineApiKey,
+      ...browserEnvironment
+    } = process.env;
     browser = await launchBrowser({
+      env: browserEnvironment,
       headless: !options.headed,
       timeout: options.timeoutMs
     });
@@ -3258,10 +3301,13 @@ export function createScoutRunner({
           if (
             finalProvenance.modelReported !== initialProvenance.modelReported
           ) {
+            const passedInteraction = exploration.steps.some(
+              (step) => step.status === "passed"
+            );
             exploration = {
               ...exploration,
               status: "inconclusive",
-              coverage: "blocked",
+              coverage: passedInteraction ? "partial" : "blocked",
               issue: {
                 id: "agent-model-transition",
                 classification: "test-mechanics",

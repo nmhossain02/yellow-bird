@@ -35,6 +35,12 @@ export const RENDERED_TEXT_LIMITS = Object.freeze({
   plannerBodyText: 8_000,
   traversalNodeCount: SNAPSHOT_LIMITS.traversalNodeCount
 });
+export const SEMANTIC_CONTROL_LIMITS = Object.freeze({
+  ancestorCount: 100,
+  elementCount: SNAPSHOT_LIMITS.elementCount,
+  fieldText: SNAPSHOT_LIMITS.fieldText,
+  traversalNodeCount: SNAPSHOT_LIMITS.traversalNodeCount
+});
 
 export function browserRenderedTextSnapshot({
   maximum,
@@ -238,6 +244,321 @@ export function browserRenderedTextSnapshot({
     characters += separatorLength + Math.min(text.length, available);
   }
   return chunks.join(" ");
+}
+
+export function browserSemanticControlCandidates({
+  attributeName,
+  elementCount,
+  refToken,
+  traversalNodeCount
+}) {
+  const candidates = [];
+  let candidateOverflow = false;
+  let traversalComplete = false;
+  const walker = document.createTreeWalker(
+    document.documentElement,
+    NodeFilter.SHOW_ELEMENT
+  );
+  for (let visited = 0; visited < traversalNodeCount; visited += 1) {
+    const element = walker.nextNode();
+    if (!element) {
+      traversalComplete = true;
+      break;
+    }
+    if (!element.matches("a[href], button, input, textarea, select")) continue;
+    let rendered = false;
+    try {
+      const rect = element.getBoundingClientRect();
+      rendered =
+        element.isConnected &&
+        !element.hidden &&
+        !element.inert &&
+        element.getAttribute("aria-hidden")?.trim().toLowerCase() !== "true" &&
+        rect.width > 0 &&
+        rect.height > 0 &&
+        (typeof element.checkVisibility !== "function" ||
+          element.checkVisibility({
+            checkOpacity: true,
+            checkVisibilityCSS: true
+          }));
+    } catch {
+      rendered = false;
+    }
+    if (!rendered) continue;
+    if (candidates.length >= elementCount) {
+      candidateOverflow = true;
+      continue;
+    }
+    const ref = `semantic-${candidates.length + 1}`;
+    const runtimeRef = `${refToken}:${ref}`;
+    element.setAttribute(attributeName, runtimeRef);
+    candidates.push({ attributeName, ref, runtimeRef });
+  }
+  return {
+    candidateTraversalComplete: traversalComplete && !candidateOverflow,
+    observedElements: candidates
+  };
+}
+
+export async function verifyBrowserSemanticCandidates(
+  page,
+  {
+    ancestorCount,
+    candidateTraversalComplete,
+    fieldText,
+    observedElements,
+    expectedControls
+  }
+) {
+  const normalize = (value) =>
+    String(value ?? "")
+      .replaceAll(/\s+/g, " ")
+      .trim()
+      .slice(0, fieldText);
+  const inputTypes = new Set([
+    "button",
+    "checkbox",
+    "color",
+    "date",
+    "datetime-local",
+    "email",
+    "file",
+    "hidden",
+    "image",
+    "month",
+    "number",
+    "password",
+    "radio",
+    "range",
+    "reset",
+    "search",
+    "submit",
+    "tel",
+    "text",
+    "time",
+    "url",
+    "week"
+  ]);
+  const attributesFor = (node) => {
+    const attributes = new Map();
+    for (let index = 0; index < (node.attributes || []).length; index += 2) {
+      attributes.set(
+        String(node.attributes[index]).toLowerCase(),
+        String(node.attributes[index + 1] ?? "")
+      );
+    }
+    return attributes;
+  };
+  const controlType = (tag, attributes) => {
+    const declared = String(attributes.get("type") || "").toLowerCase();
+    if (tag === "button") {
+      return ["button", "reset", "submit"].includes(declared)
+        ? declared
+        : "submit";
+    }
+    if (tag === "input") return inputTypes.has(declared) ? declared : "text";
+    if (tag === "select") {
+      return attributes.has("multiple") ? "select-multiple" : "select-one";
+    }
+    if (tag === "textarea") return "textarea";
+    return declared;
+  };
+  const verifiedElements = [];
+  let session = null;
+  try {
+    session = await page.context().newCDPSession(page);
+    await session.send("DOM.enable");
+    await session.send("Accessibility.enable");
+    const documentNode = await session.send("DOM.getDocument", {
+      depth: 0,
+      pierce: false
+    });
+    const frameTree = await session.send("Page.getFrameTree");
+    const isolatedWorld = await session.send("Page.createIsolatedWorld", {
+      frameId: frameTree.frameTree.frame.id,
+      worldName: "yellowbird-semantic-controls",
+      grantUniveralAccess: false
+    });
+    const browserVisible = async (backendNodeId) => {
+      let objectId = null;
+      try {
+        const resolved = await session.send("DOM.resolveNode", {
+          backendNodeId,
+          executionContextId: isolatedWorld.executionContextId
+        });
+        objectId = resolved.object?.objectId || null;
+        if (!objectId) return false;
+        const result = await session.send("Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration: `function (maximumAncestors) {
+            const positiveArea = (rect) =>
+              Number.isFinite(rect?.width) && Number.isFinite(rect?.height) &&
+              rect.width > 0 && rect.height > 0;
+            if (!this.isConnected || !positiveArea(this.getBoundingClientRect())) {
+              return false;
+            }
+            if (typeof this.checkVisibility === "function" &&
+                !this.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+              return false;
+            }
+            const elementRect = this.getBoundingClientRect();
+            let visibleRect = {
+              top: elementRect.top,
+              right: elementRect.right,
+              bottom: elementRect.bottom,
+              left: elementRect.left
+            };
+            let current = this;
+            for (let inspected = 0; current && inspected < maximumAncestors; inspected += 1) {
+              if (current.hidden || current.inert ||
+                  current.getAttribute("aria-hidden")?.trim().toLowerCase() === "true") {
+                return false;
+              }
+              const style = globalThis.getComputedStyle(current);
+              if (style.display === "none" ||
+                  ["hidden", "collapse"].includes(style.visibility) ||
+                  style.contentVisibility === "hidden" ||
+                  Number(style.opacity) === 0 ||
+                  /opacity\\(\\s*0(?:\\.0*)?\\s*\\)/i.test(style.filter || "") ||
+                  (style.clip && style.clip !== "auto") ||
+                  (style.clipPath && style.clipPath !== "none") ||
+                  (style.maskImage && style.maskImage !== "none") ||
+                  (style.webkitMaskImage && style.webkitMaskImage !== "none")) {
+                return false;
+              }
+              if ([style.overflowX, style.overflowY].some((value) =>
+                  ["auto", "clip", "hidden", "scroll"].includes(value))) {
+                const clippingRect = current.getBoundingClientRect();
+                if (!positiveArea(clippingRect)) return false;
+                visibleRect = {
+                  top: Math.max(visibleRect.top, clippingRect.top),
+                  right: Math.min(visibleRect.right, clippingRect.right),
+                  bottom: Math.min(visibleRect.bottom, clippingRect.bottom),
+                  left: Math.max(visibleRect.left, clippingRect.left)
+                };
+                if (visibleRect.right <= visibleRect.left ||
+                    visibleRect.bottom <= visibleRect.top) return false;
+              }
+              current = current.parentElement;
+            }
+            return current === null;
+          }`,
+          arguments: [{ value: ancestorCount }],
+          returnByValue: true,
+          silent: true
+        });
+        return result.result?.value === true;
+      } catch {
+        return false;
+      } finally {
+        if (objectId) {
+          await session
+            .send("Runtime.releaseObject", { objectId })
+            .catch(() => {});
+        }
+      }
+    };
+    for (const candidate of observedElements) {
+      try {
+        const attributeName =
+          candidate.attributeName || "data-yellowbird-agent-ref";
+        const selector =
+          `[${attributeName}=${JSON.stringify(candidate.runtimeRef)}]`;
+        const selected = await session.send("DOM.querySelector", {
+          nodeId: documentNode.root.nodeId,
+          selector
+        });
+        if (!selected.nodeId) continue;
+        const described = await session.send("DOM.describeNode", {
+          nodeId: selected.nodeId,
+          depth: 0
+        });
+        const node = described.node;
+        const backendNodeId = node?.backendNodeId;
+        if (!backendNodeId) continue;
+        const attributes = attributesFor(node);
+        if (attributes.get(attributeName) !== candidate.runtimeRef) {
+          continue;
+        }
+        const [accessibility, box, visible] = await Promise.all([
+          session.send("Accessibility.getPartialAXTree", {
+            backendNodeId,
+            fetchRelatives: false
+          }),
+          session.send("DOM.getBoxModel", { backendNodeId }),
+          browserVisible(backendNodeId)
+        ]);
+        const semanticNode = accessibility.nodes.find(
+          (entry) =>
+            entry.backendDOMNodeId === backendNodeId && entry.ignored !== true
+        );
+        if (
+          !semanticNode ||
+          !visible ||
+          box.model.width <= 0 ||
+          box.model.height <= 0
+        ) {
+          continue;
+        }
+        const tag = String(node.localName || node.nodeName || "").toLowerCase();
+        const semanticRole = String(semanticNode.role?.value || "");
+        const semanticName = normalize(semanticNode.name?.value);
+        const semanticType = controlType(tag, attributes);
+        if (
+          Object.hasOwn(candidate, "tag") &&
+          (tag !== candidate.tag ||
+            semanticRole !== candidate.role ||
+            semanticName !== normalize(candidate.label) ||
+            semanticType !== String(candidate.type || "").toLowerCase())
+        ) {
+          continue;
+        }
+        verifiedElements.push({
+          ...candidate,
+          semanticRole,
+          semanticName,
+          semanticType
+        });
+      } catch {}
+    }
+  } catch {
+    verifiedElements.length = 0;
+  } finally {
+    await session?.detach?.().catch(() => {});
+  }
+  const controlAssertions = expectedControls.map((expected) => {
+    if (!candidateTraversalComplete) {
+      return { ...expected, matchCount: 0, satisfied: false };
+    }
+    const matchCount = verifiedElements.filter(
+      (element) =>
+        element.semanticRole === expected.role &&
+        element.semanticType === expected.type &&
+        element.semanticName === expected.name
+    ).length;
+    return { ...expected, matchCount, satisfied: matchCount === 1 };
+  });
+  return {
+    candidateTraversalComplete,
+    controlAssertions,
+    verifiedElements
+  };
+}
+
+async function boundedSemanticControlSnapshot(page, expectedControls) {
+  if (expectedControls.length === 0) return { controlAssertions: [] };
+  const raw = await page.evaluate(browserSemanticControlCandidates, {
+    attributeName: "data-yellowbird-semantic-ref",
+    elementCount: SEMANTIC_CONTROL_LIMITS.elementCount,
+    refToken: randomUUID(),
+    traversalNodeCount: SEMANTIC_CONTROL_LIMITS.traversalNodeCount
+  });
+  return verifyBrowserSemanticCandidates(page, {
+    ...raw,
+    ancestorCount: SEMANTIC_CONTROL_LIMITS.ancestorCount,
+    expectedControls,
+    fieldText: SEMANTIC_CONTROL_LIMITS.fieldText
+  });
 }
 const ACTION_SCHEMA = {
   type: "object",
@@ -868,10 +1189,11 @@ async function snapshotPage(
         }
         const optionRecords =
           tag === "select"
-            ? Array.from(element.options, (option) => ({
+            ? Array.from(element.options, (option, optionIndex) => ({
+                ref: `option-${optionIndex + 1}`,
                 label:
                   boundedNodeText(option, limits.optionLabel + 1) ||
-                  String(option.value),
+                  String(option.label),
                 value: String(option.value)
               }))
             : [];
@@ -957,89 +1279,21 @@ async function snapshotPage(
     prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN,
     refToken: snapshotRefToken
   });
-  const semanticElements = [];
-  let accessibilitySession = null;
-  try {
-    accessibilitySession = await page.context().newCDPSession(page);
-    for (const rawElement of raw.observedElements) {
-      let objectId = null;
-      try {
-        const selector =
-          `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.runtimeRef)}]`;
-        const evaluated = await accessibilitySession.send(
-          "Runtime.evaluate",
-          {
-            expression: `document.querySelector(${JSON.stringify(selector)})`,
-            returnByValue: false,
-            silent: true
-          }
-        );
-        objectId = evaluated.result?.objectId || null;
-        if (!objectId) {
-          semanticElements.push(null);
-          continue;
-        }
-        const described = await accessibilitySession.send(
-          "DOM.describeNode",
-          { objectId, depth: 0 }
-        );
-        const backendNodeId = described.node?.backendNodeId;
-        const accessibility = await accessibilitySession.send(
-          "Accessibility.getPartialAXTree",
-          { backendNodeId, fetchRelatives: false }
-        );
-        const semanticNode = accessibility.nodes.find(
-          (node) =>
-            node.backendDOMNodeId === backendNodeId && node.ignored !== true
-        );
-        const semanticRole = String(semanticNode?.role?.value || "");
-        const semanticName = normalizeText(
-          semanticNode?.name?.value || "",
-          SNAPSHOT_LIMITS.fieldText
-        );
-        semanticElements.push(
-          semanticRole === rawElement.role &&
-            semanticName ===
-              normalizeText(rawElement.label, SNAPSHOT_LIMITS.fieldText)
-            ? rawElement
-            : null
-        );
-      } catch {
-        semanticElements.push(null);
-      } finally {
-        if (objectId) {
-          await accessibilitySession
-            .send("Runtime.releaseObject", { objectId })
-            .catch(() => {});
-        }
-      }
-    }
-  } catch {
-    while (semanticElements.length < raw.observedElements.length) {
-      semanticElements.push(null);
-    }
-  } finally {
-    await accessibilitySession?.detach().catch(() => {});
-  }
-  const verifiedSemanticElements = semanticElements.filter(
-    (element) => element !== null
-  );
+  const semanticSnapshot = await verifyBrowserSemanticCandidates(page, {
+    ancestorCount: SEMANTIC_CONTROL_LIMITS.ancestorCount,
+    candidateTraversalComplete: raw.candidateTraversalComplete,
+    expectedControls: [],
+    fieldText: SNAPSHOT_LIMITS.fieldText,
+    observedElements: raw.observedElements
+  });
+  const verifiedSemanticElements = semanticSnapshot.verifiedElements;
   const verifiedSemanticRefs = new Set(
     verifiedSemanticElements.map((element) => element.runtimeRef)
   );
-  const controlAssertions = expectedDestinationControls.map((expected) => {
-    if (!raw.candidateTraversalComplete) {
-      return { ...expected, matchCount: 0, satisfied: false };
-    }
-    const matchCount = verifiedSemanticElements.filter(
-      (element) =>
-        element.role === expected.role &&
-        String(element.type || "").toLowerCase() === expected.type &&
-        normalizeText(element.label, SNAPSHOT_LIMITS.fieldText) ===
-          expected.name
-    ).length;
-    return { ...expected, matchCount, satisfied: matchCount === 1 };
-  });
+  const { controlAssertions } = await boundedSemanticControlSnapshot(
+    page,
+    expectedDestinationControls
+  );
   const elements = [];
   for (const rawElement of raw.elements) {
     if (!verifiedSemanticRefs.has(rawElement.runtimeRef)) continue;
@@ -1055,17 +1309,13 @@ async function snapshotPage(
       url.hash = "";
       href = url.href;
     }
-    const runtimeHandle = await page.evaluateHandle(
-      (runtimeRef) =>
-        document.querySelector(
-          `[data-yellowbird-agent-ref=${JSON.stringify(runtimeRef)}]`
-        ),
-      rawElement.runtimeRef
-    );
-    if (!runtimeHandle.asElement()) {
-      await runtimeHandle.dispose();
-      continue;
-    }
+    const selector =
+      `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.runtimeRef)}]`;
+    const runtimeHandle = await page
+      .locator(selector)
+      .elementHandle({ timeout: 100 })
+      .catch(() => null);
+    if (!runtimeHandle) continue;
     const element = {
       ref: rawElement.ref,
       action,
@@ -1075,6 +1325,7 @@ async function snapshotPage(
       href,
       type: rawElement.type,
       options: rawElement.options.map((option) => ({
+        ref: option.ref,
         label: normalizeText(option.label, 120),
         value: String(option.value).slice(0, 200)
       })),
@@ -1125,6 +1376,7 @@ function availableElements(snapshot, usedActionKeys, visited) {
     .filter((element) => element.action !== "visit" || !visited.has(element.href))
     .map(({ runtimeHandle, locator, key, action, ...element }) => ({
       ...element,
+      options: element.options.map(({ ref, label }) => ({ ref, label })),
       allowedAction: action
     }));
 }
@@ -1151,7 +1403,7 @@ function plannerMessages({
   return [
     {
       role: "system",
-      content: `You are YellowBird's bounded safe-interaction web test planner. Choose action act with exactly one supplied elementRef, or choose finish. YellowBird, not you, enforces each element's allowedAction. Set value to null for fill actions because YellowBird supplies a deterministic synthetic value. For select actions, value must exactly match a supplied option value. You may not invent elements or URLs, use real personal data or credentials, submit forms, mutate server state, authenticate, change expected results, or report product bugs. Prefer supplied read-only setup or navigation paths over existing-record detail pages when the owner asks to assess a basic user flow. An element supplied with allowedAction visit is a YellowBird-authorized read-only GET navigation; opening a path labeled New, Start, or Setup observes a form and does not submit it. Visiting a supplied link is a browser action. When requireAtLeastOneAction is true, finish is invalid until you select an authorized action. When the owner asks to assess, review, or inspect a basic flow, loading the relevant primary route and observing its controls may support covered coverage; preserve partial coverage whenever any requested area remains unverified. Safely exercising fields can add coverage but is not required unless the intent asks about form interaction. If the intent explicitly asks to create, submit, mutate, authenticate, or complete another prohibited effect, finish with partial or blocked coverage. Product findings require browser evidence outside your output.`
+      content: `You are YellowBird's bounded safe-interaction web test planner. Choose action act with exactly one supplied elementRef, or choose finish. YellowBird, not you, enforces each element's allowedAction. Set value to null for fill actions because YellowBird supplies a deterministic synthetic value. For select actions, value must exactly match a supplied opaque option ref. You may not invent elements or URLs, use real personal data or credentials, submit forms, mutate server state, authenticate, change expected results, or report product bugs. Prefer supplied read-only setup or navigation paths over existing-record detail pages when the owner asks to assess a basic user flow. An element supplied with allowedAction visit is a YellowBird-authorized read-only GET navigation; opening a path labeled New, Start, or Setup observes a form and does not submit it. Visiting a supplied link is a browser action. When requireAtLeastOneAction is true, finish is invalid until you select an authorized action. When the owner asks to assess, review, or inspect a basic flow, loading the relevant primary route and observing its controls may support covered coverage; preserve partial coverage whenever any requested area remains unverified. Safely exercising fields can add coverage but is not required unless the intent asks about form interaction. If the intent explicitly asks to create, submit, mutate, authenticate, or complete another prohibited effect, finish with partial or blocked coverage. Product findings require browser evidence outside your output.`
     },
     {
       role: "user",
@@ -1565,6 +1817,10 @@ export async function exploreIntentWithEngine({
       });
     }
     const action = selected.action;
+    const selectedOption =
+      action === "select"
+        ? selected.options.find((option) => option.ref === proposed.value)
+        : null;
     if (
       action === "select" &&
       (typeof proposed.value !== "string" ||
@@ -1576,9 +1832,9 @@ export async function exploreIntentWithEngine({
     }
     if (
       action === "select" &&
-      !selected.options.some((option) => option.value === proposed.value)
+      !selectedOption
     ) {
-      feedback = `The selected option value is unavailable. Choose an exact value supplied for ${selected.ref}.`;
+      feedback = `The selected option reference is unavailable. Choose an exact option ref supplied for ${selected.ref}.`;
       continue;
     }
 
@@ -1588,7 +1844,7 @@ export async function exploreIntentWithEngine({
       action === "fill"
         ? syntheticValue(selected)
         : action === "select"
-          ? proposed.value
+          ? selectedOption.value
           : null;
     const sourceUrl = page.url();
     record("info", "agent.action.started", "Executing an authorized safe interaction", {
