@@ -50,9 +50,13 @@ bun run scout -- \
   --expect-text "Checkout ready"
 ```
 
-The scout exits `2` when it finds asserted failures and `3` when test mechanics
-make the result inconclusive. If both occur, the product finding takes precedence
-and the run exits `2`. It writes an evidence bundle under
+The scout reports `attention` and exits `2` when it finds product failures, or
+reports `inconclusive` and exits `3` when test mechanics prevent a trustworthy
+result. Product findings normally take precedence when both occur. A browser
+network-guard failure or a popup or worker created during intent exploration
+instead forces exit `3` because the evidence boundary cannot be trusted. Invalid
+input or configuration and evidence-bundle persistence failures remain fatal and
+exit `1`. Runs that reach finalization write an evidence bundle under
 `.yellowbird/scout/<run-id>/`:
 
 - `report.md` - human-readable findings, reproduction steps, and coverage gaps
@@ -181,27 +185,30 @@ action outside the safe interaction authority produce an `inconclusive` result
 instead of an unverified pass.
 
 Before authorizing controls or requests, YellowBird repeatedly percent-decodes
-URL and control semantics, considers computed accessible names including
-`aria-labelledby`, and fails closed when encoded text or a referenced label
-cannot be resolved. Browser guards are installed before destination scripts
+URL and control semantics, normalizes case and letter-digit boundaries so names
+such as `delete2FA` remain prohibited, considers computed accessible names
+including `aria-labelledby`, and fails closed when encoded text or a referenced
+label cannot be resolved. Browser guards are installed before destination scripts
 run, keep their enforcement state outside page-accessible objects, and report
 blocked browser operations through a per-run channel. Agent document visits
-are mediated with automatic redirects disabled so
-each redirect must pass policy before its destination can load. During the
-initial target load and each authorized visit, exact-origin `GET` and `HEAD`
-non-document requests, including `EventSource`, are allowed only through a
-150 ms settlement interval after `DOMContentLoaded`. Later network requests
-outside an explicitly mediated visit document chain are blocked, and WebSockets
-are blocked throughout agent mode.
+intercept every redirect response so an unsafe destination is blocked before the
+browser follows it. During the initial target load and each authorized visit,
+exact-origin `GET` and `HEAD` non-document requests, including `EventSource`, are
+allowed only through a 150 ms settlement interval after `DOMContentLoaded`.
+Allowed response bodies continue streaming without YellowBird buffering them.
+Later network requests outside an explicitly mediated visit document chain are
+blocked, and WebSockets are blocked throughout agent mode.
 
-The generated regression re-enforces exact-origin and read-only agent guards,
-including submission and outbound WebSocket blocking, without calling the model.
-Recorded non-navigation actions also replay through verified locators and assert
-their match counts before using the recorded ordinal.
+The generated regression re-enforces the live scout's exact-origin, read-only,
+redirect, and 150 ms visit-settlement guards, including submission and outbound
+WebSocket blocking, without calling the model. Recorded non-navigation actions
+also replay through verified locators and assert their match counts before using
+the recorded ordinal.
 
 Fetch errors caused by policy enforcement are correlated to the exact blocked
-URL and excluded from product-failure evidence. Independent console, page, and
-request errors remain product signals.
+request occurrence and excluded from product-failure evidence. Independent
+console, page, and request errors, including another failure at the same URL,
+remain product signals.
 
 A bounded snapshot of the current page URL, title, text, and control inventory,
 including supplied link URLs and select options, is sent to the configured model
