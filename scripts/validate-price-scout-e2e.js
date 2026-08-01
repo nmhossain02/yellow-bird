@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -10,7 +10,7 @@ import {
 
 const expectedRepository = "https://github.com/nmhossain02/price-scout";
 const yellowBirdDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const priceScoutDirectory = resolve(
+const requestedPriceScoutDirectory = resolve(
   process.env.YELLOWBIRD_PRICE_SCOUT_DIR ||
     "test/fixtures/external/price-scout"
 );
@@ -23,30 +23,33 @@ const priceScoutExpectedDestinationControls = [
   { role: "combobox", type: "select-one", name: "Frequency" },
   { role: "button", type: "submit", name: "Compile monitor" }
 ];
-const composeControlledEnvironmentNames = [
-  "ALERT_WEBHOOK_SECRET",
-  "ALERT_WEBHOOK_URL",
-  "BROWSERBASE_API_KEY",
-  "BROWSERBASE_PROJECT_ID",
-  "BROWSER_PROVIDER",
-  "DATABASE_URL",
-  "DISCORD_WEBHOOK_URL",
-  "FIXTURE_CONTROL_TOKEN",
-  "INFERENCE_MODE",
-  "MODEL_API_KEY",
-  "NATS_URL",
-  "SCOUT_FIXTURE_ORIGIN",
-  "SCOUT_PUBLIC_URL",
-  "STAGEHAND_MODEL",
-  "WORKER_API_TOKEN"
+const inheritedChildEnvironmentNames = [
+  "HOME",
+  "LOGNAME",
+  "PATH",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "USER",
+  "XDG_RUNTIME_DIR"
 ];
 
 function requireCondition(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-const externalCommandEnvironment = { ...process.env };
-delete externalCommandEnvironment.YELLOWBIRD_ENGINE_API_KEY;
+const externalCommandEnvironment = Object.fromEntries(
+  inheritedChildEnvironmentNames.flatMap((name) =>
+    process.env[name] === undefined ? [] : [[name, process.env[name]]]
+  )
+);
+const gitEnvironment = {
+  ...externalCommandEnvironment,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_TERMINAL_PROMPT: "0",
+  LC_ALL: "C"
+};
 
 async function run(command, cwd, env) {
   const child = Bun.spawn({
@@ -82,31 +85,73 @@ function canonicalRepository(value) {
     .replace(/\/$/, "");
 }
 
-async function verifyPriceScoutCheckout(stage, expectedCommit) {
-  const [commit, status] = await Promise.all([
+async function trustedPriceScoutCommit() {
+  const authorizedCommit = process.env.YELLOWBIRD_PRICE_SCOUT_COMMIT;
+  if (authorizedCommit !== undefined) {
+    requireCondition(
+      /^[0-9a-f]{40}$/i.test(authorizedCommit),
+      "YELLOWBIRD_PRICE_SCOUT_COMMIT must be a full 40-character commit digest"
+    );
+    return authorizedCommit.toLowerCase();
+  }
+  const output = await checked(
+    [
+      "git",
+      "-c",
+      "credential.helper=",
+      "ls-remote",
+      `${expectedRepository}.git`,
+      "HEAD"
+    ],
+    tmpdir(),
+    "Trusted Price Scout remote revision verification",
+    gitEnvironment
+  );
+  const [line, ...additionalLines] = output.split("\n");
+  const [commit, ref, ...additionalFields] = line.trim().split(/\s+/);
+  requireCondition(
+    additionalLines.length === 0 &&
+      additionalFields.length === 0 &&
+      ref === "HEAD" &&
+      /^[0-9a-f]{40}$/i.test(commit),
+    "The trusted Price Scout remote did not resolve to one commit"
+  );
+  return commit.toLowerCase();
+}
+
+async function verifyPriceScoutCheckout(directory, stage, expectedCommit) {
+  const [commit, status, worktreeRoot] = await Promise.all([
     checked(
       ["git", "rev-parse", "HEAD"],
-      priceScoutDirectory,
+      directory,
       `${stage} revision verification`,
-      externalCommandEnvironment
+      gitEnvironment
     ),
     checked(
-      ["git", "status", "--porcelain"],
-      priceScoutDirectory,
+      ["git", "status", "--porcelain", "--untracked-files=all"],
+      directory,
       `${stage} cleanliness verification`,
-      externalCommandEnvironment
+      gitEnvironment
+    ),
+    checked(
+      ["git", "rev-parse", "--show-toplevel"],
+      directory,
+      `${stage} worktree verification`,
+      gitEnvironment
     )
   ]);
+  requireCondition(
+    (await realpath(worktreeRoot)) === directory,
+    `The Price Scout path must resolve to the verified Git worktree root ${stage}`
+  );
   requireCondition(
     status === "",
     `The Price Scout checkout must be clean ${stage}`
   );
-  if (expectedCommit) {
-    requireCondition(
-      commit === expectedCommit,
-      `The Price Scout checkout revision changed ${stage}`
-    );
-  }
+  requireCondition(
+    commit.toLowerCase() === expectedCommit,
+    `The Price Scout checkout is not the authorized revision ${stage}`
+  );
   return commit;
 }
 
@@ -136,7 +181,11 @@ function hasPublishedPort(service, targetPort, publishedPort) {
   );
 }
 
-async function removeIsolatedComposeStack(environment, imageNames) {
+async function removeIsolatedComposeStack(
+  priceScoutDirectory,
+  environment,
+  imageNames
+) {
   const failures = [];
   const down = await run(
     ["docker", "compose", "down", "--volumes", "--remove-orphans"],
@@ -163,6 +212,24 @@ async function removeIsolatedComposeStack(environment, imageNames) {
   }
 }
 
+function composeEnvironmentMatches(service, expected) {
+  const actual = service?.environment || {};
+  const actualEntries = Object.entries(actual).sort(([left], [right]) =>
+    left.localeCompare(right)
+  );
+  const expectedEntries = Object.entries(expected).sort(([left], [right]) =>
+    left.localeCompare(right)
+  );
+  return (
+    actualEntries.length === expectedEntries.length &&
+    actualEntries.every(
+      ([name, value], index) =>
+        name === expectedEntries[index][0] &&
+        String(value ?? "") === String(expectedEntries[index][1])
+    )
+  );
+}
+
 async function main() {
   const engineConfig = validateAgentEngineConfig();
   requireCondition(
@@ -174,19 +241,23 @@ async function main() {
     classifyAgentEngineEndpoint(engineConfig.baseUrl) === "loopback",
     `The real Price Scout gate requires a loopback planning engine, received ${engineConfig.baseUrl}`
   );
+  const priceScoutDirectory = await realpath(requestedPriceScoutDirectory);
+  const authorizedCommit = await trustedPriceScoutCommit();
 
   const origin = await checked(
     ["git", "remote", "get-url", "origin"],
     priceScoutDirectory,
     "Price Scout origin verification",
-    externalCommandEnvironment
+    gitEnvironment
   );
   requireCondition(
     canonicalRepository(origin) === expectedRepository,
     `Expected the real Price Scout repository at ${priceScoutDirectory}, received ${origin}`
   );
   const priceScoutCommit = await verifyPriceScoutCheckout(
-    "before the end-to-end gate starts it"
+    priceScoutDirectory,
+    "before the end-to-end gate starts it",
+    authorizedCommit
   );
 
   const outputDirectory = await mkdtemp(
@@ -198,6 +269,7 @@ async function main() {
   const healthUrl = `http://localhost:${targetPort}/`;
   const composeProjectName = `yellowbird-price-scout-e2e-${process.pid}`;
   const composeOverridePath = join(outputDirectory, "compose.e2e.yaml");
+  const composeEnvironmentPath = join(outputDirectory, "compose.e2e.env");
   const imageNames = [
     `${composeProjectName}-control-plane:dev`,
     `${composeProjectName}-fixture:dev`,
@@ -205,20 +277,38 @@ async function main() {
   ];
   await writeFile(
     composeOverridePath,
-    `services:\n  api:\n    image: ${imageNames[0]}\n    ports: !override\n      - "127.0.0.1:${targetPort}:8080"\n  scheduler:\n    image: ${imageNames[0]}\n  fixture:\n    image: ${imageNames[1]}\n    ports: !override\n      - "127.0.0.1:${fixturePort}:4173"\n  worker:\n    image: ${imageNames[2]}\n`,
+    `services:\n  api:\n    image: ${imageNames[0]}\n    env_file: !reset []\n    ports: !override\n      - "127.0.0.1:${targetPort}:8080"\n  scheduler:\n    image: ${imageNames[0]}\n    env_file: !reset []\n  fixture:\n    image: ${imageNames[1]}\n    env_file: !reset []\n    ports: !override\n      - "127.0.0.1:${fixturePort}:4173"\n  worker:\n    image: ${imageNames[2]}\n    env_file: !reset []\n`,
     "utf8"
   );
+  await writeFile(composeEnvironmentPath, "", "utf8");
+  const isolatedComposeValues = {
+    ALERT_WEBHOOK_SECRET: "",
+    ALERT_WEBHOOK_URL: "",
+    BROWSERBASE_API_KEY: "",
+    BROWSERBASE_PROJECT_ID: "",
+    BROWSER_PROVIDER: "LOCAL",
+    DATABASE_URL:
+      "postgres://scout:scout@postgres:5432/scout?sslmode=disable",
+    DISCORD_WEBHOOK_URL: "",
+    FIXTURE_CONTROL_TOKEN: `${composeProjectName}-fixture-token`,
+    INFERENCE_MODE: "auto",
+    MODEL_API_KEY: "",
+    NATS_URL: "nats://nats:4222",
+    SCOUT_FIXTURE_ORIGIN: "http://fixture:4173",
+    SCOUT_PUBLIC_URL: healthUrl.slice(0, -1),
+    STAGEHAND_MODEL: "openai/gpt-4.1-mini",
+    WORKER_API_TOKEN: `${composeProjectName}-worker-token`
+  };
   const composeEnvironment = { ...externalCommandEnvironment };
-  for (const name of composeControlledEnvironmentNames) {
-    delete composeEnvironment[name];
-  }
   Object.assign(composeEnvironment, {
     COMPOSE_FILE: [
       join(priceScoutDirectory, "compose.yaml"),
       composeOverridePath
     ].join(delimiter),
+    COMPOSE_DISABLE_ENV_FILE: "1",
+    COMPOSE_ENV_FILES: composeEnvironmentPath,
     COMPOSE_PROJECT_NAME: composeProjectName,
-    SCOUT_PUBLIC_URL: healthUrl.slice(0, -1)
+    ...isolatedComposeValues
   });
 
   const renderedCompose = JSON.parse(
@@ -239,6 +329,62 @@ async function main() {
       renderedCompose.services?.worker?.image === imageNames[2],
     "The Price Scout target did not render as an isolated Compose project"
   );
+  const controlPlaneEnvironment = {
+    ALERT_WEBHOOK_SECRET: isolatedComposeValues.ALERT_WEBHOOK_SECRET,
+    ALERT_WEBHOOK_URL: isolatedComposeValues.ALERT_WEBHOOK_URL,
+    ARTIFACT_DIR: "/data/artifacts",
+    DATABASE_URL: isolatedComposeValues.DATABASE_URL,
+    DEFAULT_INTERVAL_MINUTES: "360",
+    DISCORD_WEBHOOK_URL: isolatedComposeValues.DISCORD_WEBHOOK_URL,
+    MIN_INTERVAL_MINUTES: "15",
+    NATS_URL: isolatedComposeValues.NATS_URL,
+    SCOUT_EXECUTION_MAX_ATTEMPTS: "3",
+    SCOUT_EXECUTION_RUNNING_STALE_AFTER: "5m",
+    SCOUT_FIXTURE_ORIGIN: isolatedComposeValues.SCOUT_FIXTURE_ORIGIN,
+    SCOUT_HTTP_ADDR: ":8080",
+    SCOUT_PUBLIC_URL: isolatedComposeValues.SCOUT_PUBLIC_URL,
+    SCOUT_WEB_ROOT: "/app/web",
+    WORKER_API_TOKEN: isolatedComposeValues.WORKER_API_TOKEN
+  };
+  requireCondition(
+    composeEnvironmentMatches(
+      renderedCompose.services?.postgres,
+      {
+        POSTGRES_DB: "scout",
+        POSTGRES_PASSWORD: "scout",
+        POSTGRES_USER: "scout"
+      }
+    ) &&
+      composeEnvironmentMatches(renderedCompose.services?.nats, {}) &&
+      composeEnvironmentMatches(renderedCompose.services?.api, controlPlaneEnvironment) &&
+      composeEnvironmentMatches(
+        renderedCompose.services?.scheduler,
+        controlPlaneEnvironment
+      ) &&
+      composeEnvironmentMatches(renderedCompose.services?.fixture, {
+        FIXTURE_CONTROL_TOKEN: isolatedComposeValues.FIXTURE_CONTROL_TOKEN,
+        PORT: "4173"
+      }) &&
+      composeEnvironmentMatches(renderedCompose.services?.worker, {
+        ALLOWED_PRIVATE_HOSTS: "fixture",
+        ARTIFACT_DIR: "/data/artifacts",
+        BROWSERBASE_API_KEY: isolatedComposeValues.BROWSERBASE_API_KEY,
+        BROWSERBASE_PROJECT_ID: isolatedComposeValues.BROWSERBASE_PROJECT_ID,
+        BROWSER_PROVIDER: isolatedComposeValues.BROWSER_PROVIDER,
+        CHROME_EXECUTABLE_PATH: "/usr/bin/chromium",
+        CONTROL_PLANE_TIMEOUT_MS: "15000",
+        FIXTURE_ORIGIN: isolatedComposeValues.SCOUT_FIXTURE_ORIGIN,
+        INFERENCE_MODE: isolatedComposeValues.INFERENCE_MODE,
+        INTERNAL_API_URL: "http://api:8080",
+        JOB_TIMEOUT_MS: "120000",
+        MODEL_API_KEY: isolatedComposeValues.MODEL_API_KEY,
+        MODEL_NAME: isolatedComposeValues.STAGEHAND_MODEL,
+        NATS_URL: isolatedComposeValues.NATS_URL,
+        NAVIGATION_TIMEOUT_MS: "30000",
+        WORKER_TOKEN: isolatedComposeValues.WORKER_API_TOKEN
+      }),
+    "The Price Scout services did not render with only isolated fixture environment values"
+  );
 
   let startupAttempted = false;
   let primaryFailure;
@@ -251,7 +397,11 @@ async function main() {
       "Price Scout target startup from the verified checkout",
       composeEnvironment
     );
-    await verifyPriceScoutCheckout("after target startup", priceScoutCommit);
+    await verifyPriceScoutCheckout(
+      priceScoutDirectory,
+      "after target startup",
+      priceScoutCommit
+    );
 
     let healthResponse;
     try {
@@ -271,9 +421,16 @@ async function main() {
     );
 
     await verifyPriceScoutCheckout(
+      priceScoutDirectory,
       "immediately before the scout",
       priceScoutCommit
     );
+    const scoutEnvironment = {
+      ...externalCommandEnvironment,
+      ...(engineConfig.apiKey === null
+        ? {}
+        : { YELLOWBIRD_ENGINE_API_KEY: engineConfig.apiKey })
+    };
     const scout = await run(
       [
         process.execPath,
@@ -285,6 +442,9 @@ async function main() {
         "Assess initial interface and basic user flow",
         "--engine-base-url",
         engineConfig.baseUrl,
+        ...(engineConfig.model === null
+          ? []
+          : ["--engine-model", engineConfig.model]),
         "--agent-primary-route",
         "/monitors/new",
         ...priceScoutExpectedDestinationTexts.flatMap((text) => [
@@ -308,7 +468,7 @@ async function main() {
         "--verbose"
       ],
       priceScoutDirectory,
-      process.env
+      scoutEnvironment
     );
     requireCondition(
       scout.exitCode === 0,
@@ -430,7 +590,11 @@ async function main() {
   } finally {
     if (startupAttempted) {
       try {
-        await removeIsolatedComposeStack(composeEnvironment, imageNames);
+        await removeIsolatedComposeStack(
+          priceScoutDirectory,
+          composeEnvironment,
+          imageNames
+        );
       } catch (cleanupError) {
         if (!primaryFailure) throw cleanupError;
         process.stderr.write(

@@ -17,10 +17,12 @@ import {
   validateAgentEngineConfig
 } from "./engine.js";
 import {
+  browserRenderedTextSnapshot,
   exploreIntentWithEngine,
   isAgentRouteAuthorized,
   isAgentUrlAllowed,
-  PROHIBITED_AGENT_ACTION_PATTERN
+  PROHIBITED_AGENT_ACTION_PATTERN,
+  RENDERED_TEXT_LIMITS
 } from "./explorer.js";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
@@ -32,6 +34,14 @@ const STEP_CAPABILITIES = {
 };
 const SUPPORTED_STEP_ACTIONS = new Set(Object.keys(STEP_CAPABILITIES));
 const AGENT_NAVIGATION_SETTLEMENT_MS = 150;
+const SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
+const EVIDENCE_ELEMENT_LIMITS = Object.freeze({
+  count: 100,
+  fieldText: 160,
+  labelNodeCount: 100,
+  traversalNodeCount: 5_000,
+  url: 4_096
+});
 const require = createRequire(import.meta.url);
 const PLAYWRIGHT_VERSION = require("@playwright/test/package.json").version;
 
@@ -459,6 +469,10 @@ function buildRegression(options, explorationSteps = []) {
     "  const pageErrors = [];",
     "  const failedRequests = [];",
     "  const serverErrors = [];",
+    `  const yellowbirdRenderedTextSnapshot = ${browserRenderedTextSnapshot.toString()};`,
+    "  const yellowbirdReadRenderedBodyText = async maximum =>",
+    `    (await page.evaluate(yellowbirdRenderedTextSnapshot, { maximum, traversalNodeCount: ${RENDERED_TEXT_LIMITS.traversalNodeCount} }))`,
+    '      .replaceAll(/\\s+/g, " ").trim().slice(0, maximum);',
     "  const yellowbirdGuardControlName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
     "  const yellowbirdGuardControlToken = randomUUID();",
     "  const yellowbirdGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;",
@@ -677,6 +691,31 @@ function buildRegression(options, explorationSteps = []) {
     "      emit(`${guardPrefix}${JSON.stringify({ kind, url })}`);",
     "      return true;",
     "    };",
+    "    const disabledPeerConstructors = new Map();",
+    '    for (const constructorName of ["RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection", "WebTransport"]) {',
+    "      const original = globalThis[constructorName];",
+    '      if (typeof original !== "function") continue;',
+    "      let blockedConstructor = disabledPeerConstructors.get(original);",
+    "      if (!blockedConstructor) {",
+    "        blockedConstructor = function () {",
+    '          blocked("peer-transport");',
+    '          throw new DOMException("Blocked by YellowBird exact-origin policy", "SecurityError");',
+    "        };",
+    "        disabledPeerConstructors.set(original, blockedConstructor);",
+    "        if (original.prototype) {",
+    "          try {",
+    "            Object.defineProperty(original.prototype, \"constructor\", {",
+    "              configurable: false, writable: false, value: blockedConstructor",
+    "            });",
+    "          } catch { blocked(\"peer-guard-failed\"); }",
+    "        }",
+    "      }",
+    "      try {",
+    "        Object.defineProperty(globalThis, constructorName, {",
+    "          configurable: false, writable: false, value: blockedConstructor",
+    "        });",
+    "      } catch { blocked(\"peer-guard-failed\"); }",
+    "    }",
     "    const observeCurrentUrl = () => {",
     '      if (active && !urlAllowed(globalThis.location.href)) blocked("prohibited-navigation");',
     "    };",
@@ -981,7 +1020,7 @@ function buildRegression(options, explorationSteps = []) {
   }
   for (const text of options.expectedTexts) {
     lines.push(
-      `  await expect(page.locator("body")).toContainText(${quoteForJavaScript(text)});`
+      `  expect(await yellowbirdReadRenderedBodyText(${RENDERED_TEXT_LIMITS.evidenceBodyText})).toContain(${quoteForJavaScript(text)});`
     );
   }
   options.steps.forEach((step, index) => {
@@ -1029,9 +1068,14 @@ function buildRegression(options, explorationSteps = []) {
           `  expect(${response}?.status()).toBeLessThan(400);`
         );
       }
+      if ((step.destinationAssertions || []).length > 0) {
+        lines.push(
+          `  const yellowbirdDestinationText${index + 1} = await yellowbirdReadRenderedBodyText(${RENDERED_TEXT_LIMITS.plannerBodyText});`
+        );
+      }
       for (const assertion of step.destinationAssertions || []) {
         lines.push(
-          `  await expect(page.locator("body")).toContainText(${quoteForJavaScript(assertion.text)});`
+          `  expect(yellowbirdDestinationText${index + 1}).toContain(${quoteForJavaScript(assertion.text)});`
         );
       }
       for (const [assertionIndex, assertion] of (
@@ -2424,6 +2468,47 @@ export function createScoutRunner({
         emit(`${guardPrefix}${JSON.stringify({ kind, url })}`);
         return true;
       };
+      const disabledPeerConstructors = new Map();
+      for (const constructorName of [
+        "RTCPeerConnection",
+        "webkitRTCPeerConnection",
+        "mozRTCPeerConnection",
+        "WebTransport"
+      ]) {
+        const original = globalThis[constructorName];
+        if (typeof original !== "function") continue;
+        let blockedConstructor = disabledPeerConstructors.get(original);
+        if (!blockedConstructor) {
+          blockedConstructor = function () {
+            blocked("peer-transport");
+            throw new DOMException(
+              "Blocked by YellowBird exact-origin policy",
+              "SecurityError"
+            );
+          };
+          disabledPeerConstructors.set(original, blockedConstructor);
+          if (original.prototype) {
+            try {
+              Object.defineProperty(original.prototype, "constructor", {
+                configurable: false,
+                writable: false,
+                value: blockedConstructor
+              });
+            } catch {
+              blocked("peer-guard-failed");
+            }
+          }
+        }
+        try {
+          Object.defineProperty(globalThis, constructorName, {
+            configurable: false,
+            writable: false,
+            value: blockedConstructor
+          });
+        } catch {
+          blocked("peer-guard-failed");
+        }
+      }
       const observeCurrentUrl = () => {
         if (active && !urlAllowed(globalThis.location.href)) {
           blocked("prohibited-navigation");
@@ -2928,9 +3013,16 @@ export function createScoutRunner({
       if (agentNetworkPolicyActive) await closeAgentNavigationWindow();
       state.assertionTitle = await page.title().catch(() => "");
       state.assertionBodyText = await page
-        .locator("body")
-        .innerText()
-        .then((value) => value.slice(0, 20_000))
+        .evaluate(browserRenderedTextSnapshot, {
+          maximum: RENDERED_TEXT_LIMITS.evidenceBodyText,
+          traversalNodeCount: RENDERED_TEXT_LIMITS.traversalNodeCount
+        })
+        .then((value) =>
+          value
+            .replaceAll(/\s+/g, " ")
+            .trim()
+            .slice(0, RENDERED_TEXT_LIMITS.evidenceBodyText)
+        )
         .catch(() => "");
     } catch (error) {
       state.navigationError = cleanDiagnosticText(error.message);
@@ -3185,40 +3277,93 @@ export function createScoutRunner({
     }
 
     state.title = await page.title().catch(() => "");
-    const snapshot = await page
-      .evaluate(() => {
-        const selector = "a, button, input, select, textarea";
-        const elements = [...document.querySelectorAll(selector)].slice(0, 100);
-        return {
-          bodyText: (document.body?.innerText || "").slice(0, 20_000),
-          interactiveElements: elements.map((element) => {
-            const label =
-              element.getAttribute("aria-label") ||
-              element.getAttribute("placeholder") ||
-              element.textContent ||
-              element.getAttribute("name") ||
-              element.tagName;
-            return {
-              tag: element.tagName.toLowerCase(),
-              label: String(label).trim().slice(0, 160),
-              href: element.href || null,
-              disabled: Boolean(element.disabled)
-            };
-          })
-        };
+    state.bodyText = await page
+      .evaluate(browserRenderedTextSnapshot, {
+        maximum: RENDERED_TEXT_LIMITS.evidenceBodyText,
+        traversalNodeCount: RENDERED_TEXT_LIMITS.traversalNodeCount
       })
-      .catch(() => ({ bodyText: "", interactiveElements: [] }));
-    state.bodyText = snapshot.bodyText;
-    state.interactiveElements = snapshot.interactiveElements.map((element) => ({
+      .then((value) =>
+        value
+          .replaceAll(/\s+/g, " ")
+          .trim()
+          .slice(0, RENDERED_TEXT_LIMITS.evidenceBodyText)
+      )
+      .catch(() => "");
+    const interactiveElements = await page
+      .evaluate((limits) => {
+        const records = [];
+        const walker = document.createTreeWalker(
+          document.documentElement,
+          NodeFilter.SHOW_ELEMENT
+        );
+        const boundedElementText = (element) => {
+          const chunks = [];
+          let characters = 0;
+          let visitedNodes = 0;
+          const textWalker = document.createTreeWalker(
+            element,
+            NodeFilter.SHOW_TEXT
+          );
+          while (
+            characters < limits.fieldText &&
+            visitedNodes < limits.labelNodeCount
+          ) {
+            const textNode = textWalker.nextNode();
+            if (!textNode) break;
+            visitedNodes += 1;
+            const text = textNode.nodeValue || "";
+            if (!text) continue;
+            const separatorLength = chunks.length ? 1 : 0;
+            const available =
+              limits.fieldText - characters - separatorLength;
+            if (available <= 0) break;
+            chunks.push(text.slice(0, available));
+            characters += separatorLength + Math.min(text.length, available);
+          }
+          return chunks.join(" ");
+        };
+        let visitedNodes = 0;
+        while (
+          records.length < limits.count &&
+          visitedNodes < limits.traversalNodeCount
+        ) {
+          const element = walker.nextNode();
+          if (!element) break;
+          visitedNodes += 1;
+          if (!element.matches("a, button, input, select, textarea")) continue;
+          const label =
+            element.getAttribute("aria-label") ||
+            element.getAttribute("placeholder") ||
+            element.getAttribute("name") ||
+            boundedElementText(element) ||
+            element.tagName;
+          const href = element.href ? String(element.href) : null;
+          records.push({
+            tag: element.tagName.toLowerCase(),
+            label: String(label).trim().slice(0, limits.fieldText),
+            href: href && href.length <= limits.url ? href : null,
+            disabled: Boolean(element.disabled)
+          });
+        }
+        return records;
+      }, EVIDENCE_ELEMENT_LIMITS)
+      .catch(() => []);
+    state.interactiveElements = interactiveElements.map((element) => ({
       ...element,
       href: element.href ? evidenceUrl(element.href) : null
     }));
     screenshot = null;
     try {
-      screenshot = await page.screenshot({
-        fullPage: true,
+      const capturedScreenshot = await page.screenshot({
+        animations: "disabled",
+        caret: "hide",
+        fullPage: false,
         timeout: Math.max(options.timeoutMs, 5_000)
       });
+      if (capturedScreenshot.byteLength > SCREENSHOT_MAX_BYTES) {
+        throw new Error("bounded viewport screenshot exceeded the byte limit");
+      }
+      screenshot = capturedScreenshot;
     } catch (error) {
       noteScreenshotCaptureFailure(error);
     }

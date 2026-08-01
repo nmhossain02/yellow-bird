@@ -29,19 +29,25 @@ bun run test:price-scout
 
 The validator canonicalizes `.git` suffixes, trailing slashes, and
 `git@github.com:` SSH origins, then refuses any checkout whose `origin` does not
-match `https://github.com/nmhossain02/price-scout`. It requires a clean checkout,
-records its revision, and refuses a non-loopback planning-engine endpoint.
+match `https://github.com/nmhossain02/price-scout`. It resolves the checkout to
+its physical worktree root, clears ambient Git configuration and repository
+overrides, requires a clean checkout, and requires `HEAD` to match the trusted
+repository's remote `HEAD`. An operator can instead authorize one immutable
+revision with `YELLOWBIRD_PRICE_SCOUT_COMMIT=<full-commit-digest>`. The validator
+also refuses a non-loopback planning-engine endpoint.
 
 Before startup, the validator creates a unique Compose project with unique image
 tags and assigns free loopback-only host ports to the API and fixture services.
 It renders and checks that configuration before running `make up` from the
-verified checkout. Price Scout's Compose-controlled secrets and local runtime
-bindings inherited from the caller are removed from the Compose environment.
-The YellowBird engine API key is not passed to the checkout or Compose commands;
-the scout is the only child process that receives it. After startup, the
-validator rechecks both the revision and cleanliness, then checks them again
-immediately before the scout. It tears down the isolated containers, network,
-volumes, and images after either success or failure.
+verified checkout. Checkout, Compose, Git, install, and replay children receive
+only a small allowlist of process variables. Compose implicit dotenv loading is
+disabled, service env files are reset, and every service's rendered environment
+must exactly match isolated fixture values. The YellowBird engine API key is not
+passed to the checkout or Compose commands; the scout is the only child process
+that receives it. After startup, the validator rechecks both the revision and
+cleanliness, then checks them again immediately before the scout. It tears down
+the isolated containers, network, volumes, and images after either success or
+failure.
 
 The validator runs the intent scout from the Price Scout working directory with
 `/monitors/new` declared as the primary read-only agent route, the application's

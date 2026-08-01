@@ -28,6 +28,212 @@ const SNAPSHOT_LIMITS = Object.freeze({
   labelledByCount: 20,
   traversalNodeCount: 5_000
 });
+export const RENDERED_TEXT_LIMITS = Object.freeze({
+  bodyText: SNAPSHOT_LIMITS.bodyText,
+  evidenceBodyText: 20_000,
+  plannerBodyText: 8_000,
+  traversalNodeCount: SNAPSHOT_LIMITS.traversalNodeCount
+});
+
+export function browserRenderedTextSnapshot({
+  maximum,
+  traversalNodeCount
+}) {
+  const hiddenState = new WeakMap();
+  const locallyHidden = (element) => {
+    if (
+      !element.isConnected ||
+      element.hidden ||
+      element.inert ||
+      element.getAttribute("aria-hidden")?.trim().toLowerCase() === "true" ||
+      ["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(element.tagName) ||
+      (element.tagName === "INPUT" &&
+        String(element.type).toLowerCase() === "hidden")
+    ) {
+      return true;
+    }
+    try {
+      const style = globalThis.getComputedStyle(element);
+      return (
+        style.display === "none" ||
+        ["hidden", "collapse"].includes(style.visibility) ||
+        style.contentVisibility === "hidden" ||
+        Number(style.opacity) === 0
+      );
+    } catch {
+      return true;
+    }
+  };
+  const hiddenInTree = (element) => {
+    if (!element) return true;
+    if (hiddenState.has(element)) return hiddenState.get(element);
+    const ancestry = [];
+    let current = element;
+    while (current && !hiddenState.has(current)) {
+      if (ancestry.length >= traversalNodeCount) return true;
+      ancestry.push(current);
+      current = current.parentElement;
+    }
+    let hidden = current ? hiddenState.get(current) : false;
+    for (let index = ancestry.length - 1; index >= 0; index -= 1) {
+      const candidate = ancestry[index];
+      hidden = hidden || locallyHidden(candidate);
+      hiddenState.set(candidate, hidden);
+    }
+    return hiddenState.get(element);
+  };
+  const hiddenByClosedContainer = (element) => {
+    let inspected = 0;
+    let current = element;
+    while (current) {
+      inspected += 1;
+      if (inspected > traversalNodeCount) return true;
+      if (current.tagName === "DIALOG" && !current.open) return true;
+      if (
+        current.hasAttribute("popover") &&
+        !current.matches(":popover-open")
+      ) {
+        return true;
+      }
+      const parent = current.parentElement;
+      if (parent?.tagName === "DETAILS" && !parent.open) {
+        let summary = parent.firstElementChild;
+        while (summary && summary.tagName !== "SUMMARY") {
+          inspected += 1;
+          if (inspected > traversalNodeCount) return true;
+          summary = summary.nextElementSibling;
+        }
+        if (!summary || current !== summary) return true;
+      }
+      current = parent;
+    }
+    return false;
+  };
+  const positiveArea = (rect) =>
+    Number.isFinite(rect?.width) &&
+    Number.isFinite(rect?.height) &&
+    rect.width > 0 &&
+    rect.height > 0;
+  const remainsVisibleThroughClipping = (rect, element) => {
+    let visibleRect = {
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+      left: rect.left
+    };
+    let inspected = 0;
+    let current = element;
+    while (current) {
+      inspected += 1;
+      if (inspected > traversalNodeCount) return false;
+      let style;
+      try {
+        style = globalThis.getComputedStyle(current);
+      } catch {
+        return false;
+      }
+      if (
+        (style.clip && style.clip !== "auto") ||
+        (style.clipPath && style.clipPath !== "none") ||
+        (style.maskImage && style.maskImage !== "none") ||
+        (style.webkitMaskImage && style.webkitMaskImage !== "none") ||
+        /opacity\(\s*0(?:\.0*)?\s*\)/i.test(style.filter || "")
+      ) {
+        return false;
+      }
+      if (
+        [style.overflowX, style.overflowY].some((value) =>
+          ["auto", "clip", "hidden", "scroll"].includes(value)
+        )
+      ) {
+        const clippingRect = current.getBoundingClientRect();
+        if (!positiveArea(clippingRect)) return false;
+        visibleRect = {
+          top: Math.max(visibleRect.top, clippingRect.top),
+          right: Math.min(visibleRect.right, clippingRect.right),
+          bottom: Math.min(visibleRect.bottom, clippingRect.bottom),
+          left: Math.max(visibleRect.left, clippingRect.left)
+        };
+        if (
+          visibleRect.right <= visibleRect.left ||
+          visibleRect.bottom <= visibleRect.top
+        ) {
+          return false;
+        }
+      }
+      current = current.parentElement;
+    }
+    return true;
+  };
+  const visibleByApi = (element) => {
+    if (typeof element.checkVisibility !== "function") return true;
+    try {
+      return element.checkVisibility({
+        checkOpacity: true,
+        checkVisibilityCSS: true
+      });
+    } catch {
+      return false;
+    }
+  };
+  const renderedTextNode = (textNode) => {
+    const parent = textNode?.parentElement;
+    if (
+      !parent ||
+      hiddenInTree(parent) ||
+      hiddenByClosedContainer(parent) ||
+      !visibleByApi(parent)
+    ) {
+      return false;
+    }
+    try {
+      const style = globalThis.getComputedStyle(parent);
+      if (
+        style.fontSize === "0px" ||
+        style.color === "transparent" ||
+        /rgba\([^)]*,\s*0\s*\)$/i.test(style.color)
+      ) {
+        return false;
+      }
+      const range = document.createRange();
+      range.selectNodeContents(textNode);
+      const rect = range.getBoundingClientRect();
+      range.detach();
+      return (
+        positiveArea(rect) && remainsVisibleThroughClipping(rect, parent)
+      );
+    } catch {
+      return false;
+    }
+  };
+  const root = document.body;
+  if (!root || maximum <= 0 || hiddenInTree(root)) return "";
+  const chunks = [];
+  let characters = 0;
+  let visitedNodes = 0;
+  const walker = document.createTreeWalker(
+    root,
+    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT
+  );
+  while (characters < maximum && visitedNodes < traversalNodeCount) {
+    const node = walker.nextNode();
+    if (!node) break;
+    visitedNodes += 1;
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      hiddenInTree(node);
+      continue;
+    }
+    if (!renderedTextNode(node)) continue;
+    const text = node.nodeValue || "";
+    if (!text) continue;
+    const separatorLength = chunks.length ? 1 : 0;
+    const available = maximum - characters - separatorLength;
+    if (available <= 0) break;
+    chunks.push(text.slice(0, available));
+    characters += separatorLength + Math.min(text.length, available);
+  }
+  return chunks.join(" ");
+}
 const ACTION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -225,8 +431,12 @@ async function snapshotPage(
   authorizedNavigationRoutes,
   expectedDestinationControls
 ) {
-  const raw = await page.evaluate(({ expectedControls, limits, prohibitedPattern }) => {
-    let remainingCharacters = limits.totalCharacters;
+  const bodyText = await page.evaluate(browserRenderedTextSnapshot, {
+    maximum: SNAPSHOT_LIMITS.bodyText,
+    traversalNodeCount: SNAPSHOT_LIMITS.traversalNodeCount
+  });
+  const raw = await page.evaluate(({ bodyTextCharacters, limits, prohibitedPattern }) => {
+    let remainingCharacters = limits.totalCharacters - bodyTextCharacters;
     const prohibited = new RegExp(prohibitedPattern, "i");
     const canonicalizeSemanticText = (value) =>
       String(value ?? "")
@@ -413,10 +623,10 @@ async function snapshotPage(
         return false;
       }
       try {
-        return Array.from(element.getClientRects()).some(
-          (rect) =>
-            positiveArea(rect) &&
-            remainsVisibleThroughClipping(rect, element.parentElement)
+        const rect = element.getBoundingClientRect();
+        return (
+          positiveArea(rect) &&
+          remainsVisibleThroughClipping(rect, element.parentElement)
         );
       } catch {
         return false;
@@ -443,13 +653,9 @@ async function snapshotPage(
         }
         const range = document.createRange();
         range.selectNodeContents(textNode);
-        const visible = Array.from(range.getClientRects()).some(
-          (rect) =>
-            positiveArea(rect) &&
-            remainsVisibleThroughClipping(rect, parent)
-        );
+        const rect = range.getBoundingClientRect();
         range.detach();
-        return visible;
+        return positiveArea(rect) && remainsVisibleThroughClipping(rect, parent);
       } catch {
         return false;
       }
@@ -491,10 +697,6 @@ async function snapshotPage(
     }
     remainingCharacters -= url.length;
     const title = takeText(document.title, limits.fieldText);
-    const bodyText = takeText(
-      boundedNodeText(document.body, limits.bodyText),
-      limits.bodyText
-    );
     const candidateElements = [];
     const walker = document.createTreeWalker(
       document.documentElement,
@@ -588,9 +790,6 @@ async function snapshotPage(
       }
       return structuralReplayLocator(element);
     };
-    const controlMatchCounts = expectedControls.map(() => 0);
-    const normalizeControlName = (value) =>
-      String(value ?? "").replaceAll(/\s+/g, " ").trim();
     const elements = candidateElements
       .flatMap((element, index) => {
         if (!element.isConnected || !isRenderedElement(element)) return [];
@@ -651,20 +850,6 @@ async function snapshotPage(
                 break;
               }
             }
-          }
-        }
-        if (!formHasPassword) {
-          const controlName = normalizeControlName(label);
-          if (controlName.length <= limits.fieldText) {
-            expectedControls.forEach((expected, expectedIndex) => {
-              if (
-                expected.role === role &&
-                expected.type === controlType &&
-                expected.name === controlName
-              ) {
-                controlMatchCounts[expectedIndex] += 1;
-              }
-            });
           }
         }
         if (tag === "select" && element.options.length > limits.optionCount) {
@@ -734,44 +919,62 @@ async function snapshotPage(
         element.setAttribute("data-yellowbird-agent-ref", ref);
         return [candidate];
       });
-    const controlAssertions = expectedControls.map((expected, index) => ({
-      ...expected,
-      matchCount: controlMatchCounts[index],
-      satisfied:
-        candidateTraversalComplete && controlMatchCounts[index] === 1
-    }));
-    return { url, title, bodyText, controlAssertions, elements };
+    return { url, title, candidateTraversalComplete, elements };
   }, {
-    expectedControls: expectedDestinationControls,
+    bodyTextCharacters: bodyText.length,
     limits: SNAPSHOT_LIMITS,
     prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN
   });
-  const accessibleSnapshots = await Promise.all(
+  const semanticElements = await Promise.all(
     raw.elements.map(async (rawElement) => {
       try {
-        return await page
-          .locator(
-            `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`
-          )
-          .ariaSnapshot({ timeout: 250 });
+        const semanticLocator = page
+          .getByRole(rawElement.role, {
+            name: normalizeText(rawElement.label, SNAPSHOT_LIMITS.fieldText),
+            exact: true
+          })
+          .and(
+            page.locator(
+              `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`
+            )
+          );
+        return (await semanticLocator.count()) === 1 &&
+          (await semanticLocator.isVisible())
+          ? rawElement
+          : null;
       } catch {
         return null;
       }
     })
   );
+  const controlAssertions = await Promise.all(
+    expectedDestinationControls.map(async (expected) => {
+      if (!raw.candidateTraversalComplete) {
+        return { ...expected, matchCount: 0, satisfied: false };
+      }
+      try {
+        const locator = page.getByRole(expected.role, {
+          name: expected.name,
+          exact: true
+        });
+        const matchCount = await locator.count();
+        const satisfied =
+          matchCount === 1 &&
+          (await locator.isVisible()) &&
+          (await locator.evaluate(
+            (element, expectedType) =>
+              String(element.type || "").toLowerCase() === expectedType,
+            expected.type
+          ));
+        return { ...expected, matchCount, satisfied };
+      } catch {
+        return { ...expected, matchCount: 0, satisfied: false };
+      }
+    })
+  );
   const elements = [];
-  for (const [index, rawElement] of raw.elements.entries()) {
-    const accessibleSnapshot = accessibleSnapshots[index];
-    if (accessibleSnapshot === null) continue;
-    const decodedAccessibleSnapshot = decodeAgentText(accessibleSnapshot);
-    if (
-      decodedAccessibleSnapshot === null ||
-      PROHIBITED_ACTION_TEXT.test(
-        canonicalizeAgentSemanticText(decodedAccessibleSnapshot)
-      )
-    ) {
-      continue;
-    }
+  for (const rawElement of semanticElements) {
+    if (rawElement === null) continue;
     const action = elementAction(
       { ...rawElement, pageUrl: raw.url },
       authorizedOrigin,
@@ -806,8 +1009,8 @@ async function snapshotPage(
   return {
     url: raw.url,
     title: normalizeText(raw.title, 200),
-    bodyText: normalizeText(raw.bodyText, 8_000),
-    controlAssertions: raw.controlAssertions,
+    bodyText: normalizeText(bodyText, RENDERED_TEXT_LIMITS.plannerBodyText),
+    controlAssertions,
     elements: elements.slice(0, 60)
   };
 }

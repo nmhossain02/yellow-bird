@@ -60,7 +60,7 @@ finalization write an evidence bundle under
 
 - `report.md` - human-readable findings, reproduction steps, and coverage gaps
 - `evidence.json` - versioned machine-readable observations and provenance
-- `page.png` - full-page visual evidence when screenshot capture succeeds
+- `page.png` - bounded viewport visual evidence when screenshot capture succeeds
 - `regression.spec.js` - deterministic Playwright assertions suitable for review
 - `playwright.config.js` - makes the regression immediately replayable from the
   hidden evidence directory

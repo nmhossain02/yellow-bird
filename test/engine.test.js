@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { delimiter, join, resolve } from "node:path";
 import { test } from "bun:test";
 import {
   classifyAgentEngineEndpoint,
@@ -67,6 +69,90 @@ test("Price Scout gate rejects a remote planning engine before validation", asyn
 
   assert.notEqual(exitCode, 0, stdout);
   assert.match(stderr, /requires a loopback planning engine/);
+});
+
+test("Price Scout gate isolates child environments and Git verification", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "yellowbird-price-scout-gate-"));
+  const checkout = join(fixtureRoot, "checkout");
+  const fakeBin = join(fixtureRoot, "bin");
+  const capturedEnvironment = join(fixtureRoot, "docker-environment.json");
+  await Promise.all([mkdir(checkout), mkdir(fakeBin)]);
+  const runGit = async (...arguments_) => {
+    const child = Bun.spawn({
+      cmd: ["git", ...arguments_],
+      cwd: checkout,
+      env: process.env,
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited
+    ]);
+    assert.equal(exitCode, 0, stderr);
+    return stdout.trim();
+  };
+  await runGit("init", "--initial-branch=main");
+  await writeFile(join(checkout, "README.md"), "fixture\n", "utf8");
+  await runGit("add", "README.md");
+  await runGit(
+    "-c",
+    "user.name=YellowBird Test",
+    "-c",
+    "user.email=yellowbird@example.test",
+    "commit",
+    "-m",
+    "fixture"
+  );
+  await runGit(
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/nmhossain02/price-scout.git"
+  );
+  const commit = await runGit("rev-parse", "HEAD");
+  const fakeDocker = join(fakeBin, "docker");
+  await writeFile(
+    fakeDocker,
+    `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(capturedEnvironment)}, JSON.stringify(process.env));\nprocess.exit(23);\n`,
+    "utf8"
+  );
+  await chmod(fakeDocker, 0o755);
+
+  const child = Bun.spawn({
+    cmd: [process.execPath, resolve("scripts/validate-price-scout-e2e.js")],
+    cwd: resolve("."),
+    env: {
+      ...process.env,
+      GIT_DIR: join(fixtureRoot, "spoofed-git-dir"),
+      PATH: [fakeBin, process.env.PATH].join(delimiter),
+      UNLISTED_GATE_SECRET: "must-not-reach-children",
+      YELLOWBIRD_ENGINE_API_KEY: "planner-secret",
+      YELLOWBIRD_ENGINE_BASE_URL: "http://127.0.0.1:11434/v1",
+      YELLOWBIRD_PRICE_SCOUT_COMMIT: commit,
+      YELLOWBIRD_PRICE_SCOUT_DIR: checkout
+    },
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited
+  ]);
+
+  assert.notEqual(exitCode, 0, stdout);
+  assert.match(stderr, /Compose configuration failed with exit 23/);
+  const environment = JSON.parse(
+    await readFile(capturedEnvironment, "utf8")
+  );
+  assert.equal(environment.UNLISTED_GATE_SECRET, undefined);
+  assert.equal(environment.YELLOWBIRD_ENGINE_API_KEY, undefined);
+  assert.equal(environment.GIT_DIR, undefined);
+  assert.equal(environment.COMPOSE_DISABLE_ENV_FILE, "1");
+  assert.ok(environment.COMPOSE_ENV_FILES);
+  assert.equal(await readFile(environment.COMPOSE_ENV_FILES, "utf8"), "");
 });
 
 test("compatible engine proves JSON Schema output and normalizes provenance", async () => {

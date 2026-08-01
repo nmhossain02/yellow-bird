@@ -44,6 +44,7 @@ let sameUrlCorrelationRequestCount = 0;
 let replaySettlementDelayedRequestCount = 0;
 let failVisitNavigation = false;
 let changeReplaySettlementUrl = false;
+let hideAgentFlowHeading = false;
 
 async function runCommand(command, cwd, env) {
   const captureDirectory = await mkdtemp(
@@ -455,7 +456,55 @@ beforeAll(async () => {
     const staticControlCopyDestination = request.url?.startsWith(
       "/agent-static-control-copy-destination"
     );
+    const semanticSpoofSurface = request.url?.startsWith(
+      "/agent-semantic-spoof-surface"
+    );
+    const semanticSpoofDestination = request.url?.startsWith(
+      "/agent-semantic-spoof-destination"
+    );
+    const peerTransportSurface = request.url?.startsWith(
+      "/agent-peer-transport-surface"
+    );
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    if (semanticSpoofSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Semantic control boundary</title></head>
+          <body><a href="/agent-semantic-spoof-destination">New monitor</a></body>
+        </html>`);
+      return;
+    }
+    if (semanticSpoofDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Spoofed semantic control</title></head>
+          <body>
+            <h1>Track any public product page</h1>
+            <input role="button" type="url" name="Product URL">
+          </body>
+        </html>`);
+      return;
+    }
+    if (peerTransportSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Peer transport boundary</title></head>
+          <body>
+            <button id="preview" type="button">View peer details</button>
+            <script>
+              document.querySelector("#preview").addEventListener("click", () => {
+                try {
+                  const peer = new RTCPeerConnection({
+                    iceServers: [{ urls: "stun:stun.example.test:3478" }]
+                  });
+                  peer.createDataChannel("yellowbird");
+                } catch {}
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
     if (staticControlCopySurface) {
       response.end(`<!doctype html>
         <html>
@@ -1061,10 +1110,10 @@ beforeAll(async () => {
       <html>
         <head><title>${agentFlow ? "Monitor setup" : "Feather Shop"}</title></head>
         <body>
-          <h1>${agentFlow ? "Create monitor" : "Feather Shop"}</h1>
+          <h1${agentFlow && hideAgentFlowHeading ? " hidden" : ""}>${agentFlow ? "Create monitor" : "Feather Shop"}</h1>
           <p>${failing ? "Checkout unavailable" : "Checkout ready"}</p>
           ${staticPage ? "<p>No available workflow controls.</p>" : agentFlow ? '<p>Choose a product URL and monitoring rule.</p>' : '<a href="/agent-flow">New monitor</a>'}
-          ${staticPage ? "" : '<input name="email">'}
+          ${staticPage ? "" : '<input name="email" aria-label="Email">'}
           ${staticPage ? "" : '<button id="checkout">Buy</button>'}
           <p id="status"></p>
           <script>
@@ -2240,9 +2289,44 @@ test("planner finish loops fall back to one unambiguous safe setup visit", async
     /"event":"agent.planning.corrected"/
   );
   const regression = await readFile(report.artifacts.regression, "utf8");
-  assert.match(regression, /toContainText\("Create monitor"\)/);
-  assert.match(regression, /toContainText\("Choose a product URL"\)/);
+  assert.match(regression, /yellowbirdReadRenderedBodyText/);
+  assert.match(regression, /toContain\("Create monitor"\)/);
+  assert.match(regression, /toContain\("Choose a product URL"\)/);
 });
+
+test("portable replay rejects destination text that becomes non-rendered", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-visible-text-replay-")
+  );
+  const report = await createAgentRunner(() => ({
+    action: "finish",
+    elementRef: null,
+    value: null,
+    rationale: "No action is needed.",
+    coverage: "partial",
+    summary: "The planner remained conservative."
+  }))({
+    target,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentExpectedTexts: ["Create monitor"],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  hideAgentFlowHeading = true;
+  try {
+    const replay = await runCommand(
+      [process.execPath, "run", "test"],
+      outputDirectory
+    );
+    assert.notEqual(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  } finally {
+    hideAgentFlowHeading = false;
+  }
+}, 30_000);
 
 test("owned coverage rejects a primary destination missing declared text", async () => {
   const outputDirectory = await mkdtemp(
@@ -2340,6 +2424,46 @@ test("owned coverage rejects static copy without declared semantic controls", as
   const regression = await readFile(report.artifacts.regression, "utf8");
   assert.match(regression, /getByRole\("textbox", \{ name: "Product URL"/);
   assert.match(regression, /toHaveJSProperty\("type", "url"\)/);
+});
+
+test("owned coverage uses browser accessibility semantics for controls", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-semantic-control-")
+  );
+  const report = await createAgentRunner(() => ({
+    action: "finish",
+    elementRef: null,
+    value: null,
+    rationale: "No action is needed.",
+    coverage: "partial",
+    summary: "The planner remained conservative."
+  }))({
+    target: `${target}/agent-semantic-spoof-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentPrimaryRoutes: ["/agent-semantic-spoof-destination"],
+    agentExpectedTexts: ["Track any public product page"],
+    agentExpectedControls: ["textbox:url:Product URL"],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.deepEqual(
+    report.observations.exploration.steps[0].destinationControlAssertions,
+    [
+      {
+        role: "textbox",
+        type: "url",
+        name: "Product URL",
+        matchCount: 0,
+        satisfied: false
+      }
+    ]
+  );
+  assert.equal(
+    report.observations.exploration.verification.satisfied,
+    false
+  );
 });
 
 test("owned coverage profile links a distinct destination to its visit", async () => {
@@ -3565,6 +3689,9 @@ test("agent snapshots bound page fields, select options, and total prompt size",
   );
   assert.ok(JSON.stringify(firstPlannerInput.page).length < 50_000);
   assert.equal(report.observations.exploration.steps.length, 1);
+  const screenshot = await readFile(report.artifacts.screenshot);
+  assert.equal(screenshot.readUInt32BE(16), 1440);
+  assert.equal(screenshot.readUInt32BE(20), 900);
 });
 
 test("agent snapshots stop traversal before controls beyond the DOM bound", async () => {
@@ -3764,6 +3891,50 @@ test("cross-origin effects attempted during exploration are inconclusive", async
   assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
   assert.equal(crossOriginRequestCount, 0);
 }, 30_000);
+
+test("peer transports are blocked and recorded during exploration", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-peer-transport-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "View the supplied peer details.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The peer details were inspected.",
+          coverage: "covered",
+          summary: "The peer details were inspected."
+        };
+  })({
+    target: `${target}/agent-peer-transport-surface`,
+    intent: "Assess the peer details interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-peer-transport"
+    )
+  );
+  assert.deepEqual(report.observations.pageErrors, []);
+});
 
 test("pre-aborted cross-origin fetches are blocked and recorded before dispatch", async () => {
   crossOriginRequestCount = 0;
