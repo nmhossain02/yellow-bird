@@ -238,7 +238,7 @@ ${workflowRows}
 - Mode: ${exploration.mode}
 - Status: ${exploration.status}
 - Coverage: ${exploration.coverage}
-- Coverage authority: ${exploration.verification ? `${exploration.verification.authority} (${exploration.verification.profile}, ${exploration.verification.satisfied ? "satisfied" : "unsatisfied"})` : "model-guided within YellowBird policy"}
+- Coverage authority: ${exploration.verification ? `${exploration.verification.authority} (${exploration.verification.profile}, ${exploration.verification.satisfied ? "satisfied" : "unsatisfied"})` : "unverified model advisory (cannot authorize covered coverage)"}
 - Engine: ${exploration.engine || "not used"}
 - Coverage summary: ${markdownEscape(exploration.summary || "none")}
 

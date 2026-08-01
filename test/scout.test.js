@@ -617,6 +617,53 @@ test("partial planner coverage is never promoted to covered", async () => {
   assert.equal(report.observations.exploration.coverage, "partial");
 });
 
+test("planner coverage cannot authorize clear without an owned profile", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-unverified-coverage-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the supplied setup route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The requested route was inspected.",
+      coverage: "covered",
+      summary:
+        "The setup route was covered.\u001b]0;owned\u0007 | <script>alert(1)</script>"
+    }
+  ];
+
+  const report = await createAgentRunner(() => decisions.shift())({
+    target,
+    intent: "Assess the monitor setup route",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.status, "inconclusive");
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.equal(report.observations.exploration.verification, null);
+  assert.equal(
+    report.observations.exploration.summary,
+    "The setup route was covered. | <script>alert(1)</script>"
+  );
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(
+    markdown,
+    /unverified model advisory \(cannot authorize covered coverage\)/
+  );
+  assert.match(markdown, /\\\| \\<script\\>alert\(1\)\\<\/script\\>/);
+});
+
 test("planner finish loops fall back to one unambiguous safe setup visit", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-finish-fallback-")
@@ -743,7 +790,7 @@ test("agent replay preserves selected and observed redirect URLs", async () => {
   ];
   const report = await createAgentRunner(() => decisions.shift())({
     target: `${target}/agent-redirect-surface`,
-    intent: "Assess the setup flow",
+    intent: "Assess the initial interface and basic user flow",
     exploreIntent: true,
     outputDirectory
   });
@@ -1128,7 +1175,7 @@ test("agent policy omits cross-origin and authentication controls", async () => 
         };
   })({
     target: `${target}/agent-safety-surface`,
-    intent: "Assess the setup flow",
+    intent: "Assess the initial interface and basic user flow",
     exploreIntent: true,
     outputDirectory
   });
@@ -1455,7 +1502,7 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
         "--target",
         target,
         "--intent",
-        "Assess the setup flow",
+        "Assess the initial interface and basic user flow",
         "--engine-base-url",
         `http://127.0.0.1:${engineServer.address().port}/v1`,
         "--engine-model",
@@ -1489,10 +1536,10 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
     );
     assert.equal(
       evidence.observations.exploration.summary,
-      "The setup route was inspected. | <script>alert(1)</script>"
+      "YellowBird observed the initial page, visited a distinct authorized setup route, and inventoried safe controls on the destination."
     );
     const markdown = await readFile(join(outputDirectory, "report.md"), "utf8");
-    assert.match(markdown, /\\\| \\<script\\>alert\(1\)\\<\/script\\>/);
+    assert.doesNotMatch(markdown, /script|alert\(1\)|owned/);
     const schema = JSON.parse(
       await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
     );

@@ -2,6 +2,7 @@ import { cleanDiagnosticText, diagnosticUrl } from "./diagnostics.js";
 
 const DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
 const DEFAULT_ENGINE_TIMEOUT_MS = 120_000;
+const NON_PRINTABLE_MODEL_IDENTIFIER = /[\p{Cc}\p{Cf}]/u;
 const PROBE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -31,6 +32,19 @@ function normalizeBaseUrl(value) {
   url.search = "";
   url.hash = "";
   return url.href.replace(/\/$/, "");
+}
+
+function modelIdentifier(value, source) {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value !== value.trim() ||
+    value.length > 200 ||
+    NON_PRINTABLE_MODEL_IDENTIFIER.test(value)
+  ) {
+    throw new Error(`${source} model identifier was not printable text`);
+  }
+  return value;
 }
 
 function engineIssue(code, message, remediation, detail = "") {
@@ -228,7 +242,7 @@ export function createCompatibleEngine({
   timeoutMs = DEFAULT_ENGINE_TIMEOUT_MS
 } = {}) {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
-  let selectedModel = model || null;
+  let selectedModel = model ? modelIdentifier(model, "configured") : null;
   let reportedModel = null;
   const headers = {
     "content-type": "application/json",
@@ -244,7 +258,8 @@ export function createCompatibleEngine({
     );
     const models = (payload?.data || [])
       .map((entry) => entry?.id)
-      .filter((entry) => typeof entry === "string" && entry);
+      .filter((entry) => typeof entry === "string" && entry)
+      .map((entry) => modelIdentifier(entry, "endpoint"));
     if (!models.length) throw new Error("endpoint reported no models");
     if (selectedModel && !models.includes(selectedModel)) {
       throw new Error(`configured model is unavailable: ${selectedModel}`);
@@ -276,11 +291,10 @@ export function createCompatibleEngine({
       },
       timeoutMs
     );
-    const responseModel =
-      typeof payload?.model === "string" && payload.model ? payload.model : null;
-    if (!responseModel) {
+    if (typeof payload?.model !== "string" || !payload.model) {
       throw new Error("endpoint completion omitted the reported model");
     }
+    const responseModel = modelIdentifier(payload.model, "endpoint response");
     if (reportedModel && responseModel !== reportedModel) {
       throw new Error(
         `endpoint changed the reported model from ${reportedModel} to ${responseModel}`

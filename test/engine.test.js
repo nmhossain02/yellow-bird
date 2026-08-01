@@ -150,6 +150,34 @@ test("capability probe rejects responses without reported model provenance", asy
   assert.match(resolved.diagnostic.evidence, /omitted the reported model/);
 });
 
+test("engine rejects non-printable reported model identifiers", async () => {
+  const resolved = await resolveAgentEngine({
+    baseUrl: "http://127.0.0.1:9999/v1",
+    model: "probe-model",
+    fetchImpl: async (url) => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "probe-model" }] });
+      }
+      return jsonResponse({
+        model: "\u001b]0;owned\u0007probe-model",
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({ status: "ready", nextAction: "inspect" })
+            }
+          }
+        ]
+      });
+    }
+  });
+
+  assert.equal(resolved.engine, null);
+  assert.equal(resolved.diagnostic.id, "agent-engine-invalid");
+  assert.match(resolved.diagnostic.evidence, /not printable text/);
+  assert.doesNotMatch(JSON.stringify(resolved), /owned|\\u001b|\\u0007/);
+});
+
 test("engine validates every structured response against its JSON Schema", async () => {
   let completion = 0;
   const engine = createCompatibleEngine({

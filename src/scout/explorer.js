@@ -460,17 +460,11 @@ function verifyOwnedCoverageProfile(intent, steps, pages) {
   };
 }
 
-function normalizedCoverage(intent, plannerCoverage, steps) {
-  if (hasProhibitedSemantics({ label: intent }) && plannerCoverage === "covered") {
-    return steps.some((step) => step.status === "passed") ? "partial" : "blocked";
-  }
-  if (
-    plannerCoverage === "covered" &&
-    !steps.some((step) => step.status === "passed")
-  ) {
-    return "blocked";
-  }
-  return plannerCoverage;
+function unverifiedCoverage(plannerCoverage, steps) {
+  if (plannerCoverage !== "covered") return plannerCoverage;
+  return steps.some((step) => step.status === "passed")
+    ? "partial"
+    : "blocked";
 }
 
 export async function exploreIntentWithEngine({
@@ -629,14 +623,14 @@ export async function exploreIntentWithEngine({
           : steps.some((step) => step.status === "passed")
             ? "partial"
             : "blocked"
-        : normalizedCoverage(intent, proposed.coverage, steps);
+        : unverifiedCoverage(proposed.coverage, steps);
       const summary = verification
         ? verification.summary
         : normalizeText(proposed.summary, 1_000);
       record("info", "agent.completed", "Intent exploration completed", {
         coverage,
         plannerCoverage: proposed.coverage,
-        coverageAuthority: verification?.authority || "model-guided",
+        coverageAuthority: verification?.authority || "model-advisory-unverified",
         coverageProfile: verification?.profile || null,
         visitedPageCount: pages.length,
         stepCount: steps.length

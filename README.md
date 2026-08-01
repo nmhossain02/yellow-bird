@@ -123,7 +123,7 @@ The compatible endpoint can be selected per command:
 ```bash
 yellowbird scout \
   --target http://127.0.0.1:3000 \
-  --intent "Assess the basic setup flow" \
+  --intent "Assess the initial interface and basic user flow" \
   --engine-base-url http://127.0.0.1:11434/v1 \
   --engine-model qwen3.5:9b
 ```
@@ -165,15 +165,15 @@ outbound WebSocket messages throughout agent exploration. Form submission,
 authentication, credential use, cross-origin navigation, and destructive
 controls are not available to the model as actions. The model proposes one
 supplied element at a time; YellowBird validates and executes the action. Model
-text is coverage guidance, never product-failure evidence. An intent-exploration
-run can be `clear` only after the planner explicitly completes and either reports
-`covered` coverage with at least one passed action or a named YellowBird-owned
-profile satisfies every machine-readable observed criterion. The initial-interface
-basic-flow profile, for example, requires the initial page, a passed visit to a
-distinct authorized route, safe controls observed on that destination, and no
-failed agent action. An intent needing server-side mutation or another action
-outside the safe interaction authority produces an `inconclusive` result instead
-of a false pass.
+text is coverage guidance, never product-failure evidence. Planner output alone
+cannot authorize `covered` coverage. An intent-exploration run can be `clear`
+only when a named YellowBird-owned profile satisfies every machine-readable
+observed criterion. The initial-interface basic-flow profile, for example,
+requires the initial page, a passed visit to a distinct authorized route, safe
+controls observed on that destination, and no failed agent action. Intents that
+do not match an owned profile, need server-side mutation, or require another
+action outside the safe interaction authority produce an `inconclusive` result
+instead of an unverified pass.
 
 The generated regression re-enforces exact-origin and read-only agent guards,
 including submission and outbound WebSocket blocking, without calling the model.
