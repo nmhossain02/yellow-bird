@@ -254,6 +254,11 @@ keeps `artifacts.screenshot` set to `null`, records the visual-evidence coverage
 gap, and preserves the remaining evidence bundle. With no product findings, the
 outcome is `inconclusive`.
 
+A browser cleanup failure is recorded at the same finalization boundary. The
+completed product observations and available artifacts are retained, cleanup is
+reported as test mechanics, and a run without product findings is
+`inconclusive`.
+
 ## Run the dashboard
 
 ```bash

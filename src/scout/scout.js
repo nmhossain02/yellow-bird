@@ -985,6 +985,9 @@ async function finalizeRun(state) {
     const screenshotCaptureIssue = state.operationalIssues.find(
       (issue) => issue.id === "browser-screenshot-capture-failed"
     );
+    const browserCloseIssue = state.operationalIssues.find(
+      (issue) => issue.id === "browser-close-failed"
+    );
     state.exploration.status = "inconclusive";
     state.exploration.coverage = state.exploration.steps.some(
       (step) => step.status === "passed"
@@ -997,7 +1000,9 @@ async function finalizeRun(state) {
         ? "Intent coverage could not be trusted because a related browser target was created."
         : screenshotCaptureIssue
           ? "Intent coverage was inconclusive because visual evidence capture failed."
-        : "Intent coverage could not begin because browser setup did not complete.";
+          : browserCloseIssue
+            ? "Intent coverage was inconclusive because browser cleanup could not be confirmed."
+            : "Intent coverage could not begin because browser setup did not complete.";
     state.exploration.issue ||= state.operationalIssues[0];
   }
   const findings = [];
@@ -1153,6 +1158,13 @@ async function finalizeRun(state) {
   ) {
     coverageGaps.push(
       "Visual evidence was unavailable because browser screenshot capture failed."
+    );
+  }
+  if (
+    state.operationalIssues.some((issue) => issue.id === "browser-close-failed")
+  ) {
+    coverageGaps.push(
+      "Browser cleanup could not be confirmed after product evaluation."
     );
   }
   if (!productEvaluated) {
@@ -1546,6 +1558,29 @@ export function createScoutRunner({
       { detail }
     );
   };
+  const noteBrowserCloseFailure = (error) => {
+    const detail = sanitizeDiagnosticText(error?.message || error);
+    if (
+      !state.operationalIssues.some(
+        (issue) => issue.id === "browser-close-failed"
+      )
+    ) {
+      state.operationalIssues.push({
+        id: "browser-close-failed",
+        classification: "test-mechanics",
+        title: "YellowBird could not confirm browser cleanup.",
+        evidence: detail,
+        remediation:
+          "Rerun the scout. If browser cleanup fails again, inspect the diagnostics and stop any orphaned browser process."
+      });
+    }
+    record(
+      "error",
+      "browser.close.failed",
+      "Playwright Chromium cleanup failed",
+      { detail }
+    );
+  };
 
   record("debug", "browser.launch.started", "Launching Playwright Chromium", {
     headed: options.headed
@@ -1586,7 +1621,7 @@ export function createScoutRunner({
     }
     return finalizeRun(state);
   }
-  try {
+  async function executeBrowserRun() {
     let context;
     try {
       context = await browser.newContext({
@@ -1627,7 +1662,7 @@ export function createScoutRunner({
           "Intent exploration was skipped because browser setup did not complete.";
         state.exploration.issue = issue;
       }
-      return await finalizeRun(state);
+      return;
     }
     const targetUrl = new URL(options.target);
     const targetRequestUrl = new URL(targetUrl);
@@ -1676,7 +1711,7 @@ export function createScoutRunner({
           }
         )
     );
-    if (!bindingGuard.successful) return await finalizeRun(state);
+    if (!bindingGuard.successful) return;
     const redirectedRequestUrls = (request) => {
       const urls = [];
       for (let current = request; current; current = current.redirectedFrom()) {
@@ -1823,7 +1858,7 @@ export function createScoutRunner({
       }
       })
     );
-    if (!websocketGuard.successful) return await finalizeRun(state);
+    if (!websocketGuard.successful) return;
 
     const requestGuard = await initializeNetworkGuard(
       "request-policy",
@@ -1936,7 +1971,7 @@ export function createScoutRunner({
       }
       })
     );
-    if (!requestGuard.successful) return await finalizeRun(state);
+    if (!requestGuard.successful) return;
 
     const pageGuard = await initializeNetworkGuard(
       "page-policy",
@@ -2126,13 +2161,13 @@ export function createScoutRunner({
       startActive: options.exploreIntent
       })
     );
-    if (!pageGuard.successful) return await finalizeRun(state);
+    if (!pageGuard.successful) return;
 
     const pageTarget = await initializeNetworkGuard(
       "page-target",
       () => context.newPage()
     );
-    if (!pageTarget.successful) return await finalizeRun(state);
+    if (!pageTarget.successful) return;
     const page = pageTarget.value;
     page.setDefaultTimeout(options.timeoutMs);
     const noteRelatedTarget = (kind) => {
@@ -2181,7 +2216,7 @@ export function createScoutRunner({
       "cdp-session",
       () => context.newCDPSession(page)
     );
-    if (!cdpTarget.successful) return await finalizeRun(state);
+    if (!cdpTarget.successful) return;
     const agentCdp = cdpTarget.value;
     agentCdp.on("Fetch.requestPaused", async (event) => {
       try {
@@ -2326,7 +2361,7 @@ export function createScoutRunner({
         patterns: [{ urlPattern: "*", requestStage: "Request" }]
       })
     );
-    if (!cdpGuard.successful) return await finalizeRun(state);
+    if (!cdpGuard.successful) return;
     }
     state.networkGuardReady = true;
     page.on("console", (message) => {
@@ -2804,9 +2839,16 @@ export function createScoutRunner({
       state.screenshotCaptured = true;
     }
     await collectAgentGuardAttempts();
+  }
+  try {
+    await executeBrowserRun();
   } finally {
-    await browser.close();
-    record("debug", "browser.closed", "Playwright Chromium closed");
+    try {
+      await browser.close();
+      record("debug", "browser.closed", "Playwright Chromium closed");
+    } catch (error) {
+      noteBrowserCloseFailure(error);
+    }
   }
 
   return finalizeRun(state);

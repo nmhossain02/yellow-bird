@@ -1038,6 +1038,22 @@ async function launchBrowserWithFailingScreenshot() {
   };
 }
 
+async function launchBrowserWithFailingClose() {
+  let context;
+  return {
+    async newContext(options) {
+      context = await sharedBrowser.newContext(options);
+      return context;
+    },
+    async close() {
+      await context?.close();
+      throw new Error(
+        `injected browser cleanup failure at ${target}/?token=hidden-value`
+      );
+    }
+  };
+}
+
 async function launchBrowserWithFailingNetworkGuard() {
   let context;
   return {
@@ -1474,8 +1490,8 @@ test("browser context creation failure finalizes an inconclusive run", async () 
     .split("\n")
     .map((line) => JSON.parse(line));
   assert.deepEqual(
-    events.slice(-2).map((event) => event.event),
-    ["browser.context.failed", "run.completed"]
+    events.slice(-3).map((event) => event.event),
+    ["browser.context.failed", "browser.closed", "run.completed"]
   );
   assert.doesNotMatch(diagnostics, /hidden-value/);
 });
@@ -1509,6 +1525,43 @@ test("browser screenshot capture failure finalizes without a screenshot claim", 
     await readFile(report.artifacts.diagnostics, "utf8"),
     /browser\.screenshot\.failed/
   );
+});
+
+test("browser cleanup failure finalizes with durable evidence", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-browser-close-")
+  );
+  const report = await createScoutRunner({
+    launchBrowser: launchBrowserWithFailingClose
+  })({
+    target,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.navigation.completed, true);
+  assert.deepEqual(report.findings, []);
+  assert.ok(
+    report.invalidTestMechanics.some(
+      (issue) => issue.id === "browser-close-failed"
+    )
+  );
+  assert.ok(report.artifacts.screenshot);
+  await Promise.all(Object.values(report.artifacts).map((path) => stat(path)));
+  const schema = JSON.parse(
+    await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
+  );
+  assertConformsToSchema(schema, report);
+  const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
+  const events = diagnostics
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    events.slice(-2).map((event) => event.event),
+    ["browser.close.failed", "run.completed"]
+  );
+  assert.doesNotMatch(diagnostics, /hidden-value/);
 });
 
 test("a browser network guard failure cannot produce a clear report", async () => {
