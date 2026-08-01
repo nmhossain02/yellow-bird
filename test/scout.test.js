@@ -14,7 +14,10 @@ import {
   diagnoseNavigationError,
   resolveLoopbackScheme
 } from "../src/scout/diagnostics.js";
-import { PROHIBITED_AGENT_ACTION_PATTERN } from "../src/scout/explorer.js";
+import {
+  isAgentUrlAllowed,
+  PROHIBITED_AGENT_ACTION_PATTERN
+} from "../src/scout/explorer.js";
 import { resolveOutputOption } from "../src/scout/output.js";
 
 let server;
@@ -23,6 +26,7 @@ let sharedBrowser;
 let mutationRequestCount = 0;
 let readMutationRequestCount = 0;
 let delayedReadMutationRequestCount = 0;
+let delayedVisitMutationRequestCount = 0;
 let submissionRequestCount = 0;
 let crossOriginRequestCount = 0;
 let prohibitedRedirectRequestCount = 0;
@@ -133,6 +137,15 @@ beforeAll(async () => {
       response.end();
       return;
     }
+    if (
+      request.method === "GET" &&
+      request.url === "/agent-delayed-visit-mutation"
+    ) {
+      delayedVisitMutationRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
     if (request.method === "GET" && request.url === "/agent-submission") {
       submissionRequestCount += 1;
       response.writeHead(204);
@@ -151,11 +164,11 @@ beforeAll(async () => {
       return;
     }
     if (request.url === "/agent-prohibited-redirect") {
-      response.writeHead(302, { location: "/create-account" });
+      response.writeHead(302, { location: "/agent-flow#auth_callback" });
       response.end();
       return;
     }
-    if (request.url === "/create-account") {
+    if (request.url === "/auth_callback") {
       prohibitedRedirectRequestCount += 1;
       response.writeHead(204);
       response.end();
@@ -178,6 +191,12 @@ beforeAll(async () => {
     const delayedMutationSurface = request.url?.startsWith(
       "/agent-delayed-mutation-surface"
     );
+    const delayedVisitMutationSurface = request.url?.startsWith(
+      "/agent-delayed-visit-mutation-surface"
+    );
+    const delayedVisitMutationDestination = request.url?.startsWith(
+      "/agent-delayed-visit-destination"
+    );
     const submissionSurface = request.url?.startsWith(
       "/agent-submission-surface"
     );
@@ -189,6 +208,12 @@ beforeAll(async () => {
       "/agent-prohibited-redirect-surface"
     );
     const historySurface = request.url?.startsWith("/history-surface");
+    const sameDocumentSurface = request.url?.startsWith(
+      "/agent-same-document-surface"
+    );
+    const sameDocumentDestination = request.url?.startsWith(
+      "/agent-same-document-destination"
+    );
     const snapshotBoundary = request.url?.startsWith(
       "/agent-snapshot-boundary"
     );
@@ -218,10 +243,21 @@ beforeAll(async () => {
             <a href="http://localhost:${server.address().port}/agent-flow">External setup</a>
             <a href="/login">Sign in</a>
             <a href="/auth">Account help</a>
+            <a href="/user_auth">Account support</a>
+            <a href="/auth_callback">Account callback</a>
+            <a href="http://user:secret@127.0.0.1:${server.address().port}/agent-flow">Credentialed setup</a>
             <form action="/create-monitor">
               <label>Name <input name="name"></label>
               <label>Password <input name="password" type="password"></label>
               <button type="button">Inspect account</button>
+            </form>
+            <label><span>Inspect</span> Delete account <input name="details"></label>
+            <select aria-label="Inspect choices">
+              <option value="preview">Preview</option>
+              <option value="delete_account">Dangerous choice</option>
+            </select>
+            <form action="http://localhost:${server.address().port}/agent-flow">
+              <button type="button">View details</button>
             </form>
             <a href="/agent-flow">Inspect setup</a>
           </body>
@@ -268,6 +304,29 @@ beforeAll(async () => {
                   fetch("/agent-delayed-read-mutation").catch(() => {});
                 }, 200);
               });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (delayedVisitMutationSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Delayed visit boundary</title></head>
+          <body><a href="/agent-delayed-visit-destination">Setup route</a></body>
+        </html>`);
+      return;
+    }
+    if (delayedVisitMutationDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Delayed visit destination</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <script>
+              setTimeout(() => {
+                fetch("/agent-delayed-visit-mutation").catch(() => {});
+              }, 200);
             </script>
           </body>
         </html>`);
@@ -332,6 +391,29 @@ beforeAll(async () => {
               document.querySelector("[name=query]").addEventListener("input", () => {
                 history.pushState({}, "", "/other");
               });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (sameDocumentSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Same-document boundary</title></head>
+          <body><a href="/agent-same-document-destination">Setup route</a></body>
+        </html>`);
+      return;
+    }
+    if (sameDocumentDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Same-document destination</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <script>
+              setTimeout(() => {
+                location.hash = "auth_callback";
+              }, 25);
             </script>
           </body>
         </html>`);
@@ -443,6 +525,20 @@ test("scout authorization is loopback-only", () => {
   assert.throws(
     () => authorizeScoutTarget("file:///tmp/index.html"),
     /must use http or https/
+  );
+});
+
+test("agent URL policy rejects credentials, auth shorthand, and fragments", () => {
+  assert.equal(isAgentUrlAllowed(`${target}/setup`, target), true);
+  assert.equal(isAgentUrlAllowed(`${target}/user_auth`, target), false);
+  assert.equal(isAgentUrlAllowed(`${target}/auth_callback`, target), false);
+  assert.equal(isAgentUrlAllowed(`${target}/setup#auth_callback`, target), false);
+  assert.equal(
+    isAgentUrlAllowed(
+      `http://user:secret@127.0.0.1:${server.address().port}/setup`,
+      target
+    ),
+    false
   );
 });
 
@@ -641,14 +737,32 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
   assert.match(diagnostics, /"event":"agent.completed"/);
 });
 
-test("explicit intent exploration retains an API opt-out", async () => {
+test("explicit intent exploration cannot be disabled", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-opt-out-")
   );
   let planningCalls = 0;
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the setup route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The setup route was observed.",
+      coverage: "covered",
+      summary: "The setup route was observed."
+    }
+  ];
   const report = await createAgentRunner(() => {
     planningCalls += 1;
-    return null;
+    return decisions.shift();
   })({
     target,
     intent: "Assess the initial interface and basic user flow",
@@ -657,8 +771,9 @@ test("explicit intent exploration retains an API opt-out", async () => {
   });
 
   assert.equal(report.outcome, "clear");
-  assert.equal(report.observations.exploration.requested, false);
-  assert.equal(planningCalls, 0);
+  assert.equal(report.observations.exploration.requested, true);
+  assert.equal(report.observations.exploration.verification.satisfied, true);
+  assert.equal(planningCalls, 2);
 });
 
 test("partial planner coverage is never promoted to covered", async () => {
@@ -918,7 +1033,7 @@ test("agent redirect chains use the canonical prohibited-action policy", async (
   assert.ok(
     report.observations.blockedRequests.some(
       (request) =>
-        request.url === `${target}/create-account` &&
+        request.url === `${target}/agent-flow#auth_callback` &&
         request.reason === "agent-prohibited-url"
     )
   );
@@ -926,6 +1041,40 @@ test("agent redirect chains use the canonical prohibited-action policy", async (
   assert.ok(
     regression.includes(JSON.stringify(PROHIBITED_AGENT_ACTION_PATTERN))
   );
+});
+
+test("same-document auth routing invalidates an agent visit", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-same-document-")
+  );
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    return {
+      action: "act",
+      elementRef: availableElements[0].ref,
+      value: null,
+      rationale: "Open the supplied setup route.",
+      coverage: "continue",
+      summary: ""
+    };
+  })({
+    target: `${target}/agent-same-document-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-prohibited-navigation"
+    )
+  );
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(regression, /hashchange/);
+  assert.match(regression, /url\.pathname \+ url\.search \+ url\.hash/);
 });
 
 test("mutation-oriented intent remains inconclusive at the safe boundary", async () => {
@@ -1220,6 +1369,60 @@ test("agent action guards block effects delayed between planning rounds", async 
   );
 });
 
+test("visit authority blocks delayed active requests in live and replay", async () => {
+  delayedVisitMutationRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-delayed-visit-mutation-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner(async (request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    if (planningCall === 1) {
+      return {
+        action: "act",
+        elementRef: availableElements[0].ref,
+        value: null,
+        rationale: "Open the supplied setup route.",
+        coverage: "continue",
+        summary: ""
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The setup route was observed.",
+      coverage: "covered",
+      summary: "The setup route was observed."
+    };
+  })({
+    target: `${target}/agent-delayed-visit-mutation-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(delayedVisitMutationRequestCount, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-active-request"
+    )
+  );
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.equal(delayedVisitMutationRequestCount, 0);
+}, 30_000);
+
 test("agent snapshots bound page fields, select options, and total prompt size", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-snapshot-boundary-")
@@ -1258,13 +1461,13 @@ test("agent snapshots bound page fields, select options, and total prompt size",
     outputDirectory
   });
 
-  const select = firstPlannerInput.page.availableElements.find(
-    (element) => element.allowedAction === "select"
-  );
   assert.equal(firstPlannerInput.page.text.length, 8_000);
-  assert.equal(select.options.length, 40);
-  assert.ok(select.options.every((option) => option.label.length <= 120));
-  assert.ok(select.options.every((option) => option.value.length <= 200));
+  assert.equal(
+    firstPlannerInput.page.availableElements.some(
+      (element) => element.allowedAction === "select"
+    ),
+    false
+  );
   assert.equal(
     firstPlannerInput.page.availableElements.some(
       (element) => element.allowedAction === "click"
@@ -1369,9 +1572,11 @@ test("agent policy omits cross-origin and authentication controls", async () => 
     join(tmpdir(), "yellowbird-agent-safety-surface-")
   );
   const exposedLabels = [];
+  const plannerInputs = [];
   let planningCall = 0;
   const report = await createAgentRunner((request) => {
     const plannerInput = JSON.parse(request.messages.at(-1).content);
+    plannerInputs.push(request.messages.at(-1).content);
     const availableElements = plannerInput.page.availableElements;
     exposedLabels.push(availableElements.map((element) => element.label));
     planningCall += 1;
@@ -1400,6 +1605,7 @@ test("agent policy omits cross-origin and authentication controls", async () => 
   });
 
   assert.deepEqual(exposedLabels[0], ["Inspect setup"]);
+  assert.doesNotMatch(plannerInputs.join("\n"), /secret|user_auth|auth_callback/);
   assert.equal(report.outcome, "clear");
   assert.equal(report.observations.exploration.steps[0].action, "visit");
   assert.equal(report.observations.exploration.steps[0].url, `${target}/agent-flow`);

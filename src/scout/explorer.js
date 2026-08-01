@@ -8,7 +8,7 @@ const SAFE_FILL_TYPES = new Set([
   "text",
   "url"
 ]);
-export const PROHIBITED_AGENT_ACTION_PATTERN = String.raw`\b(?:accept|activate|add|apply|approve|auth(?:enticate|orize)?|buy|check[ -]?(?:now|out)|compile|confirm|create|delete|log[ -]?(?:in|out)|order|pay|pause|purchase|register|reject|remove|resume|run|save|sign[ -]?(?:in|out|up)|submit|subscribe|update|upload)\b`;
+export const PROHIBITED_AGENT_ACTION_PATTERN = String.raw`(?:^|[^a-z0-9])(?:accept|activate|add|apply|approve|auth(?:enticate|entication|orize|orization)?|buy|check[ -]?(?:now|out)|compile|confirm|create|delete|log[ -]?(?:in|out)|order|pay|pause|purchase|register|reject|remove|resume|run|save|sign[ -]?(?:in|out|up)|submit|subscribe|update|upload)(?=$|[^a-z0-9])`;
 const PROHIBITED_ACTION_TEXT = new RegExp(
   PROHIBITED_AGENT_ACTION_PATTERN,
   "i"
@@ -76,6 +76,36 @@ function normalizeText(value, limit) {
     .slice(0, limit);
 }
 
+function decodeAgentText(value) {
+  let decoded = String(value ?? "");
+  for (let count = 0; count < 3; count += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
+  return decoded;
+}
+
+export function isAgentUrlAllowed(value, authorizedOrigin) {
+  try {
+    const url = new URL(value);
+    return (
+      url.origin === authorizedOrigin &&
+      !url.username &&
+      !url.password &&
+      !PROHIBITED_ACTION_TEXT.test(
+        decodeAgentText(url.pathname + url.search + url.hash)
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 function hasProhibitedSemantics(element) {
   const values = [
     element.label,
@@ -83,17 +113,17 @@ function hasProhibitedSemantics(element) {
     element.ariaLabel,
     element.href,
     element.formAction,
-    element.pageUrl
+    element.pageUrl,
+    element.placeholder,
+    element.id,
+    ...(element.labelTexts || []),
+    ...(element.options || []).flatMap((option) => [option.label, option.value])
   ];
   return (
     element.formHasPassword ||
     values.some((value) => {
       if (!value) return false;
-      try {
-        return PROHIBITED_ACTION_TEXT.test(decodeURIComponent(value));
-      } catch {
-        return PROHIBITED_ACTION_TEXT.test(value);
-      }
+      return PROHIBITED_ACTION_TEXT.test(decodeAgentText(value));
     })
   );
 }
@@ -101,18 +131,10 @@ function hasProhibitedSemantics(element) {
 function elementAction(element, authorizedOrigin) {
   if (element.disabled || hasProhibitedSemantics(element)) return null;
   if (element.formAction) {
-    try {
-      if (new URL(element.formAction).origin !== authorizedOrigin) return null;
-    } catch {
-      return null;
-    }
+    if (!isAgentUrlAllowed(element.formAction, authorizedOrigin)) return null;
   }
   if (element.tag === "a") {
-    try {
-      return new URL(element.href).origin === authorizedOrigin ? "visit" : null;
-    } catch {
-      return null;
-    }
+    return isAgentUrlAllowed(element.href, authorizedOrigin) ? "visit" : null;
   }
   if (element.tag === "textarea") return "fill";
   if (element.tag === "input" && SAFE_FILL_TYPES.has(element.type)) {
@@ -192,13 +214,22 @@ async function snapshotPage(page, authorizedOrigin) {
   const raw = await page.evaluate(({ limits, prohibitedPattern }) => {
     let remainingCharacters = limits.totalCharacters;
     const prohibited = new RegExp(prohibitedPattern, "i");
+    const decodeText = (value) => {
+      let decoded = String(value ?? "");
+      for (let count = 0; count < 3; count += 1) {
+        try {
+          const next = decodeURIComponent(decoded);
+          if (next === decoded) break;
+          decoded = next;
+        } catch {
+          break;
+        }
+      }
+      return decoded;
+    };
     const hasProhibitedText = (value) => {
       if (!value) return false;
-      try {
-        return prohibited.test(decodeURIComponent(String(value)));
-      } catch {
-        return prohibited.test(String(value));
-      }
+      return prohibited.test(decodeText(value));
     };
     const takeText = (value, maximum) => {
       const text = String(value ?? "");
@@ -206,17 +237,11 @@ async function snapshotPage(page, authorizedOrigin) {
       remainingCharacters -= length;
       return text.slice(0, length);
     };
-    const takeExactText = (value, maximum) => {
-      if (value === null || value === undefined) return null;
-      const text = String(value);
-      if (text.length > maximum || text.length > remainingCharacters) {
-        return null;
-      }
-      remainingCharacters -= text.length;
-      return text;
-    };
-    const url = takeExactText(window.location.href, limits.url);
-    if (url === null) throw new Error("page URL exceeded the snapshot limit");
+    const url = String(window.location.href);
+    if (url.length > limits.url || url.length > remainingCharacters) {
+      throw new Error("page URL exceeded the snapshot limit");
+    }
+    remainingCharacters -= url.length;
     const title = takeText(document.title, limits.fieldText);
     const bodyText = takeText(document.body?.innerText || "", limits.bodyText);
     const elements = [
@@ -225,11 +250,15 @@ async function snapshotPage(page, authorizedOrigin) {
       .slice(0, limits.elementCount)
       .flatMap((element, index) => {
         const tag = element.tagName.toLowerCase();
+        const labelTexts = [...(element.labels || [])].map((labelElement) =>
+          String(labelElement.innerText || labelElement.textContent || "")
+        );
+        const ariaLabel = element.getAttribute("aria-label") || "";
+        const placeholder = element.getAttribute("placeholder") || "";
         const label =
-          element.getAttribute("aria-label") ||
-          element.labels?.[0]?.querySelector("span")?.textContent ||
-          element.labels?.[0]?.innerText ||
-          element.getAttribute("placeholder") ||
+          ariaLabel ||
+          labelTexts.join(" ") ||
+          placeholder ||
           element.textContent ||
           element.getAttribute("name") ||
           tag;
@@ -244,13 +273,29 @@ async function snapshotPage(page, authorizedOrigin) {
                   ? "spinbutton"
                   : "textbox";
         const form = element.form || element.closest("form");
+        const optionRecords =
+          tag === "select"
+            ? [...element.options].map((option) => ({
+                label: String(option.textContent || option.value),
+                value: String(option.value)
+              }))
+            : [];
+        if (optionRecords.length > limits.optionCount) return [];
         const safetyFields = [
           [label, limits.fieldText],
+          ...labelTexts.map((value) => [value, limits.fieldText]),
           [element.getAttribute("name"), limits.fieldText],
-          [element.getAttribute("aria-label"), limits.fieldText],
+          [element.getAttribute("id"), limits.fieldText],
+          [ariaLabel, limits.fieldText],
+          [placeholder, limits.fieldText],
+          [element.textContent, limits.fieldText],
           [element.href, limits.url],
           [form?.action, limits.url],
-          [window.location.href, limits.url]
+          [window.location.href, limits.url],
+          ...optionRecords.flatMap((option) => [
+            [option.label, limits.optionLabel],
+            [option.value, limits.optionValue]
+          ])
         ].filter(([value]) => value !== null && value !== undefined);
         if (
           form?.querySelector('input[type="password"]') ||
@@ -262,51 +307,28 @@ async function snapshotPage(page, authorizedOrigin) {
           return [];
         }
         const ref = `element-${index + 1}`;
-        element.setAttribute("data-yellowbird-agent-ref", ref);
-        const options =
-          tag === "select"
-            ? [...element.options]
-                .slice(0, limits.optionCount)
-                .flatMap((option) => {
-                  const value = takeExactText(
-                    option.value,
-                    limits.optionValue
-                  );
-                  return value === null
-                    ? []
-                    : [
-                        {
-                          label: takeText(
-                            option.textContent || option.value,
-                            limits.optionLabel
-                          ),
-                          value
-                        }
-                      ];
-                })
-            : [];
-        return [{
+        const candidate = {
           ref,
           tag,
           role,
-          label: takeText(label, limits.fieldText),
-          href: element.href
-            ? takeExactText(element.href, limits.url)
-            : null,
-          type: takeText(element.type || "", limits.fieldText),
-          id: takeExactText(element.getAttribute("id"), limits.fieldText),
-          name: takeExactText(element.getAttribute("name"), limits.fieldText),
-          ariaLabel: takeText(
-            element.getAttribute("aria-label") || "",
-            limits.fieldText
-          ),
+          label: String(label),
+          labelTexts,
+          placeholder,
+          href: element.href ? String(element.href) : null,
+          type: String(element.type || ""),
+          id: element.getAttribute("id"),
+          name: element.getAttribute("name"),
+          ariaLabel,
           disabled: Boolean(element.disabled),
-          formAction: form?.action
-            ? takeExactText(form.action, limits.url)
-            : null,
+          formAction: form?.action ? String(form.action) : null,
           formHasPassword: Boolean(form?.querySelector('input[type="password"]')),
-          options
-        }];
+          options: optionRecords
+        };
+        const candidateCharacters = JSON.stringify(candidate).length;
+        if (candidateCharacters > remainingCharacters) return [];
+        remainingCharacters -= candidateCharacters;
+        element.setAttribute("data-yellowbird-agent-ref", ref);
+        return [candidate];
       });
     return { url, title, bodyText, elements };
   }, {
@@ -808,6 +830,7 @@ export async function exploreIntentWithEngine({
           waitUntil: "domcontentloaded",
           timeout: timeoutMs
         });
+        await actionPolicy?.resume?.(action);
         visited.add(selected.href);
       } else if (action === "fill") {
         await locator.fill(actionValue);
@@ -818,6 +841,9 @@ export async function exploreIntentWithEngine({
       }
       await page.waitForTimeout(150);
       const actionPageUrl = page.url();
+      if (!isAgentUrlAllowed(actionPageUrl, authorizedOrigin)) {
+        throw new Error("The interaction reached a URL outside agent policy.");
+      }
       snapshot = await snapshotPage(page, authorizedOrigin);
       if (!pages.some((entry) => entry.url === snapshot.url)) {
         pages.push({
@@ -874,7 +900,7 @@ export async function exploreIntentWithEngine({
         status: "invalid",
         sourceUrl,
         requestedUrl: selected.href || null,
-        url: page.url(),
+        url: diagnosticUrl(page.url()).url,
         title: "",
         destinationControlCount: null,
         httpStatus: null,

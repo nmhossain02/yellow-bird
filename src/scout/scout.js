@@ -14,6 +14,7 @@ import {
 import { resolveAgentEngine } from "./engine.js";
 import {
   exploreIntentWithEngine,
+  isAgentUrlAllowed,
   PROHIBITED_AGENT_ACTION_PATTERN
 } from "./explorer.js";
 
@@ -25,10 +26,15 @@ const STEP_CAPABILITIES = {
   expectVisible: "browser.read"
 };
 const SUPPORTED_STEP_ACTIONS = new Set(Object.keys(STEP_CAPABILITIES));
-const PROHIBITED_AGENT_REQUEST_URL = new RegExp(
-  PROHIBITED_AGENT_ACTION_PATTERN,
-  "i"
-);
+const AGENT_PASSIVE_RESOURCE_TYPES = new Set([
+  "font",
+  "image",
+  "manifest",
+  "media",
+  "script",
+  "stylesheet",
+  "texttrack"
+]);
 const require = createRequire(import.meta.url);
 const PLAYWRIGHT_VERSION = require("@playwright/test/package.json").version;
 
@@ -285,6 +291,17 @@ function quoteForJavaScript(value) {
   return JSON.stringify(value);
 }
 
+function evidenceUrl(value) {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    return url.href;
+  } catch {
+    return "unparseable";
+  }
+}
+
 function buildRegression(options, explorationSteps = []) {
   const replaySteps = explorationSteps.filter(
     (candidate) => candidate.status !== "invalid"
@@ -303,15 +320,60 @@ function buildRegression(options, explorationSteps = []) {
     "  const yellowbirdBlockedUrls = new Set();",
     "  let yellowbirdAgentAction = null;",
     `  const yellowbirdUnsafeRequest = new RegExp(${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, "i");`,
-    "  await page.context().addInitScript(() => {",
-    "    const state = { active: false, action: null };",
+    '  const yellowbirdPassiveResourceTypes = new Set(["font", "image", "manifest", "media", "script", "stylesheet", "texttrack"]);',
+    "  const yellowbirdDecodeAgentText = value => {",
+    "    let decoded = String(value ?? \"\");",
+    "    for (let count = 0; count < 3; count += 1) {",
+    "      try {",
+    "        const next = decodeURIComponent(decoded);",
+    "        if (next === decoded) break;",
+    "        decoded = next;",
+    "      } catch { break; }",
+    "    }",
+    "    return decoded;",
+    "  };",
+    "  const yellowbirdAgentUrlAllowed = value => {",
+    "    try {",
+    "      const url = new URL(value);",
+    "      return url.origin === yellowbirdTarget.origin && !url.username && !url.password &&",
+    "        !yellowbirdUnsafeRequest.test(yellowbirdDecodeAgentText(url.pathname + url.search + url.hash));",
+    "    } catch { return false; }",
+    "  };",
+    "  await page.context().addInitScript(({ authorizedOrigin, prohibitedPattern }) => {",
+    "    const prohibited = new RegExp(prohibitedPattern, \"i\");",
+    "    const decodeText = value => {",
+    "      let decoded = String(value ?? \"\");",
+    "      for (let count = 0; count < 3; count += 1) {",
+    "        try {",
+    "          const next = decodeURIComponent(decoded);",
+    "          if (next === decoded) break;",
+    "          decoded = next;",
+    "        } catch { break; }",
+    "      }",
+    "      return decoded;",
+    "    };",
+    "    const urlAllowed = value => {",
+    "      try {",
+    "        const url = new URL(value, globalThis.location.href);",
+    "        return url.origin === authorizedOrigin && !url.username && !url.password &&",
+    "          !prohibited.test(decodeText(url.pathname + url.search + url.hash));",
+    "      } catch { return false; }",
+    "    };",
+    "    const state = { active: false, action: null, violation: null };",
     '    Object.defineProperty(globalThis, "__yellowbirdAgentReplayGuard", {',
     "      value: state,",
     "      configurable: false",
     "    });",
-    "    const blocked = () => state.active;",
+    "    const blocked = (kind, url = globalThis.location.href) => {",
+    "      if (!state.active) return false;",
+    "      state.violation ||= { kind, url };",
+    "      return true;",
+    "    };",
+    "    state.observeCurrentUrl = () => {",
+    '      if (state.active && !urlAllowed(globalThis.location.href)) blocked("prohibited-navigation");',
+    "    };",
     '    globalThis.addEventListener("submit", event => {',
-    '      if (!blocked()) return;',
+    '      if (!blocked("form-submission")) return;',
     "      event.preventDefault();",
     "      event.stopImmediatePropagation();",
     "    }, true);",
@@ -319,18 +381,22 @@ function buildRegression(options, explorationSteps = []) {
     "      const original = HTMLFormElement.prototype[method];",
     '      if (typeof original !== "function") continue;',
     "      HTMLFormElement.prototype[method] = function (...args) {",
-    "        if (blocked()) return undefined;",
+    '        if (blocked("form-submission")) return undefined;',
     "        return original.apply(this, args);",
     "      };",
     "    }",
     '    for (const method of ["pushState", "replaceState"]) {',
     "      const original = history[method];",
     "      history[method] = function (...args) {",
-    '        if (state.active && state.action !== "visit") return undefined;',
+    '        if (state.active && state.action !== "visit") { blocked("non-visit-navigation"); return undefined; }',
+    "        const nextUrl = args[2] === undefined ? globalThis.location.href : new URL(args[2], globalThis.location.href).href;",
+    '        if (state.active && !urlAllowed(nextUrl)) { blocked("prohibited-navigation", nextUrl); return undefined; }',
     "        return original.apply(this, args);",
     "      };",
     "    }",
-    "  });",
+    '    globalThis.addEventListener("hashchange", state.observeCurrentUrl);',
+    '    globalThis.addEventListener("popstate", state.observeCurrentUrl);',
+    `  }, { authorizedOrigin: yellowbirdTarget.origin, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)} });`,
     '  await page.context().route("**/*", async (route) => {',
     "    const request = route.request();",
     "    const requestUrl = request.url();",
@@ -340,7 +406,7 @@ function buildRegression(options, explorationSteps = []) {
     "    let allowed = false;",
     "    try {",
     "      const parsedRequestUrl = new URL(requestUrl);",
-    "      const safeAgentUrl = !yellowbirdUnsafeRequest.test(decodeURIComponent(parsedRequestUrl.pathname + parsedRequestUrl.search));",
+    "      const safeAgentUrl = yellowbirdAgentUrlAllowed(requestUrl);",
     "      let safeAgentAction = true;",
     "      if (yellowbirdAgentAction) {",
     '        if (yellowbirdAgentAction.action !== "visit") {',
@@ -357,7 +423,7 @@ function buildRegression(options, explorationSteps = []) {
     "            yellowbirdAgentAction.navigationStarted = true;",
     "            yellowbirdAgentAction.navigationRequests.add(request);",
     "          }",
-    "        }",
+    "        } else safeAgentAction = yellowbirdPassiveResourceTypes.has(request.resourceType());",
     "      }",
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
     '        (!yellowbirdAgentAction || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl && safeAgentAction));',
@@ -371,8 +437,7 @@ function buildRegression(options, explorationSteps = []) {
     "        try {",
     "          const parsedRedirect = new URL(location, requestUrl);",
     "          redirectUrl = parsedRedirect.href;",
-    "          safeRedirect = parsedRedirect.origin === yellowbirdTarget.origin &&",
-    "            !yellowbirdUnsafeRequest.test(decodeURIComponent(parsedRedirect.pathname + parsedRedirect.search));",
+    "          safeRedirect = yellowbirdAgentUrlAllowed(parsedRedirect.href);",
     "        } catch {}",
     "        if (!safeRedirect) {",
     "          yellowbirdBlockedUrls.add(requestUrl);",
@@ -393,7 +458,9 @@ function buildRegression(options, explorationSteps = []) {
     "    const socketPort = url.port || (url.protocol === \"wss:\" ? \"443\" : \"80\");",
     "    const sameOrigin = url.protocol === yellowbirdSocketProtocol &&",
     "      url.hostname === yellowbirdTarget.hostname && socketPort === yellowbirdSocketPort;",
-    "    if (!sameOrigin)",
+    "    const agentSocketUrl = new URL(url.href);",
+    "    agentSocketUrl.protocol = yellowbirdTarget.protocol;",
+    "    if (!sameOrigin || (yellowbirdAgentAction && !yellowbirdAgentUrlAllowed(agentSocketUrl.href)))",
     "      return socket.close({ code: 1008, reason: \"Blocked by YellowBird exact-origin policy\" });",
     "    const server = socket.connectToServer();",
     "    socket.onMessage(message => {",
@@ -402,6 +469,13 @@ function buildRegression(options, explorationSteps = []) {
     "      server.send(message);",
     "    });",
     "  });",
+    "  const yellowbirdActivateAgentGuard = async action => {",
+    "    await page.evaluate(activeAction => {",
+    "      const guard = globalThis.__yellowbirdAgentReplayGuard;",
+    "      guard.active = true;",
+    "      guard.action = activeAction;",
+    "    }, action);",
+    "  };",
     "  const yellowbirdBeginAgentAction = async (action, requestedUrl = null) => {",
     "    yellowbirdAgentAction = {",
     "      action,",
@@ -409,11 +483,15 @@ function buildRegression(options, explorationSteps = []) {
     "      navigationStarted: false,",
     "      navigationRequests: new Set()",
     "    };",
-    "    await page.evaluate(activeAction => {",
+    "    await yellowbirdActivateAgentGuard(action);",
+    "  };",
+    "  const yellowbirdAssertAgentGuard = async () => {",
+    "    const violation = await page.evaluate(() => {",
     "      const guard = globalThis.__yellowbirdAgentReplayGuard;",
-    "      guard.active = true;",
-    "      guard.action = activeAction;",
-    "    }, action);",
+    "      guard.observeCurrentUrl();",
+    "      return guard.violation;",
+    "    });",
+    "    expect(violation).toBeNull();",
     "  };",
     "",
     `  const response = await page.goto(yellowbirdTarget.href, { waitUntil: "domcontentloaded" });`,
@@ -459,7 +537,10 @@ function buildRegression(options, explorationSteps = []) {
       const response = `yellowbirdAgentResponse${index + 1}`;
       lines.push(
         `  const ${response} = await page.goto(${quoteForJavaScript(step.requestedUrl)}, { waitUntil: "domcontentloaded" });`,
-        `  await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`
+        '  await yellowbirdActivateAgentGuard("visit");',
+        `  await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`,
+        "  await page.waitForTimeout(250);",
+        "  await yellowbirdAssertAgentGuard();"
       );
       if (step.httpStatus) {
         lines.push(
@@ -498,6 +579,10 @@ function buildRegression(options, explorationSteps = []) {
     } else if (step.action === "click") {
       lines.push(`  await ${selectedLocator}.click();`);
     }
+    lines.push(
+      "  await page.waitForTimeout(250);",
+      "  await yellowbirdAssertAgentGuard();"
+    );
   });
   if (!options.ignoreConsoleErrors) {
     lines.push(
@@ -913,8 +998,8 @@ export function createScoutRunner({
   }
   const hasExplicitIntent = typeof input.intent === "string";
   const exploreIntent =
-    input.exploreIntent === undefined
-      ? hasExplicitIntent && workflow.steps.length === 0
+    workflow.steps.length === 0 && hasExplicitIntent
+      ? true
       : Boolean(input.exploreIntent);
   if (exploreIntent && workflow.steps.length) {
     throw new Error(
@@ -1100,14 +1185,22 @@ export function createScoutRunner({
         socketUrl.protocol === expectedProtocol &&
         socketUrl.hostname === targetUrl.hostname &&
         socketPort === expectedPort;
-      if (!sameOrigin) {
-        const reason = agentNetworkPolicyActive
-          ? "agent-cross-origin"
-          : "cross-origin";
+      const agentSocketUrl = new URL(socketUrl.href);
+      agentSocketUrl.protocol = targetUrl.protocol;
+      const agentSocketAllowed = isAgentUrlAllowed(
+        agentSocketUrl.href,
+        authorization.origin
+      );
+      if (!sameOrigin || (agentNetworkPolicyActive && !agentSocketAllowed)) {
+        const reason = !sameOrigin
+          ? agentNetworkPolicyActive
+            ? "agent-cross-origin"
+            : "cross-origin"
+          : "agent-prohibited-url";
         blockedRequests.push({
           method: "WEBSOCKET",
           resourceType: "websocket",
-          url: socket.url(),
+          url: evidenceUrl(socket.url()),
           reason
         });
         record("warn", "network.websocket.blocked", "Blocked a cross-origin WebSocket", {
@@ -1129,7 +1222,7 @@ export function createScoutRunner({
         blockedRequests.push({
           method: "WEBSOCKET",
           resourceType: "websocket",
-          url: socket.url(),
+          url: evidenceUrl(socket.url()),
           reason: "agent-websocket-message"
         });
         record(
@@ -1159,13 +1252,10 @@ export function createScoutRunner({
         requestUrl.startsWith("data:") || requestUrl.startsWith("blob:");
       const sameOrigin = requestOrigin === authorization.origin;
       const agentReadAllowed = ["GET", "HEAD"].includes(requestMethod);
-      let agentUrlAllowed = false;
-      try {
-        const parsedRequestUrl = new URL(requestUrl);
-        agentUrlAllowed = !PROHIBITED_AGENT_REQUEST_URL.test(
-          decodeURIComponent(parsedRequestUrl.pathname + parsedRequestUrl.search)
-        );
-      } catch {}
+      const agentUrlAllowed = isAgentUrlAllowed(
+        requestUrl,
+        authorization.origin
+      );
       let agentActionAllowed = true;
       if (agentNetworkPolicyActive && agentActionContext && !localResource) {
         if (agentActionContext.action !== "visit") {
@@ -1183,6 +1273,10 @@ export function createScoutRunner({
             agentActionContext.navigationStarted = true;
             agentActionContext.navigationRequests.add(route.request());
           }
+        } else {
+          agentActionAllowed = AGENT_PASSIVE_RESOURCE_TYPES.has(
+            route.request().resourceType()
+          );
         }
       }
       if (
@@ -1203,22 +1297,20 @@ export function createScoutRunner({
             location
           ) {
             let redirectUrl = location;
-            let redirectOrigin = "";
             let redirectAllowed = false;
             try {
               const parsedRedirect = new URL(location, requestUrl);
               redirectUrl = parsedRedirect.href;
-              redirectOrigin = parsedRedirect.origin;
-              redirectAllowed = !PROHIBITED_AGENT_REQUEST_URL.test(
-                decodeURIComponent(
-                  parsedRedirect.pathname + parsedRedirect.search
-                )
+              redirectAllowed = isAgentUrlAllowed(
+                redirectUrl,
+                authorization.origin
               );
             } catch {}
-            if (
-              redirectOrigin !== authorization.origin ||
-              !redirectAllowed
-            ) {
+            if (!redirectAllowed) {
+              let redirectOrigin = "";
+              try {
+                redirectOrigin = new URL(redirectUrl).origin;
+              } catch {}
               const reason =
                 redirectOrigin && redirectOrigin !== authorization.origin
                   ? "agent-cross-origin"
@@ -1226,8 +1318,8 @@ export function createScoutRunner({
               blockedRequests.push({
                 method: requestMethod,
                 resourceType: route.request().resourceType(),
-                requestUrl,
-                url: redirectUrl,
+                requestUrl: evidenceUrl(requestUrl),
+                url: evidenceUrl(redirectUrl),
                 reason
               });
               record(
@@ -1252,21 +1344,25 @@ export function createScoutRunner({
         return;
       }
 
-      const reason = !sameOrigin
-        ? agentNetworkPolicyActive
+      let reason = "agent-non-read-method";
+      if (!sameOrigin) {
+        reason = agentNetworkPolicyActive
           ? "agent-cross-origin"
-          : "cross-origin"
-        : agentReadAllowed
-          ? !agentUrlAllowed
-            ? "agent-prohibited-url"
-            : agentActionContext?.action === "visit"
-              ? "agent-navigation-outside-visit"
-              : "agent-non-visit-request"
-          : "agent-non-read-method";
+          : "cross-origin";
+      } else if (agentReadAllowed && !agentUrlAllowed) {
+        reason = "agent-prohibited-url";
+      } else if (agentReadAllowed && agentActionContext?.action === "visit") {
+        reason =
+          route.request().resourceType() === "document"
+            ? "agent-navigation-outside-visit"
+            : "agent-active-request";
+      } else if (agentReadAllowed) {
+        reason = "agent-non-visit-request";
+      }
       blockedRequests.push({
         method: requestMethod,
         resourceType: route.request().resourceType(),
-        url: requestUrl,
+        url: evidenceUrl(requestUrl),
         reason
       });
       record("warn", "network.request.blocked", "Blocked a request outside policy", {
@@ -1278,16 +1374,48 @@ export function createScoutRunner({
       await route.abort("blockedbyclient");
     });
 
-    await context.addInitScript(() => {
+    await context.addInitScript(({ authorizedOrigin, prohibitedPattern }) => {
+      const prohibited = new RegExp(prohibitedPattern, "i");
+      const decodeText = (value) => {
+        let decoded = String(value ?? "");
+        for (let count = 0; count < 3; count += 1) {
+          try {
+            const next = decodeURIComponent(decoded);
+            if (next === decoded) break;
+            decoded = next;
+          } catch {
+            break;
+          }
+        }
+        return decoded;
+      };
+      const urlAllowed = (value) => {
+        try {
+          const url = new URL(value, globalThis.location.href);
+          return (
+            url.origin === authorizedOrigin &&
+            !url.username &&
+            !url.password &&
+            !prohibited.test(decodeText(url.pathname + url.search + url.hash))
+          );
+        } catch {
+          return false;
+        }
+      };
       const state = { active: false, action: null, attempts: [] };
       Object.defineProperty(globalThis, "__yellowbirdAgentActionGuard", {
         value: state,
         configurable: false
       });
-      const blocked = (kind) => {
+      const blocked = (kind, url = globalThis.location.href) => {
         if (!state.active) return false;
-        state.attempts.push({ kind, url: globalThis.location.href });
+        state.attempts.push({ kind, url });
         return true;
+      };
+      state.observeCurrentUrl = () => {
+        if (state.active && !urlAllowed(globalThis.location.href)) {
+          blocked("prohibited-navigation");
+        }
       };
       globalThis.addEventListener(
         "submit",
@@ -1313,9 +1441,22 @@ export function createScoutRunner({
             blocked("non-visit-navigation");
             return undefined;
           }
+          const nextUrl =
+            args[2] === undefined
+              ? globalThis.location.href
+              : new URL(args[2], globalThis.location.href).href;
+          if (state.active && !urlAllowed(nextUrl)) {
+            blocked("prohibited-navigation", nextUrl);
+            return undefined;
+          }
           return original.apply(this, args);
         };
       }
+      globalThis.addEventListener("hashchange", state.observeCurrentUrl);
+      globalThis.addEventListener("popstate", state.observeCurrentUrl);
+    }, {
+      authorizedOrigin: authorization.origin,
+      prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN
     });
 
     const page = await context.newPage();
@@ -1362,6 +1503,7 @@ export function createScoutRunner({
         .evaluate(() => {
           const guard = globalThis.__yellowbirdAgentActionGuard;
           if (!guard) return [];
+          guard.observeCurrentUrl();
           const observed = guard.attempts;
           guard.attempts = [];
           return observed;
@@ -1371,7 +1513,7 @@ export function createScoutRunner({
         blockedRequests.push({
           method: "BROWSER",
           resourceType: "document",
-          url: attempt.url,
+          url: evidenceUrl(attempt.url),
           reason: `agent-${attempt.kind}`
         });
         record(
@@ -1607,6 +1749,13 @@ export function createScoutRunner({
                     guard.action = activeAction;
                   }, action.action);
                 },
+                async resume(action) {
+                  await page.evaluate((activeAction) => {
+                    const guard = globalThis.__yellowbirdAgentActionGuard;
+                    guard.active = true;
+                    guard.action = activeAction;
+                  }, action);
+                },
                 async end() {
                   await collectAgentGuardAttempts();
                 }
@@ -1681,7 +1830,10 @@ export function createScoutRunner({
       })
       .catch(() => ({ bodyText: "", interactiveElements: [] }));
     state.bodyText = snapshot.bodyText;
-    state.interactiveElements = snapshot.interactiveElements;
+    state.interactiveElements = snapshot.interactiveElements.map((element) => ({
+      ...element,
+      href: element.href ? evidenceUrl(element.href) : null
+    }));
     await page.screenshot({
       path: join(outputDirectory, "page.png"),
       fullPage: true,

@@ -31,10 +31,10 @@ bun run doctor
 
 `doctor` reports the selected model and whether strict JSON Schema output passed
 the harmless conformance probe. The first probe may wait up to two minutes for a
-local model to load cold. Unless `--no-agent` disables exploration, a scout
-with explicit `--intent` is `inconclusive` with exit code `3` if no compatible
-engine is available. It never falls back to an initial-page `clear` result that
-did not cover the intent.
+local model to load cold. A scout with explicit `--intent` is `inconclusive`
+with exit code `3` if no compatible engine is available. Explicit intent takes
+precedence over `--no-agent`, so the run never falls back to an initial-page
+`clear` result that did not cover the intent.
 
 Start the deliberately broken demo product:
 
@@ -76,8 +76,8 @@ remains available unchanged for historical evidence, so integrations can migrate
 between explicit contract versions without depending on YellowBird internals.
 
 The demo has a fixed state at `http://127.0.0.1:4321/?fixed`. To verify the fixed
-assertions as an initial-page smoke check, use that target and add `--no-agent`;
-the run should complete with `clear`.
+assertions as an initial-page smoke check, use that target without `--intent`
+and add `--no-agent`; the run should complete with `clear`.
 
 To run a real multi-step canary, use the versioned example scenario:
 
@@ -114,9 +114,10 @@ yellowbird scout \
 Outside a versioned scenario, an explicit `--intent` enables bounded agent
 exploration. `--agent` opts into the same loop with the default initial-page
 intent. The interaction budget defaults to four steps; `--max-agent-steps`
-accepts values from `1` through `20`. Use `--no-agent` for an initial-page smoke
-check, or a versioned `--scenario` when the owner needs an exact workflow with
-mutation-capable actions and explicit assertions.
+accepts values from `1` through `20`. Use `--no-agent` without an explicit
+intent for an initial-page smoke check, or a versioned `--scenario` when the
+owner needs an exact workflow with mutation-capable actions and explicit
+assertions.
 
 The compatible endpoint can be selected per command:
 
