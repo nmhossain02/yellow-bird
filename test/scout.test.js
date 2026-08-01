@@ -37,7 +37,11 @@ let failedVisitDelayedRequestCount = 0;
 let submissionRequestCount = 0;
 let crossOriginRequestCount = 0;
 let prohibitedRedirectRequestCount = 0;
+let deleteAccountRequestCount = 0;
+let sameUrlCorrelationRequestCount = 0;
+let replaySettlementDelayedRequestCount = 0;
 let failVisitNavigation = false;
+let changeReplaySettlementUrl = false;
 
 async function runCommand(command, cwd, env) {
   const captureDirectory = await mkdtemp(
@@ -187,7 +191,26 @@ beforeAll(async () => {
         "cache-control": "no-cache",
         "content-type": "text/event-stream"
       });
-      response.end("data: ready\n\n");
+      response.write("data: ready\n\n");
+      const timer = setTimeout(() => response.end(), 350);
+      response.once("close", () => clearTimeout(timer));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/agent-same-url-correlation") {
+      sameUrlCorrelationRequestCount += 1;
+      if (sameUrlCorrelationRequestCount === 1) {
+        const timer = setTimeout(() => response.end("late"), 500);
+        response.once("close", () => clearTimeout(timer));
+      } else {
+        response.writeHead(302, { location: "/deleteAccount" });
+        response.end();
+      }
+      return;
+    }
+    if (request.method === "GET" && request.url === "/agent-replay-settlement-delayed") {
+      replaySettlementDelayedRequestCount += 1;
+      response.writeHead(204);
+      response.end();
       return;
     }
     if (request.method === "GET" && request.url === "/agent-submission") {
@@ -229,6 +252,12 @@ beforeAll(async () => {
     }
     if (request.url === "/auth_callback") {
       prohibitedRedirectRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (request.url === "/deleteAccount") {
+      deleteAccountRequestCount += 1;
       response.writeHead(204);
       response.end();
       return;
@@ -293,6 +322,18 @@ beforeAll(async () => {
     );
     const errorCorrelationSurface = request.url?.startsWith(
       "/agent-error-correlation-surface"
+    );
+    const sameUrlCorrelationSurface = request.url?.startsWith(
+      "/agent-same-url-correlation-surface"
+    );
+    const sameUrlCorrelationDestination = request.url?.startsWith(
+      "/agent-same-url-correlation-destination"
+    );
+    const replaySettlementSurface = request.url?.startsWith(
+      "/agent-replay-settlement-surface"
+    );
+    const replaySettlementDestination = request.url?.startsWith(
+      "/agent-replay-settlement-destination"
     );
     const detachingSurface = request.url?.startsWith(
       "/agent-detaching-surface"
@@ -422,7 +463,11 @@ beforeAll(async () => {
             <script>
               fetch("/agent-visit-data");
               const events = new EventSource("/agent-visit-events");
-              events.onmessage = () => events.close();
+              events.onmessage = () => {
+                const ready = document.createElement("input");
+                ready.setAttribute("aria-label", "Stream ready");
+                document.body.append(ready);
+              };
               setTimeout(() => {
                 fetch("/agent-delayed-visit-mutation");
                 new WebSocket("ws://" + location.host + "/agent-visit-socket");
@@ -605,6 +650,52 @@ beforeAll(async () => {
         </html>`);
       return;
     }
+    if (sameUrlCorrelationSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Same URL correlation surface</title></head>
+          <body><a href="/agent-same-url-correlation-destination">Inspect setup</a></body>
+        </html>`);
+      return;
+    }
+    if (sameUrlCorrelationDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Same URL correlation destination</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <script>
+              const controller = new AbortController();
+              fetch("/agent-same-url-correlation", { signal: controller.signal });
+              setTimeout(() => controller.abort(), 20);
+              setTimeout(() => fetch("/agent-same-url-correlation"), 50);
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (replaySettlementSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Replay settlement surface</title></head>
+          <body><a href="/agent-replay-settlement-destination">Inspect setup</a></body>
+        </html>`);
+      return;
+    }
+    if (replaySettlementDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Replay settlement destination</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <script>
+              ${changeReplaySettlementUrl ? 'setTimeout(() => history.replaceState({}, "", "/agent-replay-settlement-changed"), 50);' : ""}
+              setTimeout(() => fetch("/agent-replay-settlement-delayed"), 250);
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
     if (detachingSurface) {
       const links = Array.from(
         { length: 30 },
@@ -742,6 +833,39 @@ async function launchBrowserWithDelayedScreenshot() {
   };
 }
 
+async function launchBrowserWithFailingNetworkGuard() {
+  let context;
+  return {
+    async newContext(options) {
+      context = await sharedBrowser.newContext(options);
+      const newCdpSession = context.newCDPSession.bind(context);
+      context.newCDPSession = async (page) => {
+        const session = await newCdpSession(page);
+        let injected = false;
+        const proxy = {
+          on(event, listener) {
+            session.on(event, listener);
+            return proxy;
+          },
+          async send(method, parameters) {
+            const result = await session.send(method, parameters);
+            if (method === "Fetch.continueRequest" && !injected) {
+              injected = true;
+              throw new Error("injected network guard failure");
+            }
+            return result;
+          }
+        };
+        return proxy;
+      };
+      return context;
+    },
+    async close() {
+      await context?.close();
+    }
+  };
+}
+
 const runSharedScout = createScoutRunner({
   launchBrowser: launchSharedBrowser
 });
@@ -796,6 +920,7 @@ test("agent URL policy rejects credentials, auth shorthand, and fragments", () =
   assert.equal(isAgentUrlAllowed(`${target}/auth_callback`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/authCallback`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/deleteAccount`, target), false);
+  assert.equal(isAgentUrlAllowed(`${target}/delete2FA`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/createMonitor`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/setup#auth_callback`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/%25252561uth`, target), false);
@@ -989,6 +1114,41 @@ test("browser launch failure finalizes an inconclusive run", async () => {
     ["browser.launch.failed", "run.completed"]
   );
   assert.doesNotMatch(JSON.stringify(events), /secret=hidden/);
+});
+
+test("a browser network guard failure cannot produce a clear report", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-network-guard-failure-")
+  );
+  const report = await createAgentRunner(
+    () => ({
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The initial interface was observed.",
+      coverage: "covered",
+      summary: "The initial interface was observed."
+    }),
+    undefined,
+    launchBrowserWithFailingNetworkGuard
+  )({
+    target,
+    intent: "Assess the initial interface",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.status, "inconclusive");
+  assert.ok(
+    report.invalidTestMechanics.some(
+      (issue) => issue.id === "browser-network-guard-failed"
+    )
+  );
+  assert.match(
+    await readFile(report.artifacts.diagnostics, "utf8"),
+    /browser\.network-guard\.failed/
+  );
 });
 
 test("intent-driven scout executes bounded same-origin navigation", async () => {
@@ -1346,6 +1506,7 @@ test("agent redirect chains use the canonical prohibited-action policy", async (
 });
 
 test("blocked fetch redirects retain exact attribution in live and replay", async () => {
+  deleteAccountRequestCount = 0;
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-fetch-redirect-")
   );
@@ -1383,6 +1544,7 @@ test("blocked fetch redirects retain exact attribution in live and replay", asyn
   assert.deepEqual(report.findings, []);
   assert.deepEqual(report.observations.pageErrors, []);
   assert.deepEqual(report.observations.failedRequests, []);
+  assert.equal(deleteAccountRequestCount, 0);
   assert.ok(
     report.observations.blockedRequests.some(
       (request) =>
@@ -1399,6 +1561,123 @@ test("blocked fetch redirects retain exact attribution in live and replay", asyn
     outputDirectory
   );
   assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.equal(deleteAccountRequestCount, 0);
+}, 30_000);
+
+test("blocked fetch attribution is scoped to one request occurrence", async () => {
+  sameUrlCorrelationRequestCount = 0;
+  deleteAccountRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-same-url-correlation-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Inspect the supplied setup route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The setup route was inspected.",
+          coverage: "covered",
+          summary: "The setup route was inspected."
+        };
+  })({
+    target: `${target}/agent-same-url-correlation-surface`,
+    intent: "Assess the setup route",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "attention");
+  assert.equal(report.observations.pageErrors.length, 1);
+  assert.match(report.observations.pageErrors[0].message, /aborted/i);
+  assert.equal(deleteAccountRequestCount, 0);
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) =>
+        request.url === `${target}/deleteAccount` &&
+        request.redirectChain.includes(`${target}/agent-same-url-correlation`)
+    )
+  );
+
+  sameUrlCorrelationRequestCount = 0;
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.notEqual(replay.exitCode, 0, "Replay must preserve the independent failure");
+  assert.match(
+    `${replay.stdout}\n${replay.stderr}`,
+    /aborted|Failed to fetch|ERR_EMPTY_RESPONSE/i
+  );
+  assert.equal(deleteAccountRequestCount, 0);
+}, 30_000);
+
+test("replay closes visit authority before asserting the recorded URL", async () => {
+  replaySettlementDelayedRequestCount = 0;
+  changeReplaySettlementUrl = false;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-replay-settlement-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Inspect the supplied setup route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The setup route was inspected.",
+          coverage: "covered",
+          summary: "The setup route was inspected."
+        };
+  })({
+    target: `${target}/agent-replay-settlement-surface`,
+    intent: "Assess the setup route",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.observations.exploration.steps.length, 1);
+  assert.equal(replaySettlementDelayedRequestCount, 0);
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  changeReplaySettlementUrl = true;
+  try {
+    const replay = await runCommand(
+      [process.execPath, "run", "test"],
+      outputDirectory
+    );
+    assert.notEqual(replay.exitCode, 0, "The changed replay URL must fail its assertion");
+    assert.equal(replaySettlementDelayedRequestCount, 0);
+  } finally {
+    changeReplaySettlementUrl = false;
+  }
 }, 30_000);
 
 test("same-document auth routing invalidates an agent visit", async () => {
@@ -1896,6 +2175,7 @@ test("visit authority allows bounded load requests and blocks delayed effects in
     join(tmpdir(), "yellowbird-agent-delayed-visit-mutation-")
   );
   let planningCall = 0;
+  let destinationLabels = [];
   const report = await createAgentRunner(async (request) => {
     const availableElements = JSON.parse(
       request.messages.at(-1).content
@@ -1912,6 +2192,7 @@ test("visit authority allows bounded load requests and blocks delayed effects in
         summary: ""
       };
     }
+    destinationLabels = availableElements.map((element) => element.label);
     await new Promise((resolve) => setTimeout(resolve, 300));
     return {
       action: "finish",
@@ -1933,6 +2214,7 @@ test("visit authority allows bounded load requests and blocks delayed effects in
   assert.equal(visitReadRequestCount, 1);
   assert.equal(delayedVisitMutationRequestCount, 0);
   assert.equal(visitEventSourceRequestCount, 1);
+  assert.ok(destinationLabels.includes("Stream ready"));
   assert.equal(visitWebSocketUpgradeCount, 0);
   assert.equal(report.outcome, "inconclusive");
   assert.deepEqual(report.findings, []);

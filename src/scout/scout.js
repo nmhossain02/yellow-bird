@@ -308,22 +308,46 @@ function buildRegression(options, explorationSteps = []) {
     "  const yellowbirdGuardControlName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
     "  const yellowbirdGuardControlToken = randomUUID();",
     "  const yellowbirdGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;",
+    "  const yellowbirdFetchBindingName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
+    "  const yellowbirdFetchBindingToken = randomUUID();",
+    "  const yellowbirdFetchOccurrencePrefix = `${randomUUID()}:`;",
     "  const yellowbirdFetchFailurePrefix = `__yellowbird_fetch_failure__${randomUUID()}:`;",
+    "  const yellowbirdPendingCdpFetchOccurrences = new Map();",
+    "  const yellowbirdBlockedFetchOccurrences = new Set();",
+    "  const yellowbirdBlockedConsoleOccurrences = new Map();",
+    "  const yellowbirdMarkBlockedConsoleOccurrence = url => {",
+    "    const pending = yellowbirdBlockedConsoleOccurrences.get(url) || [];",
+    "    pending.push(Date.now());",
+    "    yellowbirdBlockedConsoleOccurrences.set(url, pending);",
+    "  };",
+    "  const yellowbirdConsumeBlockedConsoleOccurrence = url => {",
+    "    const now = Date.now();",
+    "    const pending = (yellowbirdBlockedConsoleOccurrences.get(url) || [])",
+    "      .filter(timestamp => now - timestamp <= 2000);",
+    "    const matched = pending.shift() !== undefined;",
+    "    if (pending.length) yellowbirdBlockedConsoleOccurrences.set(url, pending);",
+    "    else yellowbirdBlockedConsoleOccurrences.delete(url);",
+    "    return matched;",
+    "  };",
     "  let yellowbirdAgentViolation = null;",
     "  const yellowbirdParseFetchFailure = detail => {",
     "    const text = String(detail || \"\");",
     "    const markerIndex = text.indexOf(yellowbirdFetchFailurePrefix);",
     "    if (markerIndex < 0) return null;",
-    "    const encodedStart = markerIndex + yellowbirdFetchFailurePrefix.length;",
-    '    const separator = text.indexOf(":", encodedStart);',
-    "    if (separator < 0) return null;",
     "    try {",
-    "      return {",
-    "        url: decodeURIComponent(text.slice(encodedStart, separator)),",
-    '        message: text.slice(separator + 1) || "Failed to fetch"',
-    "      };",
+    "      const failure = JSON.parse(text.slice(markerIndex + yellowbirdFetchFailurePrefix.length));",
+    '      return typeof failure?.id === "string" && typeof failure?.url === "string" ? failure : null;',
     "    } catch { return null; }",
     "  };",
+    "  await page.exposeBinding(yellowbirdFetchBindingName, (_source, candidateToken, occurrence) => {",
+    "    if (candidateToken !== yellowbirdFetchBindingToken ||",
+    '        typeof occurrence?.id !== "string" || !occurrence.id.startsWith(yellowbirdFetchOccurrencePrefix) ||',
+    '        typeof occurrence?.url !== "string") return false;',
+    "    const pendingCdp = yellowbirdPendingCdpFetchOccurrences.get(occurrence.url) || [];",
+    "    pendingCdp.push(occurrence.id);",
+    "    yellowbirdPendingCdpFetchOccurrences.set(occurrence.url, pendingCdp);",
+    "    return true;",
+    "  });",
     '  page.on("console", (message) => {',
     "    const text = message.text();",
     "    if (text.startsWith(yellowbirdGuardPrefix)) {",
@@ -332,8 +356,11 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     '    if (message.type() === "error") {',
     "      const fetchFailure = yellowbirdParseFetchFailure(text);",
+    "      if (!fetchFailure && /ERR_BLOCKED_BY_CLIENT/i.test(text) &&",
+    "          yellowbirdConsumeBlockedConsoleOccurrence(message.location()?.url)) return;",
     "      consoleErrors.push({",
     "        text: fetchFailure?.message || text,",
+    "        fetchFailureId: fetchFailure?.id || null,",
     "        fetchFailureUrl: fetchFailure?.url || null,",
     "        location: message.location()",
     "      });",
@@ -343,6 +370,7 @@ function buildRegression(options, explorationSteps = []) {
     "    const fetchFailure = yellowbirdParseFetchFailure(error.message);",
     "    pageErrors.push({",
     "      message: fetchFailure?.message || error.message,",
+    "      fetchFailureId: fetchFailure?.id || null,",
     "      fetchFailureUrl: fetchFailure?.url || null",
     "    });",
     "  });",
@@ -373,7 +401,9 @@ function buildRegression(options, explorationSteps = []) {
     "  };",
     "  const yellowbirdCanonicalizeAgentText = value => String(value ?? \"\")",
     '    .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")',
-    '    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");',
+    '    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")',
+    '    .replaceAll(/([A-Za-z])([0-9])/g, "$1 $2")',
+    '    .replaceAll(/([0-9])([A-Za-z])/g, "$1 $2");',
     "  const yellowbirdDecodeAgentUrlText = url => {",
     "    const components = [",
     "      yellowbirdDecodeAgentText(url.pathname),",
@@ -391,11 +421,13 @@ function buildRegression(options, explorationSteps = []) {
     "        decoded !== null && !yellowbirdUnsafeRequest.test(yellowbirdCanonicalizeAgentText(decoded));",
     "    } catch { return false; }",
     "  };",
-    "  await page.context().addInitScript(({ authorizedOrigin, controlName, controlToken, fetchFailurePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
+    "  await page.context().addInitScript(({ authorizedOrigin, controlName, controlToken, fetchBindingName, fetchBindingToken, fetchFailurePrefix, fetchOccurrencePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
     "    const prohibited = new RegExp(prohibitedPattern, \"i\");",
     "    const canonicalizeSemanticText = value => String(value ?? \"\")",
     '      .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")',
-    '      .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");',
+    '      .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")',
+    '      .replaceAll(/([A-Za-z])([0-9])/g, "$1 $2")',
+    '      .replaceAll(/([0-9])([A-Za-z])/g, "$1 $2");',
     "    const decodeText = value => {",
     "      let decoded = String(value ?? \"\");",
     "      const maximumPasses = decoded.length + 1;",
@@ -446,17 +478,22 @@ function buildRegression(options, explorationSteps = []) {
     '      if (active && !urlAllowed(globalThis.location.href)) blocked("prohibited-navigation");',
     "    };",
     "    const originalFetch = globalThis.fetch.bind(globalThis);",
+    "    const recordFetchOccurrence = globalThis[fetchBindingName].bind(globalThis);",
+    "    let fetchSequence = 0;",
     "    globalThis.fetch = async function (input, init) {",
     "      let requestUrl = null;",
+    "      const occurrenceId = `${fetchOccurrencePrefix}${++fetchSequence}`;",
     "      try {",
     "        requestUrl = new URL(input instanceof Request ? input.url : String(input), globalThis.location.href).href;",
     "      } catch {}",
+    "      if (active && requestUrl)",
+    "        await recordFetchOccurrence(fetchBindingToken, { id: occurrenceId, url: requestUrl });",
     "      try {",
     "        return await originalFetch(input, init);",
     "      } catch (error) {",
     "        if (!active || !requestUrl) throw error;",
     '        const message = error instanceof Error ? error.message : String(error || "Failed to fetch");',
-    "        throw new TypeError(`${fetchFailurePrefix}${encodeURIComponent(requestUrl)}:${message}`);",
+    "        throw new TypeError(`${fetchFailurePrefix}${JSON.stringify({ id: occurrenceId, url: requestUrl, message })}`);",
     "      }",
     "    };",
     '    globalThis.addEventListener("submit", event => {',
@@ -491,15 +528,92 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     '    globalThis.addEventListener("hashchange", observeCurrentUrl);',
     '    globalThis.addEventListener("popstate", observeCurrentUrl);',
-    `  }, { authorizedOrigin: yellowbirdTarget.origin, controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, fetchFailurePrefix: yellowbirdFetchFailurePrefix, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
+    `  }, { authorizedOrigin: yellowbirdTarget.origin, controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, fetchBindingName: yellowbirdFetchBindingName, fetchBindingToken: yellowbirdFetchBindingToken, fetchFailurePrefix: yellowbirdFetchFailurePrefix, fetchOccurrencePrefix: yellowbirdFetchOccurrencePrefix, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
     "  const yellowbirdRecordBlockedRequest = (request, ...additionalUrls) => {",
     "    const redirectChain = [];",
     "    for (let current = request; current; current = current.redirectedFrom())",
     "      redirectChain.unshift(current.url());",
     "    for (const url of [...redirectChain, ...additionalUrls])",
     "      yellowbirdBlockedUrls.add(url);",
+    "    yellowbirdMarkBlockedConsoleOccurrence(request.url());",
     "  };",
-    '  await page.context().route("**/*", async (route) => {',
+    "  if (yellowbirdAgentMode) {",
+    "  const yellowbirdCdpRequests = new Map();",
+    "  const yellowbirdCdp = await page.context().newCDPSession(page);",
+    '  yellowbirdCdp.on("Fetch.requestPaused", async event => {',
+    "    try {",
+    "      if (event.responseErrorReason !== undefined) {",
+    "        try {",
+    '          await yellowbirdCdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: event.responseErrorReason });',
+    "        } catch (error) {",
+    "          if (!/Invalid InterceptionId/i.test(String(error?.message || error))) throw error;",
+    "        }",
+    "        return;",
+    "      }",
+    "      if (event.responseStatusCode !== undefined) {",
+    "        const requestState = yellowbirdCdpRequests.get(event.requestId);",
+    "        const location = event.responseHeaders?.find(header => header.name.toLowerCase() === \"location\")?.value;",
+    "        if ([301, 302, 303, 307, 308].includes(event.responseStatusCode) && location && yellowbirdAgentMode) {",
+    "          let redirectUrl = location;",
+    "          let redirectAllowed = false;",
+    "          try {",
+    "            redirectUrl = new URL(location, event.request.url).href;",
+    "            redirectAllowed = requestState?.allowed &&",
+    "              yellowbirdAgentAction?.action === \"visit\" &&",
+    "              yellowbirdAgentAction.navigationWindowOpen &&",
+    '              ["GET", "HEAD"].includes(event.request.method) &&',
+    "              yellowbirdAgentUrlAllowed(redirectUrl);",
+    "          } catch {}",
+    "          if (!redirectAllowed) {",
+    "            for (const url of [...(requestState?.urls || [event.request.url]), redirectUrl])",
+    "              yellowbirdBlockedUrls.add(url);",
+    "            yellowbirdMarkBlockedConsoleOccurrence(event.request.url);",
+    "            if (requestState?.occurrence)",
+    "              yellowbirdBlockedFetchOccurrences.add(requestState.occurrence);",
+    '            await yellowbirdCdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });',
+    "            return;",
+    "          }",
+    "        }",
+    '        await yellowbirdCdp.send("Fetch.continueResponse", { requestId: event.requestId });',
+    "        return;",
+    "      }",
+    "      const parent = event.redirectedRequestId ? yellowbirdCdpRequests.get(event.redirectedRequestId) : null;",
+    "      const pending = parent ? null : yellowbirdPendingCdpFetchOccurrences.get(event.request.url);",
+    "      const occurrence = parent?.occurrence || pending?.shift() || null;",
+    "      if (pending?.length === 0) yellowbirdPendingCdpFetchOccurrences.delete(event.request.url);",
+    "      const requestState = {",
+    "        occurrence,",
+    "        urls: [...(parent?.urls || []), event.request.url],",
+    "        allowed: false",
+    "      };",
+    "      yellowbirdCdpRequests.set(event.requestId, requestState);",
+    "      let actionAllowed = false;",
+    '      if (yellowbirdAgentAction?.action === "visit") {',
+    '        actionAllowed = event.resourceType === "Document"',
+    "          ? parent?.allowed || event.request.url === yellowbirdAgentAction.requestedUrl",
+    "          : yellowbirdAgentAction.navigationWindowOpen;",
+    "      }",
+    "      let sameOrigin = false;",
+    "      try { sameOrigin = new URL(event.request.url).origin === yellowbirdTarget.origin; } catch {}",
+    "      requestState.allowed = sameOrigin && actionAllowed &&",
+    '        ["GET", "HEAD"].includes(event.request.method) &&',
+    "        yellowbirdAgentUrlAllowed(event.request.url);",
+    "      if (!requestState.allowed) {",
+    "        for (const url of requestState.urls) yellowbirdBlockedUrls.add(url);",
+    "        yellowbirdMarkBlockedConsoleOccurrence(event.request.url);",
+    "        if (occurrence) yellowbirdBlockedFetchOccurrences.add(occurrence);",
+    '        await yellowbirdCdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });',
+    "        return;",
+    "      }",
+    '      await yellowbirdCdp.send("Fetch.continueRequest", { requestId: event.requestId, interceptResponse: true });',
+    "    } catch (error) {",
+    "      if (!/Target closed|Session closed/i.test(String(error?.message || error)))",
+    '        yellowbirdAgentViolation ||= { kind: "network-guard-failed", url: event.request.url };',
+    "    }",
+    "  });",
+    '  await yellowbirdCdp.send("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] });',
+    "  }",
+    '  if (!yellowbirdAgentMode) await page.context().route("**/*", async (route) => {',
     "    const request = route.request();",
     "    const requestUrl = request.url();",
     "    const requestMethod = request.method();",
@@ -531,29 +645,6 @@ function buildRegression(options, explorationSteps = []) {
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
     '        (!yellowbirdAgentMode || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl && safeAgentAction));',
     "    } catch {}",
-    '    if (allowed && yellowbirdAgentAction?.action === "visit") {',
-    "      let response;",
-    "      try {",
-    "        response = await route.fetch({ maxRedirects: 0 });",
-    "      } catch {",
-    '        return route.abort("failed");',
-    "      }",
-    '      const location = response.headers()["location"];',
-    "      if ([301, 302, 303, 307, 308].includes(response.status()) && location) {",
-    "        let redirectUrl = location;",
-    "        let safeRedirect = false;",
-    "        try {",
-    "          const parsedRedirect = new URL(location, requestUrl);",
-    "          redirectUrl = parsedRedirect.href;",
-    "          safeRedirect = yellowbirdAgentUrlAllowed(parsedRedirect.href);",
-    "        } catch {}",
-    "        if (!safeRedirect) {",
-    "          yellowbirdRecordBlockedRequest(request, redirectUrl);",
-    '          return route.abort("blockedbyclient");',
-    "        }",
-    "      }",
-    "      return route.fulfill({ response });",
-    "    }",
     "    if (allowed) return route.continue();",
     "    yellowbirdRecordBlockedRequest(request);",
     '    return route.abort("blockedbyclient");',
@@ -687,10 +778,10 @@ function buildRegression(options, explorationSteps = []) {
       lines.push(
         `  const ${response} = await yellowbirdRunAgentAction("visit", ${quoteForJavaScript(step.requestedUrl)}, async () => {`,
         `    const actionResponse = await page.goto(${quoteForJavaScript(step.requestedUrl)}, { waitUntil: "domcontentloaded" });`,
-        `    await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`,
         `    await page.waitForTimeout(${AGENT_NAVIGATION_SETTLEMENT_MS});`,
         "    return actionResponse;",
         "  });",
+        `  await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`,
         "  await page.waitForTimeout(100);",
         "  await yellowbirdAssertAgentGuard();"
       );
@@ -743,15 +834,14 @@ function buildRegression(options, explorationSteps = []) {
   if (!options.ignoreConsoleErrors) {
     lines.push(
       "  const yellowbirdProductConsoleErrors = consoleErrors.filter(entry =>",
-      "    !(entry.fetchFailureUrl && yellowbirdBlockedUrls.has(entry.fetchFailureUrl)) &&",
-      "    !(yellowbirdBlockedUrls.has(entry.location?.url) && /ERR_BLOCKED_BY_CLIENT/i.test(entry.text))",
+      "    !(entry.fetchFailureId && yellowbirdBlockedFetchOccurrences.has(entry.fetchFailureId))",
       "  );",
       "  expect(yellowbirdProductConsoleErrors).toEqual([]);"
     );
   }
   lines.push(
     "  const yellowbirdProductPageErrors = pageErrors.filter(entry =>",
-    "    !(entry.fetchFailureUrl && yellowbirdBlockedUrls.has(entry.fetchFailureUrl))",
+    "    !(entry.fetchFailureId && yellowbirdBlockedFetchOccurrences.has(entry.fetchFailureId))",
     "  );",
     "  expect(yellowbirdProductPageErrors).toEqual([]);"
   );
@@ -835,6 +925,17 @@ async function finalizeRun(state) {
       remediation: "Use an owner-declared scenario if this effect must be exercised."
     };
   }
+  if (options.exploreIntent && state.operationalIssues.length) {
+    state.exploration.status = "inconclusive";
+    state.exploration.coverage = state.exploration.steps.some(
+      (step) => step.status === "passed"
+    )
+      ? "partial"
+      : "blocked";
+    state.exploration.summary =
+      "Intent coverage could not be trusted because a browser safety guard failed.";
+    state.exploration.issue ||= state.operationalIssues[0];
+  }
   const findings = [];
   const setupIssues = [];
   if (!state.browserLaunch.successful) {
@@ -864,6 +965,11 @@ async function finalizeRun(state) {
   if (state.exploration.issue) {
     setupIssues.push(state.exploration.issue);
   }
+  setupIssues.push(
+    ...state.operationalIssues.filter(
+      (issue) => issue !== state.exploration.issue
+    )
+  );
 
   const productEvaluated = state.browserLaunch.successful && !state.navigationError;
   if (
@@ -888,14 +994,7 @@ async function finalizeRun(state) {
       });
     }
   }
-  const policyBlockedUrls = new Set(
-    blockedRequests.flatMap((request) => request.redirectChain || [])
-  );
-  const productConsoleErrors = consoleErrors.filter(
-    (entry) =>
-      !policyBlockedUrls.has(entry.location?.url) ||
-      !/ERR_BLOCKED_BY_CLIENT/i.test(entry.text)
-  );
+  const productConsoleErrors = consoleErrors;
   if (
     productEvaluated &&
     !options.ignoreConsoleErrors &&
@@ -1251,6 +1350,7 @@ export function createScoutRunner({
     workflowSteps: [],
     workflowFindings: [],
     invalidWorkflowSteps: [],
+    operationalIssues: [],
     exploration: {
       requested: exploreIntent,
       mode: exploreIntent ? "agent-safe-interaction" : "not-requested",
@@ -1347,9 +1447,33 @@ export function createScoutRunner({
     const agentGuardControlName = `__yellowbird_${randomUUID().replaceAll("-", "")}`;
     const agentGuardControlToken = randomUUID();
     const agentGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;
+    const agentFetchBindingName = `__yellowbird_${randomUUID().replaceAll("-", "")}`;
+    const agentFetchBindingToken = randomUUID();
+    const agentFetchOccurrencePrefix = `${randomUUID()}:`;
     const agentFetchFailurePrefix = `__yellowbird_fetch_failure__${randomUUID()}:`;
+    const pendingCdpAgentFetchOccurrences = new Map();
+    const blockedAgentFetchOccurrences = new Set();
+    const blockedConsoleOccurrences = new Map();
     const agentGuardAttempts = [];
     const observedAgentGuardAttempts = new Set();
+    await context.exposeBinding(
+      agentFetchBindingName,
+      (_source, candidateToken, occurrence) => {
+        if (
+          candidateToken !== agentFetchBindingToken ||
+          typeof occurrence?.id !== "string" ||
+          !occurrence.id.startsWith(agentFetchOccurrencePrefix) ||
+          typeof occurrence?.url !== "string"
+        ) {
+          return false;
+        }
+        const pendingCdp =
+          pendingCdpAgentFetchOccurrences.get(occurrence.url) || [];
+        pendingCdp.push(occurrence.id);
+        pendingCdpAgentFetchOccurrences.set(occurrence.url, pendingCdp);
+        return true;
+      }
+    );
     const redirectedRequestUrls = (request) => {
       const urls = [];
       for (let current = request; current; current = current.redirectedFrom()) {
@@ -1357,7 +1481,25 @@ export function createScoutRunner({
       }
       return urls;
     };
+    const markBlockedConsoleOccurrence = (url) => {
+      const pending = blockedConsoleOccurrences.get(url) || [];
+      pending.push(Date.now());
+      blockedConsoleOccurrences.set(url, pending);
+    };
+    const consumeBlockedConsoleOccurrence = (url) => {
+      const now = Date.now();
+      const pending = (blockedConsoleOccurrences.get(url) || []).filter(
+        (timestamp) => now - timestamp <= 2_000
+      );
+      const matched = pending.shift() !== undefined;
+      if (pending.length) blockedConsoleOccurrences.set(url, pending);
+      else blockedConsoleOccurrences.delete(url);
+      return matched;
+    };
     const addBlockedRequest = (request, interceptedRequest = null) => {
+      if (interceptedRequest) {
+        markBlockedConsoleOccurrence(interceptedRequest.url());
+      }
       const redirectChain = [
         ...(interceptedRequest
           ? redirectedRequestUrls(interceptedRequest)
@@ -1370,24 +1512,18 @@ export function createScoutRunner({
         redirectChain: [...new Set(redirectChain)]
       });
     };
-    const isBlockedAgentUrl = (url) =>
-      blockedRequests.some(
-        (request) =>
-          request.reason?.startsWith("agent-") &&
-          request.redirectChain.includes(url)
-      );
     const parseAgentFetchFailure = (detail) => {
       const text = String(detail || "");
       const markerIndex = text.indexOf(agentFetchFailurePrefix);
       if (markerIndex < 0) return null;
-      const encodedStart = markerIndex + agentFetchFailurePrefix.length;
-      const separator = text.indexOf(":", encodedStart);
-      if (separator < 0) return null;
       try {
-        return {
-          url: decodeURIComponent(text.slice(encodedStart, separator)),
-          message: text.slice(separator + 1) || "Failed to fetch"
-        };
+        const failure = JSON.parse(
+          text.slice(markerIndex + agentFetchFailurePrefix.length)
+        );
+        return typeof failure?.id === "string" &&
+          typeof failure?.url === "string"
+          ? failure
+          : null;
       } catch {
         return null;
       }
@@ -1471,7 +1607,7 @@ export function createScoutRunner({
       });
     });
 
-    await context.route("**/*", async (route) => {
+    if (!options.exploreIntent) await context.route("**/*", async (route) => {
       const requestUrl = route.request().url();
       const requestMethod = route.request().method();
       let requestOrigin;
@@ -1518,66 +1654,6 @@ export function createScoutRunner({
           (!agentNetworkPolicyActive ||
             (agentReadAllowed && agentUrlAllowed && agentActionAllowed)))
       ) {
-        if (
-          agentNetworkPolicyActive &&
-          agentActionContext?.action === "visit"
-        ) {
-          let response;
-          try {
-            response = await route.fetch({ maxRedirects: 0 });
-          } catch {
-            await route.abort("failed");
-            return;
-          }
-          const location = response.headers().location;
-          if (
-            [301, 302, 303, 307, 308].includes(response.status()) &&
-            location
-          ) {
-            let redirectUrl = location;
-            let redirectAllowed = false;
-            try {
-              const parsedRedirect = new URL(location, requestUrl);
-              redirectUrl = parsedRedirect.href;
-              redirectAllowed = isAgentUrlAllowed(
-                redirectUrl,
-                authorization.origin
-              );
-            } catch {}
-            if (!redirectAllowed) {
-              let redirectOrigin = "";
-              try {
-                redirectOrigin = new URL(redirectUrl).origin;
-              } catch {}
-              const reason =
-                redirectOrigin && redirectOrigin !== authorization.origin
-                  ? "agent-cross-origin"
-                  : "agent-prohibited-url";
-              addBlockedRequest({
-                method: requestMethod,
-                resourceType: route.request().resourceType(),
-                requestUrl: evidenceUrl(requestUrl),
-                url: evidenceUrl(redirectUrl),
-                reason
-              }, route.request());
-              record(
-                "warn",
-                "network.request.blocked",
-                "Blocked a redirect outside policy",
-                {
-                  method: requestMethod,
-                  resourceType: route.request().resourceType(),
-                  reason,
-                  ...diagnosticUrl(redirectUrl)
-                }
-              );
-              await route.abort("blockedbyclient");
-              return;
-            }
-          }
-          await route.fulfill({ response });
-          return;
-        }
         await route.continue();
         return;
       }
@@ -1616,7 +1692,10 @@ export function createScoutRunner({
       authorizedOrigin,
       controlName,
       controlToken,
+      fetchBindingName,
+      fetchBindingToken,
       fetchFailurePrefix,
+      fetchOccurrencePrefix,
       guardPrefix,
       prohibitedPattern,
       startActive
@@ -1625,7 +1704,9 @@ export function createScoutRunner({
       const canonicalizeSemanticText = (value) =>
         String(value ?? "")
           .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
-          .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+          .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+          .replaceAll(/([A-Za-z])([0-9])/g, "$1 $2")
+          .replaceAll(/([0-9])([A-Za-z])/g, "$1 $2");
       const decodeText = (value) => {
         let decoded = String(value ?? "");
         const maximumPasses = decoded.length + 1;
@@ -1693,14 +1774,23 @@ export function createScoutRunner({
         }
       };
       const originalFetch = globalThis.fetch.bind(globalThis);
+      const recordFetchOccurrence = globalThis[fetchBindingName].bind(globalThis);
+      let fetchSequence = 0;
       globalThis.fetch = async function (input, init) {
         let requestUrl = null;
+        const occurrenceId = `${fetchOccurrencePrefix}${++fetchSequence}`;
         try {
           requestUrl = new URL(
             input instanceof Request ? input.url : String(input),
             globalThis.location.href
           ).href;
         } catch {}
+        if (active && requestUrl) {
+          await recordFetchOccurrence(fetchBindingToken, {
+            id: occurrenceId,
+            url: requestUrl
+          });
+        }
         try {
           return await originalFetch(input, init);
         } catch (error) {
@@ -1708,7 +1798,7 @@ export function createScoutRunner({
           const message =
             error instanceof Error ? error.message : String(error || "Failed to fetch");
           throw new TypeError(
-            `${fetchFailurePrefix}${encodeURIComponent(requestUrl)}:${message}`
+            `${fetchFailurePrefix}${JSON.stringify({ id: occurrenceId, url: requestUrl, message })}`
           );
         }
       };
@@ -1761,7 +1851,10 @@ export function createScoutRunner({
       authorizedOrigin: authorization.origin,
       controlName: agentGuardControlName,
       controlToken: agentGuardControlToken,
+      fetchBindingName: agentFetchBindingName,
+      fetchBindingToken: agentFetchBindingToken,
       fetchFailurePrefix: agentFetchFailurePrefix,
+      fetchOccurrencePrefix: agentFetchOccurrencePrefix,
       guardPrefix: agentGuardPrefix,
       prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN,
       startActive: options.exploreIntent
@@ -1769,6 +1862,216 @@ export function createScoutRunner({
 
     const page = await context.newPage();
     page.setDefaultTimeout(options.timeoutMs);
+    if (options.exploreIntent) {
+    const agentCdpRequests = new Map();
+    const agentCdp = await context.newCDPSession(page);
+    agentCdp.on("Fetch.requestPaused", async (event) => {
+      try {
+        if (event.responseErrorReason !== undefined) {
+          try {
+            await agentCdp.send("Fetch.failRequest", {
+              requestId: event.requestId,
+              errorReason: event.responseErrorReason
+            });
+          } catch (error) {
+            if (!/Invalid InterceptionId/i.test(String(error?.message || error))) {
+              throw error;
+            }
+          }
+          return;
+        }
+        if (event.responseStatusCode !== undefined) {
+          const requestState = agentCdpRequests.get(event.requestId);
+          const location = event.responseHeaders?.find(
+            (header) => header.name.toLowerCase() === "location"
+          )?.value;
+          if (
+            [301, 302, 303, 307, 308].includes(event.responseStatusCode) &&
+            location &&
+            agentNetworkPolicyActive
+          ) {
+            let redirectUrl = location;
+            let redirectAllowed = false;
+            try {
+              redirectUrl = new URL(location, event.request.url).href;
+              redirectAllowed =
+                requestState?.allowed &&
+                agentActionContext?.action === "visit" &&
+                agentActionContext.navigationWindowOpen &&
+                ["GET", "HEAD"].includes(event.request.method) &&
+                isAgentUrlAllowed(redirectUrl, authorization.origin);
+            } catch {}
+            if (!redirectAllowed) {
+              let redirectOrigin = "";
+              try {
+                redirectOrigin = new URL(redirectUrl).origin;
+              } catch {}
+              const reason =
+                redirectOrigin && redirectOrigin !== authorization.origin
+                  ? "agent-cross-origin"
+                  : "agent-prohibited-url";
+              if (requestState?.occurrence) {
+                blockedAgentFetchOccurrences.add(requestState.occurrence);
+              }
+              markBlockedConsoleOccurrence(event.request.url);
+              const redirectChain = [
+                ...(requestState?.urls || [event.request.url]),
+                redirectUrl
+              ];
+              blockedRequests.push({
+                method: event.request.method,
+                resourceType: event.resourceType.toLowerCase(),
+                requestUrl: evidenceUrl(event.request.url),
+                url: evidenceUrl(redirectUrl),
+                reason,
+                redirectChain: [
+                  ...new Set(redirectChain.map((url) => evidenceUrl(url)))
+                ]
+              });
+              record(
+                "warn",
+                "network.request.blocked",
+                "Blocked a redirect outside policy",
+                {
+                  method: event.request.method,
+                  resourceType: event.resourceType.toLowerCase(),
+                  reason,
+                  ...diagnosticUrl(redirectUrl)
+                }
+              );
+              await agentCdp.send("Fetch.failRequest", {
+                requestId: event.requestId,
+                errorReason: "BlockedByClient"
+              });
+              return;
+            }
+          }
+          await agentCdp.send("Fetch.continueResponse", {
+            requestId: event.requestId
+          });
+          return;
+        }
+        const parent = event.redirectedRequestId
+          ? agentCdpRequests.get(event.redirectedRequestId)
+          : null;
+        const pending = parent
+          ? null
+          : pendingCdpAgentFetchOccurrences.get(event.request.url);
+        const occurrence = parent?.occurrence || pending?.shift() || null;
+        if (pending?.length === 0) {
+          pendingCdpAgentFetchOccurrences.delete(event.request.url);
+        }
+        const requestState = {
+          occurrence,
+          urls: [...(parent?.urls || []), event.request.url],
+          allowed: false
+        };
+        agentCdpRequests.set(event.requestId, requestState);
+        let agentActionAllowed = false;
+        if (agentActionContext?.action === "visit") {
+          agentActionAllowed =
+            event.resourceType === "Document"
+              ? parent?.allowed ||
+                event.request.url === agentActionContext.requestedUrl
+              : agentActionContext.navigationWindowOpen;
+        }
+        let requestOrigin = "";
+        try {
+          requestOrigin = new URL(event.request.url).origin;
+        } catch {}
+        const sameOrigin = requestOrigin === authorization.origin;
+        const readAllowed = ["GET", "HEAD"].includes(event.request.method);
+        const urlAllowed = isAgentUrlAllowed(
+          event.request.url,
+          authorization.origin
+        );
+        requestState.allowed =
+          sameOrigin && readAllowed && urlAllowed && agentActionAllowed;
+        if (!requestState.allowed) {
+          let reason = "agent-non-read-method";
+          if (!sameOrigin) reason = "agent-cross-origin";
+          else if (readAllowed && !urlAllowed) reason = "agent-prohibited-url";
+          else if (readAllowed && agentActionContext?.action === "visit") {
+            reason =
+              event.resourceType === "Document"
+                ? "agent-navigation-outside-visit"
+                : "agent-active-request";
+          } else if (readAllowed) reason = "agent-non-visit-request";
+          if (occurrence) blockedAgentFetchOccurrences.add(occurrence);
+          markBlockedConsoleOccurrence(event.request.url);
+          blockedRequests.push({
+            method: event.request.method,
+            resourceType: event.resourceType.toLowerCase(),
+            requestUrl: evidenceUrl(parent?.urls.at(-1) || event.request.url),
+            url: evidenceUrl(event.request.url),
+            reason,
+            redirectChain: [
+              ...new Set(requestState.urls.map((url) => evidenceUrl(url)))
+            ]
+          });
+          record(
+            "warn",
+            "network.request.blocked",
+            event.redirectedRequestId
+              ? "Blocked a redirected request outside policy"
+              : "Blocked a request outside policy",
+            {
+              method: event.request.method,
+              resourceType: event.resourceType.toLowerCase(),
+              reason,
+              ...diagnosticUrl(event.request.url)
+            }
+          );
+          await agentCdp.send("Fetch.failRequest", {
+            requestId: event.requestId,
+            errorReason: "BlockedByClient"
+          });
+          return;
+        }
+        await agentCdp.send("Fetch.continueRequest", {
+          requestId: event.requestId,
+          interceptResponse: true
+        });
+      } catch (error) {
+        if (!/Target closed|Session closed/i.test(String(error?.message || error))) {
+          const detail = cleanDiagnosticText(error?.message || error);
+          if (
+            !state.operationalIssues.some(
+              (issue) => issue.id === "browser-network-guard-failed"
+            )
+          ) {
+            state.operationalIssues.push({
+              id: "browser-network-guard-failed",
+              classification: "test-mechanics",
+              title: "The browser redirect safety guard failed.",
+              evidence: detail,
+              remediation:
+                "Rerun the scout. If the guard fails again, report the diagnostics and use an owner-declared scenario."
+            });
+          }
+          record(
+            "error",
+            "browser.network-guard.failed",
+            "The browser redirect guard failed",
+            {
+              detail,
+              resourceType: event.resourceType.toLowerCase(),
+              stage:
+                event.responseStatusCode === undefined &&
+                event.responseErrorReason === undefined
+                  ? "request"
+                  : "response",
+              responseErrorReason: event.responseErrorReason || null,
+              ...diagnosticUrl(event.request.url)
+            }
+          );
+        }
+      }
+    });
+    await agentCdp.send("Fetch.enable", {
+      patterns: [{ urlPattern: "*", requestStage: "Request" }]
+    });
+    }
     page.on("console", (message) => {
       const text = message.text();
       if (text.startsWith(agentGuardPrefix)) {
@@ -1781,12 +2084,28 @@ export function createScoutRunner({
       }
       if (message.type() === "error") {
         const fetchFailure = parseAgentFetchFailure(text);
-        if (fetchFailure && isBlockedAgentUrl(fetchFailure.url)) {
+        if (
+          fetchFailure &&
+          blockedAgentFetchOccurrences.has(fetchFailure.id)
+        ) {
           record(
             "debug",
             "browser.console.error.policy-blocked",
             "Correlated a console error with a blocked agent effect",
             diagnosticUrl(fetchFailure.url)
+          );
+          return;
+        }
+        if (
+          !fetchFailure &&
+          /ERR_BLOCKED_BY_CLIENT/i.test(text) &&
+          consumeBlockedConsoleOccurrence(message.location().url)
+        ) {
+          record(
+            "debug",
+            "browser.console.error.policy-blocked",
+            "Correlated a console error with one blocked request",
+            diagnosticUrl(message.location().url || options.target)
           );
           return;
         }
@@ -1805,7 +2124,10 @@ export function createScoutRunner({
     });
     page.on("pageerror", (error) => {
       const fetchFailure = parseAgentFetchFailure(error.message);
-      if (fetchFailure && isBlockedAgentUrl(fetchFailure.url)) {
+      if (
+        fetchFailure &&
+        blockedAgentFetchOccurrences.has(fetchFailure.id)
+      ) {
         record(
           "debug",
           "browser.page.error.policy-blocked",

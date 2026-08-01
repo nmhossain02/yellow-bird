@@ -95,7 +95,9 @@ function decodeAgentText(value) {
 function canonicalizeAgentSemanticText(value) {
   return String(value ?? "")
     .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replaceAll(/([A-Za-z])([0-9])/g, "$1 $2")
+    .replaceAll(/([0-9])([A-Za-z])/g, "$1 $2");
 }
 
 function hasProhibitedAgentText(value) {
@@ -245,7 +247,9 @@ async function snapshotPage(page, authorizedOrigin) {
     const canonicalizeSemanticText = (value) =>
       String(value ?? "")
         .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
-        .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+        .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+        .replaceAll(/([A-Za-z])([0-9])/g, "$1 $2")
+        .replaceAll(/([0-9])([A-Za-z])/g, "$1 $2");
     const decodeText = (value) => {
       let decoded = String(value ?? "");
       const maximumPasses = decoded.length + 1;
