@@ -134,7 +134,7 @@
     },
     "observations": {
       "type": "object",
-      "required": ["browser", "navigation", "workflowSteps"],
+      "required": ["browser", "navigation", "workflowSteps", "exploration"],
       "properties": {
         "browser": {
           "type": "object",

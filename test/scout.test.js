@@ -1328,6 +1328,109 @@ test("action cleanup runs after a failed begin without masking its error", async
   }
 });
 
+test("action cleanup failure preserves completed exploration evidence", async () => {
+  const context = await sharedBrowser.newContext();
+  const page = await context.newPage();
+  let cleanupCalls = 0;
+  try {
+    await page.goto(`${target}/agent-redirect-surface`);
+    const exploration = await exploreIntentWithEngine({
+      page,
+      intent: "Assess the setup route",
+      authorizedOrigin: target,
+      engine: {
+        completeStructured: async (request) => {
+          const availableElements = JSON.parse(
+            request.messages.at(-1).content
+          ).page.availableElements;
+          return {
+            output: {
+              action: "act",
+              elementRef: availableElements[0].ref,
+              value: null,
+              rationale: "Inspect the supplied route.",
+              coverage: "continue",
+              summary: ""
+            }
+          };
+        }
+      },
+      maxSteps: 1,
+      timeoutMs: 1_000,
+      record: () => {},
+      actionPolicy: {
+        async begin() {},
+        async end() {
+          cleanupCalls += 1;
+          throw new Error("cleanup failure");
+        }
+      }
+    });
+
+    assert.equal(cleanupCalls, 1);
+    assert.equal(exploration.status, "inconclusive");
+    assert.equal(exploration.coverage, "partial");
+    assert.equal(exploration.issue.id, "agent-action-cleanup-failed");
+    assert.equal(exploration.steps.length, 1);
+    assert.equal(exploration.steps[0].status, "passed");
+  } finally {
+    await context.close();
+  }
+});
+
+test("later invalid planner output preserves partial coverage", async () => {
+  const context = await sharedBrowser.newContext();
+  const page = await context.newPage();
+  let planningCalls = 0;
+  try {
+    await page.goto(`${target}/agent-redirect-surface`);
+    const exploration = await exploreIntentWithEngine({
+      page,
+      intent: "Assess the setup route",
+      authorizedOrigin: target,
+      engine: {
+        completeStructured: async (request) => {
+          planningCalls += 1;
+          if (planningCalls > 1) return { output: { action: "invalid" } };
+          const availableElements = JSON.parse(
+            request.messages.at(-1).content
+          ).page.availableElements;
+          return {
+            output: {
+              action: "act",
+              elementRef: availableElements[0].ref,
+              value: null,
+              rationale: "Inspect the supplied route.",
+              coverage: "continue",
+              summary: ""
+            }
+          };
+        }
+      },
+      maxSteps: 2,
+      timeoutMs: 1_000,
+      record: () => {}
+    });
+
+    assert.equal(planningCalls, 2);
+    assert.equal(exploration.status, "inconclusive");
+    assert.equal(exploration.coverage, "partial");
+    assert.equal(exploration.issue.id, "agent-output-invalid");
+    assert.equal(exploration.steps.length, 1);
+    assert.equal(exploration.steps[0].status, "passed");
+  } finally {
+    await context.close();
+  }
+});
+
+test("v2 evidence schema requires exploration observations", async () => {
+  const schema = JSON.parse(
+    await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
+  );
+
+  assert.ok(schema.properties.observations.required.includes("exploration"));
+});
+
 test("workflow capabilities must be declared before a run", () => {
   assert.throws(
     () =>

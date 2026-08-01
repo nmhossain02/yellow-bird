@@ -550,10 +550,14 @@ function completedExploration({
   issue,
   verification = null
 }) {
-  const completed = coverage === "covered";
+  const normalizedCoverage =
+    coverage === "blocked" && steps.some((step) => step.status === "passed")
+      ? "partial"
+      : coverage;
+  const completed = normalizedCoverage === "covered";
   return {
     status: completed ? "completed" : "inconclusive",
-    coverage,
+    coverage: normalizedCoverage,
     summary,
     steps,
     pages,
@@ -563,7 +567,7 @@ function completedExploration({
       : issue || mechanicsIssue(
           "agent-intent-not-fully-covered",
           "The bounded agent could not fully cover the requested intent.",
-          summary || `Agent coverage ended as ${coverage}`,
+          summary || `Agent coverage ended as ${normalizedCoverage}`,
           "Grant a suitable deterministic scenario or refine the intent to fit safe, non-submitting browser interaction."
         )
   };
@@ -897,6 +901,7 @@ export async function exploreIntentWithEngine({
     });
     let actionPolicyAttempted = false;
     let actionFailed = false;
+    let cleanupError = null;
     let navigationAttempted = false;
     let response = null;
     try {
@@ -1013,9 +1018,30 @@ export async function exploreIntentWithEngine({
         try {
           await actionPolicy.end();
         } catch (error) {
-          if (!actionFailed) throw error;
+          if (!actionFailed) cleanupError = error;
         }
       }
+    }
+    if (cleanupError) {
+      const detail = safeDetail(cleanupError?.message || cleanupError);
+      record(
+        "error",
+        "agent.action.cleanup.failed",
+        "The authorized interaction cleanup failed",
+        { id, action, detail }
+      );
+      return completedExploration({
+        coverage: "blocked",
+        summary: "An agent interaction completed, but its cleanup could not be confirmed.",
+        steps,
+        pages,
+        issue: mechanicsIssue(
+          "agent-action-cleanup-failed",
+          "An authorized agent interaction could not be cleaned up safely.",
+          detail,
+          "Review the browser safety guard diagnostics, then rerun the exploration."
+        )
+      });
     }
   }
 
