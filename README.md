@@ -52,11 +52,10 @@ bun run scout -- \
 
 The scout reports `attention` and exits `2` when it finds product failures, or
 reports `inconclusive` and exits `3` when test mechanics prevent a trustworthy
-result. Product findings normally take precedence when both occur. A browser
-network-guard failure or a popup or worker created during intent exploration
-instead forces exit `3` because the evidence boundary cannot be trusted. Invalid
-input or configuration and evidence-bundle persistence failures remain fatal and
-exit `1`. Runs that reach finalization write an evidence bundle under
+result. Product findings take precedence when both occur, while the mechanics
+issue remains explicit in the report. Invalid input or configuration and
+evidence-bundle persistence failures remain fatal and exit `1`. Runs that reach
+finalization write an evidence bundle under
 `.yellowbird/scout/<run-id>/`:
 
 - `report.md` - human-readable findings, reproduction steps, and coverage gaps
@@ -148,6 +147,10 @@ lifecycle events retained in `diagnostics.jsonl`. Exit `0` means no failure was
 observed within the tested scope; consult the coverage gaps before treating that
 as broader product health.
 
+The repository also provides an authenticated local validation against the real
+Price Scout checkout and its portable replay. See
+[`docs/validation/price-scout-e2e.md`](./docs/validation/price-scout-e2e.md).
+
 ## Scout safety boundary
 
 The alpha accepts only `localhost`, `127.0.0.1`, and `::1`. Browser requests are
@@ -203,7 +206,8 @@ The generated regression re-enforces the live scout's exact-origin, read-only,
 redirect, and 150 ms visit-settlement guards, including submission and outbound
 WebSocket blocking, without calling the model. Recorded non-navigation actions
 also replay through verified locators and assert their match counts before using
-the recorded ordinal.
+the recorded ordinal. It also fails for the same exact-origin HTTP response and
+request failures that produce live product findings.
 
 Fetch errors caused by policy enforcement are correlated to the exact blocked
 request occurrence and excluded from product-failure evidence. Independent
@@ -239,6 +243,11 @@ inject a browser launcher with `createScoutRunner({ launchBrowser })`;
 `runScout(input)` uses the real Playwright Chromium launcher. The runner's
 `timeoutMs` input defaults to 15 seconds and is passed to Playwright when Chromium
 launches.
+
+An isolated browser-context creation failure is also finalized as
+`inconclusive`. The report marks navigation and declared workflow steps skipped,
+keeps the screenshot artifact `null`, and retains an actionable operational
+diagnostic.
 
 ## Run the dashboard
 

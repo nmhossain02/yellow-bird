@@ -76,11 +76,11 @@ async function runCommand(command, cwd, env) {
   }
 }
 
-async function startPriceScoutTarget() {
+async function startIntentFlowTarget() {
   const child = Bun.spawn({
     cmd: [
       process.execPath,
-      resolve("test/fixtures/price-scout/server.js")
+      resolve("test/fixtures/intent-flow/server.js")
     ],
     cwd: resolve("."),
     stdout: "pipe",
@@ -93,7 +93,7 @@ async function startPriceScoutTarget() {
     const { done, value } = await reader.read();
     if (done) {
       const stderr = await new Response(child.stderr).text();
-      throw new Error(`Price Scout target exited before startup: ${stderr}`);
+      throw new Error(`Intent flow target exited before startup: ${stderr}`);
     }
     output += decoder.decode(value, { stream: true });
   }
@@ -327,6 +327,15 @@ beforeAll(async () => {
         </html>`);
       return;
     }
+    if (request.url === "/agent-product-http-error") {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "catalog unavailable" }));
+      return;
+    }
+    if (request.url === "/agent-product-network-failure") {
+      request.socket.destroy();
+      return;
+    }
     const failing = request.url === "/failing";
     const agentFlow = request.url?.startsWith("/agent-flow");
     const staticPage = request.url?.startsWith("/static");
@@ -397,6 +406,18 @@ beforeAll(async () => {
     );
     const httpErrorSurface = request.url?.startsWith(
       "/agent-http-error-surface"
+    );
+    const productHttpErrorSurface = request.url?.startsWith(
+      "/agent-product-http-error-surface"
+    );
+    const productHttpErrorDestination = request.url?.startsWith(
+      "/agent-product-http-error-destination"
+    );
+    const productNetworkFailureSurface = request.url?.startsWith(
+      "/agent-product-network-failure-surface"
+    );
+    const productNetworkFailureDestination = request.url?.startsWith(
+      "/agent-product-network-failure-destination"
     );
     const relatedTargetSurface = request.url?.startsWith(
       "/agent-related-target-surface"
@@ -776,6 +797,44 @@ beforeAll(async () => {
         </html>`);
       return;
     }
+    if (productHttpErrorSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Product response health</title></head>
+          <body><a href="/agent-product-http-error-destination">Inspect catalog</a></body>
+        </html>`);
+      return;
+    }
+    if (productHttpErrorDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Catalog response health</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <script>fetch("/agent-product-http-error").catch(() => {});</script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (productNetworkFailureSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Product request health</title></head>
+          <body><a href="/agent-product-network-failure-destination">Inspect catalog</a></body>
+        </html>`);
+      return;
+    }
+    if (productNetworkFailureDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Catalog request health</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <script>fetch("/agent-product-network-failure").catch(() => {});</script>
+          </body>
+        </html>`);
+      return;
+    }
     if (relatedTargetSurface) {
       response.end(`<!doctype html>
         <html>
@@ -784,6 +843,7 @@ beforeAll(async () => {
             <button id="preview" type="button">View related details</button>
             <script>
               document.querySelector("#preview").addEventListener("click", () => {
+                Promise.reject(new Error("Related target product failure"));
                 const effectUrl = location.origin + "/agent-related-target-effect";
                 const source = "fetch(" + JSON.stringify(effectUrl) + ", { method: 'POST' })";
                 new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
@@ -1331,6 +1391,72 @@ test("browser launch failure finalizes an inconclusive run", async () => {
     ["browser.launch.failed", "run.completed"]
   );
   assert.doesNotMatch(JSON.stringify(events), /secret=hidden/);
+});
+
+test("browser context creation failure finalizes an inconclusive run", async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-context-"));
+  let browserClosed = false;
+  const runWithUnavailableContext = createScoutRunner({
+    launchBrowser: async () => ({
+      async newContext() {
+        throw new Error(
+          `context setup failed at ${target}/?token=hidden-value`
+        );
+      },
+      async close() {
+        browserClosed = true;
+      }
+    })
+  });
+
+  const report = await runWithUnavailableContext({
+    target,
+    permissions: ["browser.navigate", "browser.read", "browser.click"],
+    steps: [{ id: "checkout", action: "click", selector: "#checkout" }],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(browserClosed, true);
+  assert.deepEqual(report.findings, []);
+  assert.equal(
+    report.invalidTestMechanics[0].id,
+    "browser-context-creation-failed"
+  );
+  assert.equal(report.observations.browser.launch.successful, true);
+  assert.equal(report.observations.navigation.status, "skipped");
+  assert.equal(
+    report.observations.navigation.reason,
+    "browser-context-unavailable"
+  );
+  assert.deepEqual(
+    report.observations.workflowSteps.map(({ status, reason }) => ({
+      status,
+      reason
+    })),
+    [{ status: "skipped", reason: "browser-context-unavailable" }]
+  );
+  assert.equal(report.artifacts.screenshot, null);
+  await assert.rejects(stat(join(outputDirectory, "page.png")));
+  await Promise.all(
+    Object.entries(report.artifacts)
+      .filter(([name]) => name !== "screenshot")
+      .map(([, path]) => stat(path))
+  );
+  const schema = JSON.parse(
+    await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
+  );
+  assertConformsToSchema(schema, report);
+  const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
+  const events = diagnostics
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    events.slice(-2).map((event) => event.event),
+    ["browser.context.failed", "run.completed"]
+  );
+  assert.doesNotMatch(diagnostics, /hidden-value/);
 });
 
 test("a browser network guard failure cannot produce a clear report", async () => {
@@ -2228,6 +2354,92 @@ test("agent replay rejects a destination HTTP error found live", async () => {
   assert.notEqual(replay.exitCode, 0, "Replay must retain the HTTP health invariant");
 }, 30_000);
 
+async function assertAuthorizedRuntimeFailureReplay({
+  findingId,
+  observedPath,
+  surfacePath
+}) {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-product-runtime-errors-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Inspect the supplied catalog route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The catalog runtime signals were observed.",
+          coverage: "partial",
+          summary: "The catalog runtime signals were observed."
+        };
+  })({
+    target: `${target}${surfacePath}`,
+    intent: "Assess catalog runtime health",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "attention");
+  assert.ok(report.findings.some((finding) => finding.id === findingId));
+  assert.equal(
+    report.findings.some(
+      (finding) =>
+        finding.id ===
+        (findingId === "http-errors" ? "failed-requests" : "http-errors")
+    ),
+    false
+  );
+  assert.ok(
+    [...report.observations.serverErrors, ...report.observations.failedRequests]
+      .some((entry) => entry.url === `${target}${observedPath}`)
+  );
+
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.notEqual(
+    replay.exitCode,
+    0,
+    "Replay must preserve live response and request failure invariants"
+  );
+  assert.match(
+    `${replay.stdout}\n${replay.stderr}`,
+    new RegExp(observedPath.slice(1))
+  );
+}
+
+test("agent replay preserves an authorized subresource HTTP error", async () => {
+  await assertAuthorizedRuntimeFailureReplay({
+    findingId: "http-errors",
+    observedPath: "/agent-product-http-error",
+    surfacePath: "/agent-product-http-error-surface"
+  });
+}, 30_000);
+
+test("agent replay preserves an authorized request failure", async () => {
+  await assertAuthorizedRuntimeFailureReplay({
+    findingId: "failed-requests",
+    observedPath: "/agent-product-network-failure",
+    surfacePath: "/agent-product-network-failure-surface"
+  });
+}, 30_000);
+
 test("agent cannot select a form-submit control omitted by policy", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-policy-")
@@ -2754,7 +2966,7 @@ test("cross-origin effects attempted during exploration are inconclusive", async
   );
 });
 
-test("context policy guards popup and worker request targets", async () => {
+test("product findings take precedence when related targets make coverage inconclusive", async () => {
   relatedTargetEffectCount = 0;
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-related-targets-")
@@ -2790,7 +3002,13 @@ test("context policy guards popup and worker request targets", async () => {
   });
 
   assert.equal(relatedTargetEffectCount, 0);
-  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.outcome, "attention");
+  assert.ok(report.findings.some((finding) => finding.id === "page-errors"));
+  assert.ok(
+    report.invalidTestMechanics.some(
+      (issue) => issue.id === "browser-related-target-created"
+    )
+  );
   assert.ok(
     report.observations.blockedRequests.some(
       (request) =>
@@ -3300,13 +3518,13 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
   }
 });
 
-test("Price Scout intent flow runs end to end including replay", async () => {
-  const priceScout = await startPriceScoutTarget();
+test("standalone intent fixture runs end to end including replay", async () => {
+  const intentFlow = await startIntentFlowTarget();
   let plannerCalls = 0;
   const engineServer = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
     if (request.method === "GET" && request.url === "/v1/models") {
-      response.end(JSON.stringify({ data: [{ id: "price-scout-planner" }] }));
+      response.end(JSON.stringify({ data: [{ id: "intent-flow-planner" }] }));
       return;
     }
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
@@ -3326,7 +3544,7 @@ test("Price Scout intent flow runs end to end including replay", async () => {
               action: "act",
               elementRef: "element-1",
               value: null,
-              rationale: "Open the Price Scout watch preview.",
+              rationale: "Open the supplied watch preview.",
               coverage: "continue",
               summary: ""
             }
@@ -3335,7 +3553,7 @@ test("Price Scout intent flow runs end to end including replay", async () => {
                 action: "act",
                 elementRef: "element-1",
                 value: null,
-                rationale: "Exercise the product URL field safely.",
+                rationale: "Exercise the item URL field safely.",
                 coverage: "continue",
                 summary: ""
               }
@@ -3343,13 +3561,13 @@ test("Price Scout intent flow runs end to end including replay", async () => {
                 action: "finish",
                 elementRef: null,
                 value: null,
-                rationale: "The Price Scout preview flow was inspected.",
+                rationale: "The fixture preview flow was inspected.",
                 coverage: "covered",
-                summary: "The Price Scout preview flow was inspected."
+                summary: "The fixture preview flow was inspected."
               };
     response.end(
       JSON.stringify({
-        model: "price-scout-planner",
+        model: "intent-flow-planner",
         choices: [
           {
             finish_reason: "stop",
@@ -3366,7 +3584,7 @@ test("Price Scout intent flow runs end to end including replay", async () => {
 
   try {
     const outputDirectory = await mkdtemp(
-      join(tmpdir(), "yellowbird-price-scout-e2e-")
+      join(tmpdir(), "yellowbird-intent-flow-e2e-")
     );
     const result = await runCommand(
       [
@@ -3374,15 +3592,15 @@ test("Price Scout intent flow runs end to end including replay", async () => {
         resolve("bin/yellowbird.js"),
         "scout",
         "--target",
-        priceScout.url,
+        intentFlow.url,
         "--intent",
         "Assess the initial interface and basic user flow",
         "--expect-title",
-        "Price Scout",
+        "Intent flow fixture",
         "--engine-base-url",
         `http://127.0.0.1:${engineServer.address().port}/v1`,
         "--engine-model",
-        "price-scout-planner",
+        "intent-flow-planner",
         "--output",
         outputDirectory
       ],
@@ -3406,7 +3624,7 @@ test("Price Scout intent flow runs end to end including replay", async () => {
     );
     assert.equal(
       evidence.observations.exploration.steps[0].url,
-      `${priceScout.url}/watch`
+      `${intentFlow.url}/watch`
     );
 
     const install = await runCommand(
@@ -3423,7 +3641,7 @@ test("Price Scout intent flow runs end to end including replay", async () => {
     await new Promise((resolve, reject) => {
       engineServer.close((error) => (error ? reject(error) : resolve()));
     });
-    await priceScout.close();
+    await intentFlow.close();
   }
 }, 30_000);
 

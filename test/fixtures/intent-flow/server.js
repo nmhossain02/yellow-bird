@@ -10,12 +10,12 @@ const server = createServer((request, response) => {
   if (request.url === "/") {
     response.end(`<!doctype html>
       <html>
-        <head><title>Price Scout</title></head>
+        <head><title>Intent flow fixture</title></head>
         <body>
           <main>
-            <h1>Price Scout</h1>
-            <p>Review a product and preview a price watch.</p>
-            <a href="/watch">Track a price</a>
+            <h1>Intent flow fixture</h1>
+            <p>Review an item and preview a watch.</p>
+            <a href="/watch">Track an item</a>
           </main>
         </body>
       </html>`);
@@ -24,13 +24,13 @@ const server = createServer((request, response) => {
   if (request.url === "/watch") {
     response.end(`<!doctype html>
       <html>
-        <head><title>Price Scout watch</title></head>
+        <head><title>Intent flow fixture watch</title></head>
         <body>
           <main>
-            <h1>Preview a price watch</h1>
-            <p>Enter public product details for a read-only preview.</p>
-            <label>Product URL <input name="product-url" type="url"></label>
-            <label>Target price <input name="target-price" type="number"></label>
+            <h1>Preview a watch</h1>
+            <p>Enter public item details for a read-only preview.</p>
+            <label>Item URL <input name="item-url" type="url"></label>
+            <label>Target value <input name="target-value" type="number"></label>
             <label>Currency
               <select name="currency">
                 <option value="USD">USD</option>

@@ -18,6 +18,10 @@ function redactUrlValues(value) {
   });
 }
 
+export function sanitizeDiagnosticText(value) {
+  return redactUrlValues(cleanDiagnosticText(value));
+}
+
 export function diagnosticUrl(value) {
   try {
     const url = new URL(value);
@@ -168,7 +172,7 @@ export async function resolveLoopbackScheme(
 }
 
 export function diagnoseNavigationError(error, target) {
-  const detail = redactUrlValues(cleanDiagnosticText(error));
+  const detail = sanitizeDiagnosticText(error);
   const lower = detail.toLowerCase();
   if (lower.includes("err_ssl_protocol_error")) {
     const suggestedTarget = diagnosticUrl(
@@ -223,7 +227,7 @@ export function diagnoseNavigationError(error, target) {
 }
 
 export function diagnoseBrowserLaunchError(error) {
-  const detail = redactUrlValues(cleanDiagnosticText(error));
+  const detail = sanitizeDiagnosticText(error);
   const lower = detail.toLowerCase();
   if (
     lower.includes("executable doesn't exist") ||

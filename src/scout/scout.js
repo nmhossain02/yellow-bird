@@ -9,7 +9,8 @@ import {
   diagnoseBrowserLaunchError,
   diagnoseNavigationError,
   diagnosticUrl,
-  resolveLoopbackScheme
+  resolveLoopbackScheme,
+  sanitizeDiagnosticText
 } from "./diagnostics.js";
 import {
   resolveAgentEngine,
@@ -308,6 +309,8 @@ function buildRegression(options, explorationSteps = []) {
     `test(${quoteForJavaScript(`YellowBird scout: ${options.intent}`)}, async ({ page }) => {`,
     "  const consoleErrors = [];",
     "  const pageErrors = [];",
+    "  const failedRequests = [];",
+    "  const serverErrors = [];",
     "  const yellowbirdGuardControlName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
     "  const yellowbirdGuardControlToken = randomUUID();",
     "  const yellowbirdGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;",
@@ -318,6 +321,7 @@ function buildRegression(options, explorationSteps = []) {
     "  const yellowbirdFetchFailurePrefix = `__yellowbird_fetch_failure__${randomUUID()}:`;",
     "  let yellowbirdFetchOccurrenceSequence = 0;",
     "  const yellowbirdBlockedFetchOccurrences = new Set();",
+    "  const yellowbirdBlockedRequests = new WeakSet();",
     "  const yellowbirdFetchOccurrencesByRequest = new WeakMap();",
     "  const yellowbirdBlockedConsoleOccurrences = new Map();",
     "  const yellowbirdMarkBlockedConsoleOccurrence = url => {",
@@ -389,6 +393,18 @@ function buildRegression(options, explorationSteps = []) {
     '  yellowbirdTargetRequestUrl.hash = "";',
     `  const yellowbirdAgentMode = ${options.exploreIntent};`,
     "  const yellowbirdBlockedUrls = new Set();",
+    "  const yellowbirdSameOrigin = value => {",
+    "    try { return new URL(value).origin === yellowbirdTarget.origin; }",
+    "    catch { return false; }",
+    "  };",
+    '  page.on("requestfailed", request => {',
+    "    if (yellowbirdSameOrigin(request.url()) && !yellowbirdBlockedRequests.has(request))",
+    "      failedRequests.push({ method: request.method(), url: request.url(), reason: request.failure()?.errorText || \"unknown\" });",
+    "  });",
+    '  page.on("response", response => {',
+    "    if (yellowbirdSameOrigin(response.url()) && response.status() >= 400)",
+    "      serverErrors.push({ status: response.status(), url: response.url() });",
+    "  });",
     "  let yellowbirdAgentAction = yellowbirdAgentMode ? {",
     '    action: "visit",',
     "    requestedUrl: yellowbirdTargetRequestUrl.href,",
@@ -556,6 +572,7 @@ function buildRegression(options, explorationSteps = []) {
     "    const occurrence = yellowbirdFetchOccurrencesByRequest.get(request);",
     "    if (typeof occurrence === \"string\" && occurrence.startsWith(yellowbirdFetchOccurrencePrefix))",
     "      yellowbirdBlockedFetchOccurrences.add(occurrence);",
+    "    yellowbirdBlockedRequests.add(request);",
     "    yellowbirdMarkBlockedConsoleOccurrence(request.url());",
     "  };",
     "  if (yellowbirdAgentMode) {",
@@ -564,9 +581,6 @@ function buildRegression(options, explorationSteps = []) {
     '  yellowbirdCdp.on("Fetch.requestPaused", async event => {',
     "    try {",
     "      if (event.responseErrorReason !== undefined) {",
-    "        const requestState = yellowbirdCdpRequests.get(event.requestId);",
-    "        if (requestState?.occurrence)",
-    "          yellowbirdBlockedFetchOccurrences.add(requestState.occurrence);",
     "        try {",
     '          await yellowbirdCdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: event.responseErrorReason });',
     "        } catch (error) {",
@@ -618,10 +632,8 @@ function buildRegression(options, explorationSteps = []) {
     "      };",
     "      yellowbirdCdpRequests.set(event.requestId, requestState);",
     "      const continueRequest = { requestId: event.requestId, interceptResponse: true };",
-    "      if (occurrenceHeader !== undefined)",
-    "        continueRequest.headers = Object.entries(event.request.headers)",
-    "          .filter(([name]) => name.toLowerCase() !== yellowbirdFetchOccurrenceHeader)",
-    "          .map(([name, value]) => ({ name, value }));",
+    "      // Keep the private occurrence header until the Playwright route sees it.",
+    "      // The route strips it before the request reaches the product.",
     '      await yellowbirdCdp.send("Fetch.continueRequest", continueRequest);',
     "    } catch (error) {",
     "      if (!/Target closed|Session closed/i.test(String(error?.message || error)))",
@@ -870,7 +882,10 @@ function buildRegression(options, explorationSteps = []) {
     "  const yellowbirdProductPageErrors = pageErrors.filter(entry =>",
     "    !(entry.fetchFailureId && yellowbirdBlockedFetchOccurrences.has(entry.fetchFailureId))",
     "  );",
-    "  expect(yellowbirdProductPageErrors).toEqual([]);"
+    "  expect(yellowbirdProductPageErrors).toEqual([]);",
+    "  expect(failedRequests).toEqual([]);",
+    "  const yellowbirdSubresourceServerErrors = serverErrors.filter(entry => entry.url !== yellowbirdTarget.href);",
+    "  expect(yellowbirdSubresourceServerErrors).toEqual([]);"
   );
   lines.push("});", "");
   return lines.join("\n");
@@ -956,6 +971,9 @@ async function finalizeRun(state) {
     const networkGuardIssue = state.operationalIssues.find(
       (issue) => issue.id === "browser-network-guard-failed"
     );
+    const relatedTargetIssue = state.operationalIssues.find(
+      (issue) => issue.id === "browser-related-target-created"
+    );
     state.exploration.status = "inconclusive";
     state.exploration.coverage = state.exploration.steps.some(
       (step) => step.status === "passed"
@@ -964,7 +982,9 @@ async function finalizeRun(state) {
       : "blocked";
     state.exploration.summary = networkGuardIssue
       ? "Intent coverage could not be trusted because a browser safety guard failed."
-      : "Intent coverage could not be trusted because a related browser target was created.";
+      : relatedTargetIssue
+        ? "Intent coverage could not be trusted because a related browser target was created."
+        : "Intent coverage could not begin because browser setup did not complete.";
     state.exploration.issue ||= state.operationalIssues[0];
   }
   const findings = [];
@@ -1114,10 +1134,15 @@ async function finalizeRun(state) {
     );
   }
   if (!productEvaluated) {
+    const browserContextFailed = state.operationalIssues.some(
+      (issue) => issue.id === "browser-context-creation-failed"
+    );
     coverageGaps.push(
-      state.browserLaunch.successful
-        ? "The product was not evaluated because initial navigation did not complete."
-        : "The product was not evaluated because the browser was unavailable."
+      browserContextFailed
+        ? "The product was not evaluated because an isolated browser context could not be created."
+        : state.browserLaunch.successful
+          ? "The product was not evaluated because initial navigation did not complete."
+          : "The product was not evaluated because the browser was unavailable."
     );
   }
   const blockedCrossOrigin = blockedRequests.filter(
@@ -1134,19 +1159,11 @@ async function finalizeRun(state) {
     );
   }
 
-  const networkGuardFailed = state.operationalIssues.some(
-    (issue) => issue.id === "browser-network-guard-failed"
-  );
-  const relatedTargetCreated = state.operationalIssues.some(
-    (issue) => issue.id === "browser-related-target-created"
-  );
-  const outcome = networkGuardFailed || relatedTargetCreated
-    ? "inconclusive"
-    : findings.length
-      ? "attention"
-      : setupIssues.length || invalidWorkflowSteps.length
-        ? "inconclusive"
-        : "clear";
+  const outcome = findings.length
+    ? "attention"
+    : setupIssues.length || invalidWorkflowSteps.length
+      ? "inconclusive"
+      : "clear";
   record("info", "run.completed", `Scout completed with outcome ${outcome}`, {
     outcome,
     findingCount: findings.length,
@@ -1208,9 +1225,13 @@ async function finalizeRun(state) {
           : "skipped",
         reason: !state.browserLaunch.successful
           ? "browser-unavailable"
-          : !state.networkGuardReady
-            ? "network-guard-unavailable"
-            : null,
+          : state.operationalIssues.some(
+                (issue) => issue.id === "browser-context-creation-failed"
+              )
+            ? "browser-context-unavailable"
+            : !state.networkGuardReady
+              ? "network-guard-unavailable"
+              : null,
         diagnostic: state.navigationDiagnostic
       },
       interactiveElements,
@@ -1527,10 +1548,48 @@ export function createScoutRunner({
     return finalizeRun(state);
   }
   try {
-    const context = await browser.newContext({
-      serviceWorkers: "block",
-      viewport: { width: 1440, height: 900 }
-    });
+    let context;
+    try {
+      context = await browser.newContext({
+        serviceWorkers: "block",
+        viewport: { width: 1440, height: 900 }
+      });
+    } catch (error) {
+      const detail = sanitizeDiagnosticText(error?.message || error);
+      const issue = {
+        id: "browser-context-creation-failed",
+        classification: "test-mechanics",
+        title: "YellowBird could not create an isolated browser context.",
+        evidence: detail,
+        remediation:
+          "Rerun the scout. If browser context creation fails again, inspect the diagnostics and verify the Playwright installation."
+      };
+      state.operationalIssues.push(issue);
+      record(
+        "error",
+        "browser.context.failed",
+        "The isolated browser context could not be created",
+        { detail }
+      );
+      for (const step of options.steps) {
+        workflowSteps.push({
+          id: step.id,
+          action: step.action,
+          status: "skipped",
+          evidence: "Browser context unavailable",
+          reason: "browser-context-unavailable",
+          durationMs: 0
+        });
+      }
+      if (options.exploreIntent) {
+        state.exploration.status = "skipped";
+        state.exploration.coverage = "blocked";
+        state.exploration.summary =
+          "Intent exploration was skipped because browser setup did not complete.";
+        state.exploration.issue = issue;
+      }
+      return await finalizeRun(state);
+    }
     const targetUrl = new URL(options.target);
     const targetRequestUrl = new URL(targetUrl);
     targetRequestUrl.hash = "";
@@ -2088,16 +2147,6 @@ export function createScoutRunner({
     agentCdp.on("Fetch.requestPaused", async (event) => {
       try {
         if (event.responseErrorReason !== undefined) {
-          const requestState = agentCdpRequests.get(event.requestId);
-          if (requestState?.occurrence) {
-            blockedAgentFetchOccurrences.add(requestState.occurrence);
-            const playwrightRequest = agentFetchRequests.get(
-              requestState.occurrence
-            );
-            if (playwrightRequest) {
-              blockedPlaywrightRequests.add(playwrightRequest);
-            }
-          }
           try {
             await agentCdp.send("Fetch.failRequest", {
               requestId: event.requestId,
@@ -2217,13 +2266,8 @@ export function createScoutRunner({
           requestId: event.requestId,
           interceptResponse: true
         };
-        if (occurrenceHeader !== undefined) {
-          continueRequest.headers = Object.entries(event.request.headers)
-            .filter(
-              ([name]) => name.toLowerCase() !== agentFetchOccurrenceHeader
-            )
-            .map(([name, value]) => ({ name, value }));
-        }
+        // Keep the private occurrence header until the Playwright route sees it.
+        // The route strips it before the request reaches the product.
         await agentCdp.send("Fetch.continueRequest", continueRequest);
       } catch (error) {
         if (!/Target closed|Session closed/i.test(String(error?.message || error))) {
@@ -2315,8 +2359,12 @@ export function createScoutRunner({
     });
     page.on("requestfailed", (request) => {
       const requestUrl = request.url();
+      let sameOrigin = false;
+      try {
+        sameOrigin = new URL(requestUrl).origin === authorization.origin;
+      } catch {}
       if (
-        requestUrl.startsWith(authorization.origin) &&
+        sameOrigin &&
         !blockedPlaywrightRequests.has(request)
       ) {
         failedRequests.push({
@@ -2386,8 +2434,12 @@ export function createScoutRunner({
       if (requireGuard) await activateAgentGuard("idle");
     }
     page.on("response", (response) => {
+      let sameOrigin = false;
+      try {
+        sameOrigin = new URL(response.url()).origin === authorization.origin;
+      } catch {}
       if (
-        response.url().startsWith(authorization.origin) &&
+        sameOrigin &&
         response.status() >= 400
       ) {
         serverErrors.push({ status: response.status(), url: response.url() });

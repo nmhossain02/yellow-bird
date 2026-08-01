@@ -19,6 +19,7 @@
     "demo:target": "bun examples/demo-target.js",
     "setup:browsers": "bunx playwright install chromium",
     "test": "bun test --timeout 15000",
+    "test:price-scout": "bun scripts/validate-price-scout-e2e.js",
     "check": "bun test --timeout 15000"
   },
   "type": "module",
