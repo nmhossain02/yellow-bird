@@ -30,28 +30,35 @@ bun run test:price-scout
 The validator canonicalizes `.git` suffixes, trailing slashes, and
 `git@github.com:` SSH origins, then refuses any checkout whose `origin` does not
 match `https://github.com/nmhossain02/price-scout`. It requires a clean checkout,
-records its revision, starts the target with `make up` from that verified
-checkout, and rechecks both the revision and cleanliness after startup and
-immediately before the scout. It also
-refuses a non-loopback planning-engine endpoint and verifies loopback engine
-provenance in the resulting evidence. It then runs the same intent scout from
-the Price Scout working directory with `/monitors/new` declared as the primary
-read-only agent route, the application's asset prefixes declared as prefix load
-routes, and `/api/v1/monitors` plus `/api/v1/events` declared as exact load
-routes. It requires the observed
+records its revision, and refuses a non-loopback planning-engine endpoint.
+
+Before startup, the validator creates a unique Compose project with unique image
+tags and assigns free loopback-only host ports to the API and fixture services.
+It renders and checks that configuration before running `make up` from the
+verified checkout. Price Scout's Compose-controlled secrets and local runtime
+bindings inherited from the caller are removed from the Compose environment.
+The YellowBird engine API key is not passed to the checkout or Compose commands;
+the scout is the only child process that receives it. After startup, the
+validator rechecks both the revision and cleanliness, then checks them again
+immediately before the scout. It tears down the isolated containers, network,
+volumes, and images after either success or failure.
+
+The validator runs the intent scout from the Price Scout working directory with
+`/monitors/new` declared as the primary read-only agent route, the application's
+asset prefixes declared as prefix load routes, and `/api/v1/monitors` plus
+`/api/v1/events` declared as exact load routes. It verifies loopback engine
+provenance and requires the observed
 `initial-interface-basic-flow.v1` profile, requires a passed visit to
 `/monitors/new`, requires the destination to expose the Price Scout form's
 heading, product URL, tracking instruction, and frequency text, and verifies
 that the evidence retains the declared primary and API load-route authority.
 Those destination assertions are preserved in the generated replay before the
 validator installs and runs it from its independent temporary artifact
-directory. The default external
-checkout remains uncommitted because `test/fixtures/external/` is ignored.
-Target and health endpoint overrides are rejected so the configured URL cannot
-be redirected to a service unrelated to the stack started by this gate.
+directory. The validator leaves that artifact directory intact. On success, it
+prints the path together with the verified Price Scout commit and Compose
+project name.
 
-On July 31, 2026, this flow passed against Price Scout commit
-`9422d8e0224ece6a19c4b8e1cdbd1d7d1b217501` using YellowBird commit
-`b548fa72792e173b32c07b78525b8fe9ec250f6e`. The scout returned `clear`, recorded
-the HTTPS-to-HTTP loopback repair, satisfied the owned coverage profile, visited
-`/monitors/new`, and the generated replay passed outside both repositories.
+The default external checkout remains uncommitted because
+`test/fixtures/external/` is ignored. Target and health endpoint overrides are
+rejected so the configured URL cannot be redirected to a service unrelated to
+the stack started by this gate.
