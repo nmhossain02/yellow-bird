@@ -92,11 +92,23 @@ function decodeAgentText(value) {
   return null;
 }
 
+function decodeAgentUrlText(url) {
+  const components = [
+    decodeAgentText(url.pathname),
+    decodeAgentText(url.search.replaceAll("+", " ")),
+    decodeAgentText(url.hash)
+  ];
+  return components.some((component) => component === null)
+    ? null
+    : components.join("");
+}
+
 export function isAgentUrlAllowed(value, authorizedOrigin) {
   try {
     const url = new URL(value);
-    const decoded = decodeAgentText(url.pathname + url.search + url.hash);
+    const decoded = decodeAgentUrlText(url);
     return (
+      ["http:", "https:"].includes(url.protocol) &&
       url.origin === authorizedOrigin &&
       !url.username &&
       !url.password &&
@@ -358,6 +370,23 @@ async function snapshotPage(page, authorizedOrigin) {
   });
   const elements = [];
   for (const rawElement of raw.elements) {
+    let accessibleSnapshot;
+    try {
+      accessibleSnapshot = await page
+        .locator(
+          `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`
+        )
+        .ariaSnapshot();
+    } catch {
+      continue;
+    }
+    const decodedAccessibleSnapshot = decodeAgentText(accessibleSnapshot);
+    if (
+      decodedAccessibleSnapshot === null ||
+      PROHIBITED_ACTION_TEXT.test(decodedAccessibleSnapshot)
+    ) {
+      continue;
+    }
     const action = elementAction(
       { ...rawElement, pageUrl: raw.url },
       authorizedOrigin
@@ -859,7 +888,7 @@ export async function exploreIntentWithEngine({
       } else if (action === "click") {
         await locator.click();
       }
-      await page.waitForTimeout(150);
+      await page.waitForTimeout(actionPolicy?.navigationSettlementMs ?? 150);
       if (action === "visit") await actionPolicy?.resume?.(action);
       const actionPageUrl = page.url();
       if (!isAgentUrlAllowed(actionPageUrl, authorizedOrigin)) {

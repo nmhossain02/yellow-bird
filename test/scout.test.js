@@ -26,8 +26,10 @@ let sharedBrowser;
 let mutationRequestCount = 0;
 let readMutationRequestCount = 0;
 let delayedReadMutationRequestCount = 0;
+let initialDelayedVisitMutationRequestCount = 0;
 let delayedVisitMutationRequestCount = 0;
 let visitEventSourceRequestCount = 0;
+let visitWebSocketUpgradeCount = 0;
 let submissionRequestCount = 0;
 let crossOriginRequestCount = 0;
 let prohibitedRedirectRequestCount = 0;
@@ -134,6 +136,15 @@ beforeAll(async () => {
       request.url === "/agent-delayed-read-mutation"
     ) {
       delayedReadMutationRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      request.url === "/agent-initial-delayed-visit-mutation"
+    ) {
+      initialDelayedVisitMutationRequestCount += 1;
       response.writeHead(204);
       response.end();
       return;
@@ -256,8 +267,8 @@ beforeAll(async () => {
             <a href="/user_auth">Account support</a>
             <a href="/auth_callback">Account callback</a>
             <a href="http://user:secret@127.0.0.1:${server.address().port}/agent-flow">Credentialed setup</a>
-            <span id="dangerous-name">Delete account</span>
-            <a aria-labelledby="dangerous-name" href="/agent-flow">Setup</a>
+            <span id="dangerous-name"><img alt="Delete account"></span>
+            <a aria-label="Inspect setup" aria-labelledby="dangerous-name" href="/agent-flow">Setup</a>
             <form action="/create-monitor">
               <label>Name <input name="name"></label>
               <label>Password <input name="password" type="password"></label>
@@ -325,7 +336,14 @@ beforeAll(async () => {
       response.end(`<!doctype html>
         <html>
           <head><title>Delayed visit boundary</title></head>
-          <body><a href="/agent-delayed-visit-destination">Setup route</a></body>
+          <body>
+            <a href="/agent-delayed-visit-destination">Setup route</a>
+            <script>
+              setTimeout(() => {
+                fetch("/agent-initial-delayed-visit-mutation");
+              }, 200);
+            </script>
+          </body>
         </html>`);
       return;
     }
@@ -339,8 +357,8 @@ beforeAll(async () => {
               const events = new EventSource("/agent-visit-events");
               events.onmessage = () => events.close();
               setTimeout(() => {
-                const beacon = new Image();
-                beacon.src = "/agent-delayed-visit-mutation";
+                fetch("/agent-delayed-visit-mutation");
+                new WebSocket("ws://" + location.host + "/agent-visit-socket");
               }, 200);
             </script>
           </body>
@@ -471,6 +489,12 @@ beforeAll(async () => {
         </body>
       </html>`);
   });
+  server.on("upgrade", (request, socket) => {
+    if (request.url === "/agent-visit-socket") {
+      visitWebSocketUpgradeCount += 1;
+    }
+    socket.destroy();
+  });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
@@ -549,6 +573,8 @@ test("agent URL policy rejects credentials, auth shorthand, and fragments", () =
   assert.equal(isAgentUrlAllowed(`${target}/setup#auth_callback`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/%25252561uth`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/%ZZauth`, target), false);
+  assert.equal(isAgentUrlAllowed(`${target}/setup?action=log+in`, target), false);
+  assert.equal(isAgentUrlAllowed(`blob:${target}/temporary`, target), false);
   assert.equal(
     isAgentUrlAllowed(
       `http://user:secret@127.0.0.1:${server.address().port}/setup`,
@@ -753,32 +779,14 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
   assert.match(diagnostics, /"event":"agent.completed"/);
 });
 
-test("explicit intent exploration cannot be disabled", async () => {
+test("explicitly disabled intent exploration preserves initial-page scenarios", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-opt-out-")
   );
   let planningCalls = 0;
-  const decisions = [
-    {
-      action: "act",
-      elementRef: "element-1",
-      value: null,
-      rationale: "Open the setup route.",
-      coverage: "continue",
-      summary: ""
-    },
-    {
-      action: "finish",
-      elementRef: null,
-      value: null,
-      rationale: "The setup route was observed.",
-      coverage: "covered",
-      summary: "The setup route was observed."
-    }
-  ];
   const report = await createAgentRunner(() => {
     planningCalls += 1;
-    return decisions.shift();
+    throw new Error("the planner must remain disabled");
   })({
     target,
     intent: "Assess the initial interface and basic user flow",
@@ -787,9 +795,9 @@ test("explicit intent exploration cannot be disabled", async () => {
   });
 
   assert.equal(report.outcome, "clear");
-  assert.equal(report.observations.exploration.requested, true);
-  assert.equal(report.observations.exploration.verification.satisfied, true);
-  assert.equal(planningCalls, 2);
+  assert.equal(report.observations.exploration.requested, false);
+  assert.equal(report.observations.navigation.completed, true);
+  assert.equal(planningCalls, 0);
 });
 
 test("partial planner coverage is never promoted to covered", async () => {
@@ -1090,7 +1098,7 @@ test("same-document auth routing invalidates an agent visit", async () => {
   );
   const regression = await readFile(report.artifacts.regression, "utf8");
   assert.match(regression, /hashchange/);
-  assert.match(regression, /url\.pathname \+ url\.search \+ url\.hash/);
+  assert.match(regression, /url\.search\.replaceAll\("\+", " "\)/);
 });
 
 test("mutation-oriented intent remains inconclusive at the safe boundary", async () => {
@@ -1386,8 +1394,10 @@ test("agent action guards block effects delayed between planning rounds", async 
 });
 
 test("visit authority blocks delayed active requests in live and replay", async () => {
+  initialDelayedVisitMutationRequestCount = 0;
   delayedVisitMutationRequestCount = 0;
   visitEventSourceRequestCount = 0;
+  visitWebSocketUpgradeCount = 0;
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-delayed-visit-mutation-")
   );
@@ -1398,6 +1408,7 @@ test("visit authority blocks delayed active requests in live and replay", async 
     ).page.availableElements;
     planningCall += 1;
     if (planningCall === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
       return {
         action: "act",
         elementRef: availableElements[0].ref,
@@ -1423,9 +1434,13 @@ test("visit authority blocks delayed active requests in live and replay", async 
     outputDirectory
   });
 
+  assert.equal(initialDelayedVisitMutationRequestCount, 0);
   assert.equal(delayedVisitMutationRequestCount, 0);
   assert.equal(visitEventSourceRequestCount, 1);
+  assert.equal(visitWebSocketUpgradeCount, 0);
   assert.equal(report.outcome, "inconclusive");
+  assert.deepEqual(report.findings, []);
+  assert.deepEqual(report.observations.pageErrors, []);
   assert.ok(
     report.observations.blockedRequests.some(
       (request) => request.reason === "agent-active-request"
@@ -1438,8 +1453,10 @@ test("visit authority blocks delayed active requests in live and replay", async 
     outputDirectory
   );
   assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.equal(initialDelayedVisitMutationRequestCount, 0);
   assert.equal(delayedVisitMutationRequestCount, 0);
   assert.equal(visitEventSourceRequestCount, 2);
+  assert.equal(visitWebSocketUpgradeCount, 0);
 }, 30_000);
 
 test("agent snapshots bound page fields, select options, and total prompt size", async () => {
