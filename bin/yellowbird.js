@@ -10,19 +10,29 @@ import {
 import { resolveOutputOption } from "../src/scout/output.js";
 import { startServer } from "../src/server.js";
 
+function optionValues(name) {
+  const values = [];
+  for (let index = 0; index < process.argv.length; index += 1) {
+    if (process.argv[index] !== `--${name}`) continue;
+    const value = process.argv[index + 1];
+    if (
+      typeof value !== "string" ||
+      !value.trim() ||
+      value.startsWith("--")
+    ) {
+      throw new Error(`--${name} requires a non-empty value`);
+    }
+    values.push(value);
+  }
+  return values;
+}
+
 function argument(name, fallback) {
-  const index = process.argv.indexOf(`--${name}`);
-  return index === -1 ? fallback : process.argv[index + 1];
+  return optionValues(name)[0] ?? fallback;
 }
 
 function argumentsFor(name) {
-  const values = [];
-  for (let index = 0; index < process.argv.length; index += 1) {
-    if (process.argv[index] === `--${name}` && process.argv[index + 1]) {
-      values.push(process.argv[index + 1]);
-    }
-  }
-  return values;
+  return optionValues(name);
 }
 
 function flag(name) {
@@ -153,7 +163,7 @@ async function scout() {
   const output = await resolveOutputOption(argument("output"));
   const verbose = flag("verbose");
   const explicitIntent = argument("intent");
-  const intent = explicitIntent || scenario.intent;
+  const intent = explicitIntent ?? scenario.intent;
   const { runScout } = await import("../src/scout/scout.js");
   const report = await runScout({
     target,
@@ -174,7 +184,7 @@ async function scout() {
     steps: scenario.steps,
     exploreIntent:
       !scenarioPath &&
-      (Boolean(explicitIntent) || (flag("agent") && !flag("no-agent"))),
+      (explicitIntent !== undefined || (flag("agent") && !flag("no-agent"))),
     maxAgentSteps: argument("max-agent-steps", "4"),
     engineBaseUrl: argument("engine-base-url"),
     engineModel: argument("engine-model"),

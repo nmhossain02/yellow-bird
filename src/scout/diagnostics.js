@@ -90,8 +90,14 @@ function httpAlternative(requested) {
   return candidate;
 }
 
-export async function resolveLoopbackScheme(target, timeoutMs, record) {
+export async function resolveLoopbackScheme(
+  target,
+  timeoutMs,
+  record,
+  validateProbeTarget = () => {}
+) {
   const requested = new URL(target);
+  validateProbeTarget(requested.href);
   record("debug", "target.probe.started", "Probing the requested target", {
     ...diagnosticUrl(requested.href),
     method: "HEAD"
@@ -111,6 +117,7 @@ export async function resolveLoopbackScheme(target, timeoutMs, record) {
   }
 
   const candidate = httpAlternative(requested);
+  validateProbeTarget(candidate.href);
   record(
     "debug",
     "target.scheme_probe.started",

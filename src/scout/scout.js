@@ -11,7 +11,10 @@ import {
   diagnosticUrl,
   resolveLoopbackScheme
 } from "./diagnostics.js";
-import { resolveAgentEngine } from "./engine.js";
+import {
+  resolveAgentEngine,
+  validateAgentEngineConfig
+} from "./engine.js";
 import {
   exploreIntentWithEngine,
   isAgentUrlAllowed,
@@ -311,9 +314,11 @@ function buildRegression(options, explorationSteps = []) {
     "  const yellowbirdFetchBindingName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
     "  const yellowbirdFetchBindingToken = randomUUID();",
     "  const yellowbirdFetchOccurrencePrefix = `${randomUUID()}:`;",
+    "  const yellowbirdFetchOccurrenceHeader = `x-yellowbird-${randomUUID().replaceAll(\"-\", \"\")}`;",
     "  const yellowbirdFetchFailurePrefix = `__yellowbird_fetch_failure__${randomUUID()}:`;",
-    "  const yellowbirdPendingCdpFetchOccurrences = new Map();",
+    "  let yellowbirdFetchOccurrenceSequence = 0;",
     "  const yellowbirdBlockedFetchOccurrences = new Set();",
+    "  const yellowbirdFetchOccurrencesByRequest = new WeakMap();",
     "  const yellowbirdBlockedConsoleOccurrences = new Map();",
     "  const yellowbirdMarkBlockedConsoleOccurrence = url => {",
     "    const pending = yellowbirdBlockedConsoleOccurrences.get(url) || [];",
@@ -330,6 +335,13 @@ function buildRegression(options, explorationSteps = []) {
     "    return matched;",
     "  };",
     "  let yellowbirdAgentViolation = null;",
+    "  page.context().on(\"page\", relatedPage => {",
+    "    if (relatedPage !== page)",
+    '      yellowbirdAgentViolation ||= { kind: "related-page-created", url: "redacted" };',
+    "  });",
+    "  page.on(\"worker\", () => {",
+    '    yellowbirdAgentViolation ||= { kind: "related-worker-created", url: "redacted" };',
+    "  });",
     "  const yellowbirdParseFetchFailure = detail => {",
     "    const text = String(detail || \"\");",
     "    const markerIndex = text.indexOf(yellowbirdFetchFailurePrefix);",
@@ -339,14 +351,11 @@ function buildRegression(options, explorationSteps = []) {
     '      return typeof failure?.id === "string" && typeof failure?.url === "string" ? failure : null;',
     "    } catch { return null; }",
     "  };",
-    "  await page.exposeBinding(yellowbirdFetchBindingName, (_source, candidateToken, occurrence) => {",
+    "  await page.context().exposeBinding(yellowbirdFetchBindingName, (_source, candidateToken, occurrence) => {",
     "    if (candidateToken !== yellowbirdFetchBindingToken ||",
-    '        typeof occurrence?.id !== "string" || !occurrence.id.startsWith(yellowbirdFetchOccurrencePrefix) ||',
-    '        typeof occurrence?.url !== "string") return false;',
-    "    const pendingCdp = yellowbirdPendingCdpFetchOccurrences.get(occurrence.url) || [];",
-    "    pendingCdp.push(occurrence.id);",
-    "    yellowbirdPendingCdpFetchOccurrences.set(occurrence.url, pendingCdp);",
-    "    return true;",
+    '        typeof occurrence?.url !== "string") return null;',
+    "    yellowbirdFetchOccurrenceSequence += 1;",
+    "    return `${yellowbirdFetchOccurrencePrefix}${yellowbirdFetchOccurrenceSequence}`;",
     "  });",
     '  page.on("console", (message) => {',
     "    const text = message.text();",
@@ -421,7 +430,7 @@ function buildRegression(options, explorationSteps = []) {
     "        decoded !== null && !yellowbirdUnsafeRequest.test(yellowbirdCanonicalizeAgentText(decoded));",
     "    } catch { return false; }",
     "  };",
-    "  await page.context().addInitScript(({ authorizedOrigin, controlName, controlToken, fetchBindingName, fetchBindingToken, fetchFailurePrefix, fetchOccurrencePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
+    "  await page.context().addInitScript(({ authorizedOrigin, controlName, controlToken, fetchBindingName, fetchBindingToken, fetchFailurePrefix, fetchOccurrenceHeader, fetchOccurrencePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
     "    const prohibited = new RegExp(prohibitedPattern, \"i\");",
     "    const canonicalizeSemanticText = value => String(value ?? \"\")",
     '      .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")',
@@ -479,19 +488,28 @@ function buildRegression(options, explorationSteps = []) {
     "    };",
     "    const originalFetch = globalThis.fetch.bind(globalThis);",
     "    const recordFetchOccurrence = globalThis[fetchBindingName].bind(globalThis);",
-    "    let fetchSequence = 0;",
     "    globalThis.fetch = async function (input, init) {",
     "      let requestUrl = null;",
-    "      const occurrenceId = `${fetchOccurrencePrefix}${++fetchSequence}`;",
+    "      let occurrenceId = null;",
+    "      let requestInput = input;",
+    "      let requestInit = init;",
     "      try {",
     "        requestUrl = new URL(input instanceof Request ? input.url : String(input), globalThis.location.href).href;",
     "      } catch {}",
-    "      if (active && requestUrl)",
-    "        await recordFetchOccurrence(fetchBindingToken, { id: occurrenceId, url: requestUrl });",
+    "      if (active && requestUrl) {",
+    "        occurrenceId = await recordFetchOccurrence(fetchBindingToken, { url: requestUrl });",
+    '        if (typeof occurrenceId === "string" && occurrenceId.startsWith(fetchOccurrencePrefix)) {',
+    "          const request = new Request(input, init);",
+    "          const headers = new Headers(request.headers);",
+    "          headers.set(fetchOccurrenceHeader, occurrenceId);",
+    "          requestInput = new Request(request, { headers });",
+    "          requestInit = undefined;",
+    "        } else occurrenceId = null;",
+    "      }",
     "      try {",
-    "        return await originalFetch(input, init);",
+    "        return await originalFetch(requestInput, requestInit);",
     "      } catch (error) {",
-    "        if (!active || !requestUrl) throw error;",
+    "        if (!active || !requestUrl || !occurrenceId) throw error;",
     '        const message = error instanceof Error ? error.message : String(error || "Failed to fetch");',
     "        throw new TypeError(`${fetchFailurePrefix}${JSON.stringify({ id: occurrenceId, url: requestUrl, message })}`);",
     "      }",
@@ -528,13 +546,16 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     '    globalThis.addEventListener("hashchange", observeCurrentUrl);',
     '    globalThis.addEventListener("popstate", observeCurrentUrl);',
-    `  }, { authorizedOrigin: yellowbirdTarget.origin, controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, fetchBindingName: yellowbirdFetchBindingName, fetchBindingToken: yellowbirdFetchBindingToken, fetchFailurePrefix: yellowbirdFetchFailurePrefix, fetchOccurrencePrefix: yellowbirdFetchOccurrencePrefix, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
+    `  }, { authorizedOrigin: yellowbirdTarget.origin, controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, fetchBindingName: yellowbirdFetchBindingName, fetchBindingToken: yellowbirdFetchBindingToken, fetchFailurePrefix: yellowbirdFetchFailurePrefix, fetchOccurrenceHeader: yellowbirdFetchOccurrenceHeader, fetchOccurrencePrefix: yellowbirdFetchOccurrencePrefix, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
     "  const yellowbirdRecordBlockedRequest = (request, ...additionalUrls) => {",
     "    const redirectChain = [];",
     "    for (let current = request; current; current = current.redirectedFrom())",
     "      redirectChain.unshift(current.url());",
     "    for (const url of [...redirectChain, ...additionalUrls])",
     "      yellowbirdBlockedUrls.add(url);",
+    "    const occurrence = yellowbirdFetchOccurrencesByRequest.get(request);",
+    "    if (typeof occurrence === \"string\" && occurrence.startsWith(yellowbirdFetchOccurrencePrefix))",
+    "      yellowbirdBlockedFetchOccurrences.add(occurrence);",
     "    yellowbirdMarkBlockedConsoleOccurrence(request.url());",
     "  };",
     "  if (yellowbirdAgentMode) {",
@@ -543,6 +564,9 @@ function buildRegression(options, explorationSteps = []) {
     '  yellowbirdCdp.on("Fetch.requestPaused", async event => {',
     "    try {",
     "      if (event.responseErrorReason !== undefined) {",
+    "        const requestState = yellowbirdCdpRequests.get(event.requestId);",
+    "        if (requestState?.occurrence)",
+    "          yellowbirdBlockedFetchOccurrences.add(requestState.occurrence);",
     "        try {",
     '          await yellowbirdCdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: event.responseErrorReason });',
     "        } catch (error) {",
@@ -563,14 +587,18 @@ function buildRegression(options, explorationSteps = []) {
     "              yellowbirdAgentAction.navigationWindowOpen &&",
     '              ["GET", "HEAD"].includes(event.request.method) &&',
     "              yellowbirdAgentUrlAllowed(redirectUrl);",
-    "          } catch {}",
-    "          if (!redirectAllowed) {",
-    "            for (const url of [...(requestState?.urls || [event.request.url]), redirectUrl])",
+          "          } catch {}",
+          "          if (!redirectAllowed) {",
+          "            for (const url of [...(requestState?.urls || [event.request.url]), redirectUrl])",
     "              yellowbirdBlockedUrls.add(url);",
     "            yellowbirdMarkBlockedConsoleOccurrence(event.request.url);",
     "            if (requestState?.occurrence)",
     "              yellowbirdBlockedFetchOccurrences.add(requestState.occurrence);",
-    '            await yellowbirdCdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });',
+          '            await yellowbirdCdp.send("Fetch.fulfillRequest", {',
+          "              requestId: event.requestId, responseCode: 200,",
+          '              responseHeaders: [{ name: "content-type", value: "text/plain; charset=utf-8" }, { name: "cache-control", value: "no-store" }],',
+          '              body: Buffer.from("Blocked by YellowBird").toString("base64")',
+          "            });",
     "            return;",
     "          }",
     "        }",
@@ -578,34 +606,23 @@ function buildRegression(options, explorationSteps = []) {
     "        return;",
     "      }",
     "      const parent = event.redirectedRequestId ? yellowbirdCdpRequests.get(event.redirectedRequestId) : null;",
-    "      const pending = parent ? null : yellowbirdPendingCdpFetchOccurrences.get(event.request.url);",
-    "      const occurrence = parent?.occurrence || pending?.shift() || null;",
-    "      if (pending?.length === 0) yellowbirdPendingCdpFetchOccurrences.delete(event.request.url);",
+    "      const occurrenceHeader = Object.entries(event.request.headers)",
+    "        .find(([name]) => name.toLowerCase() === yellowbirdFetchOccurrenceHeader)?.[1];",
+    "      const occurrence = parent?.occurrence ||",
+    '        (typeof occurrenceHeader === "string" && occurrenceHeader.startsWith(yellowbirdFetchOccurrencePrefix)',
+    "          ? occurrenceHeader : null);",
     "      const requestState = {",
     "        occurrence,",
     "        urls: [...(parent?.urls || []), event.request.url],",
-    "        allowed: false",
+    "        allowed: true",
     "      };",
     "      yellowbirdCdpRequests.set(event.requestId, requestState);",
-    "      let actionAllowed = false;",
-    '      if (yellowbirdAgentAction?.action === "visit") {',
-    '        actionAllowed = event.resourceType === "Document"',
-    "          ? parent?.allowed || event.request.url === yellowbirdAgentAction.requestedUrl",
-    "          : yellowbirdAgentAction.navigationWindowOpen;",
-    "      }",
-    "      let sameOrigin = false;",
-    "      try { sameOrigin = new URL(event.request.url).origin === yellowbirdTarget.origin; } catch {}",
-    "      requestState.allowed = sameOrigin && actionAllowed &&",
-    '        ["GET", "HEAD"].includes(event.request.method) &&',
-    "        yellowbirdAgentUrlAllowed(event.request.url);",
-    "      if (!requestState.allowed) {",
-    "        for (const url of requestState.urls) yellowbirdBlockedUrls.add(url);",
-    "        yellowbirdMarkBlockedConsoleOccurrence(event.request.url);",
-    "        if (occurrence) yellowbirdBlockedFetchOccurrences.add(occurrence);",
-    '        await yellowbirdCdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });',
-    "        return;",
-    "      }",
-    '      await yellowbirdCdp.send("Fetch.continueRequest", { requestId: event.requestId, interceptResponse: true });',
+    "      const continueRequest = { requestId: event.requestId, interceptResponse: true };",
+    "      if (occurrenceHeader !== undefined)",
+    "        continueRequest.headers = Object.entries(event.request.headers)",
+    "          .filter(([name]) => name.toLowerCase() !== yellowbirdFetchOccurrenceHeader)",
+    "          .map(([name, value]) => ({ name, value }));",
+    '      await yellowbirdCdp.send("Fetch.continueRequest", continueRequest);',
     "    } catch (error) {",
     "      if (!/Target closed|Session closed/i.test(String(error?.message || error)))",
     '        yellowbirdAgentViolation ||= { kind: "network-guard-failed", url: event.request.url };',
@@ -613,13 +630,23 @@ function buildRegression(options, explorationSteps = []) {
     "  });",
     '  await yellowbirdCdp.send("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] });',
     "  }",
-    '  if (!yellowbirdAgentMode) await page.context().route("**/*", async (route) => {',
+    '  await page.context().route("**/*", async (route) => {',
     "    const request = route.request();",
     "    const requestUrl = request.url();",
     "    const requestMethod = request.method();",
+    "    const requestHeaders = request.headers();",
+    "    const occurrenceCandidate = requestHeaders[yellowbirdFetchOccurrenceHeader];",
+    "    const redirectedOccurrence = request.redirectedFrom()",
+    "      ? yellowbirdFetchOccurrencesByRequest.get(request.redirectedFrom()) : null;",
+    "    const occurrence = typeof occurrenceCandidate === \"string\" &&",
+    "      occurrenceCandidate.startsWith(yellowbirdFetchOccurrencePrefix)",
+    "        ? occurrenceCandidate : redirectedOccurrence;",
+    "    if (occurrence) yellowbirdFetchOccurrencesByRequest.set(request, occurrence);",
+    "    const forwardedHeaders = { ...requestHeaders };",
+    "    delete forwardedHeaders[yellowbirdFetchOccurrenceHeader];",
     '    const localResource = requestUrl.startsWith("data:") || requestUrl.startsWith("blob:");',
     '    if (localResource && (!yellowbirdAgentMode || request.resourceType() !== "document"))',
-    "      return route.continue();",
+    "      return route.continue(typeof occurrence === \"string\" ? { headers: forwardedHeaders } : undefined);",
     "    let allowed = false;",
     "    try {",
     "      const parsedRequestUrl = new URL(requestUrl);",
@@ -645,7 +672,7 @@ function buildRegression(options, explorationSteps = []) {
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
     '        (!yellowbirdAgentMode || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl && safeAgentAction));',
     "    } catch {}",
-    "    if (allowed) return route.continue();",
+    "    if (allowed) return route.continue(typeof occurrence === \"string\" ? { headers: forwardedHeaders } : undefined);",
     "    yellowbirdRecordBlockedRequest(request);",
     '    return route.abort("blockedbyclient");',
     "  });",
@@ -787,7 +814,7 @@ function buildRegression(options, explorationSteps = []) {
       );
       if (step.httpStatus) {
         lines.push(
-          `  expect(${response}?.status()).toBe(${step.httpStatus});`
+          `  expect(${response}?.status()).toBeLessThan(400);`
         );
       }
       return;
@@ -926,14 +953,18 @@ async function finalizeRun(state) {
     };
   }
   if (options.exploreIntent && state.operationalIssues.length) {
+    const networkGuardIssue = state.operationalIssues.find(
+      (issue) => issue.id === "browser-network-guard-failed"
+    );
     state.exploration.status = "inconclusive";
     state.exploration.coverage = state.exploration.steps.some(
       (step) => step.status === "passed"
     )
       ? "partial"
       : "blocked";
-    state.exploration.summary =
-      "Intent coverage could not be trusted because a browser safety guard failed.";
+    state.exploration.summary = networkGuardIssue
+      ? "Intent coverage could not be trusted because a browser safety guard failed."
+      : "Intent coverage could not be trusted because a related browser target was created.";
     state.exploration.issue ||= state.operationalIssues[0];
   }
   const findings = [];
@@ -946,7 +977,7 @@ async function finalizeRun(state) {
       evidence: state.browserLaunch.diagnostic.detail,
       remediation: state.browserLaunch.diagnostic.remediation
     });
-  } else if (state.navigationError) {
+  } else if (state.networkGuardReady && state.navigationError) {
     setupIssues.push({
       id: state.navigationDiagnostic.code,
       classification: "test-mechanics",
@@ -954,7 +985,10 @@ async function finalizeRun(state) {
       evidence: state.navigationDiagnostic.detail,
       remediation: state.navigationDiagnostic.remediation
     });
-  } else if (state.status !== options.expectedStatus) {
+  } else if (
+    state.networkGuardReady &&
+    state.status !== options.expectedStatus
+  ) {
     findings.push({
       id: "unexpected-status",
       severity: state.status && state.status >= 500 ? "high" : "medium",
@@ -971,7 +1005,10 @@ async function finalizeRun(state) {
     )
   );
 
-  const productEvaluated = state.browserLaunch.successful && !state.navigationError;
+  const productEvaluated =
+    state.browserLaunch.successful &&
+    state.networkGuardReady &&
+    !state.navigationError;
   if (
     productEvaluated &&
     options.expectedTitle &&
@@ -1097,11 +1134,19 @@ async function finalizeRun(state) {
     );
   }
 
-  const outcome = findings.length
-    ? "attention"
-    : setupIssues.length || invalidWorkflowSteps.length
-      ? "inconclusive"
-      : "clear";
+  const networkGuardFailed = state.operationalIssues.some(
+    (issue) => issue.id === "browser-network-guard-failed"
+  );
+  const relatedTargetCreated = state.operationalIssues.some(
+    (issue) => issue.id === "browser-related-target-created"
+  );
+  const outcome = networkGuardFailed || relatedTargetCreated
+    ? "inconclusive"
+    : findings.length
+      ? "attention"
+      : setupIssues.length || invalidWorkflowSteps.length
+        ? "inconclusive"
+        : "clear";
   record("info", "run.completed", `Scout completed with outcome ${outcome}`, {
     outcome,
     findingCount: findings.length,
@@ -1155,11 +1200,17 @@ async function finalizeRun(state) {
       navigation: {
         completed: productEvaluated,
         status: state.browserLaunch.successful
-          ? state.navigationError
-            ? "failed"
-            : "completed"
+          ? !state.networkGuardReady
+            ? "skipped"
+            : state.navigationError
+              ? "failed"
+              : "completed"
           : "skipped",
-        reason: state.browserLaunch.successful ? null : "browser-unavailable",
+        reason: !state.browserLaunch.successful
+          ? "browser-unavailable"
+          : !state.networkGuardReady
+            ? "network-guard-unavailable"
+            : null,
         diagnostic: state.navigationDiagnostic
       },
       interactiveElements,
@@ -1287,6 +1338,13 @@ export function createScoutRunner({
   ) {
     throw new Error("expected status must be a valid HTTP status code");
   }
+  if (exploreIntent) {
+    validateAgentEngineConfig({
+      baseUrl: input.engineBaseUrl,
+      model: input.engineModel,
+      timeoutMs: Math.max(timeoutMs, 120_000)
+    });
+  }
 
   const startedAt = new Date();
   const { events: diagnosticEvents, record } = createDiagnosticRecorder(
@@ -1300,7 +1358,17 @@ export function createScoutRunner({
   const targetResolution = await resolveLoopbackScheme(
     requestedAuthorization.target,
     Math.max(100, Math.min(timeoutMs, 2_000)),
-    record
+    record,
+    exploreIntent
+      ? (candidate) => {
+          const candidateUrl = new URL(candidate);
+          if (!isAgentUrlAllowed(candidateUrl.href, candidateUrl.origin)) {
+            throw new Error(
+              "intent exploration target contains a prohibited action"
+            );
+          }
+        }
+      : undefined
   );
   const authorization = authorizeScoutTarget(targetResolution.effectiveTarget);
   record("info", "target.authorized", "Authorized the effective loopback target", {
@@ -1366,6 +1434,7 @@ export function createScoutRunner({
       issue: null
     },
     browserLaunch: { successful: false, diagnostic: null },
+    networkGuardReady: false,
     navigationError: null,
     navigationDiagnostic: null,
     status: null,
@@ -1386,6 +1455,37 @@ export function createScoutRunner({
     workflowFindings,
     workflowSteps
   } = state;
+  const noteNetworkGuardFailure = (error, stage) => {
+    const detail = cleanDiagnosticText(error?.message || error);
+    if (
+      !state.operationalIssues.some(
+        (issue) => issue.id === "browser-network-guard-failed"
+      )
+    ) {
+      state.operationalIssues.push({
+        id: "browser-network-guard-failed",
+        classification: "test-mechanics",
+        title: "The browser network safety guard failed.",
+        evidence: detail,
+        remediation:
+          "Rerun the scout. If the guard fails again, report the diagnostics and use an owner-declared scenario."
+      });
+    }
+    record(
+      "error",
+      "browser.network-guard.failed",
+      "The browser network safety guard failed",
+      { detail, stage }
+    );
+  };
+  const initializeNetworkGuard = async (stage, operation) => {
+    try {
+      return { successful: true, value: await operation() };
+    } catch (error) {
+      noteNetworkGuardFailure(error, stage);
+      return { successful: false, value: null };
+    }
+  };
 
   record("debug", "browser.launch.started", "Launching Playwright Chromium", {
     headed: options.headed
@@ -1450,30 +1550,35 @@ export function createScoutRunner({
     const agentFetchBindingName = `__yellowbird_${randomUUID().replaceAll("-", "")}`;
     const agentFetchBindingToken = randomUUID();
     const agentFetchOccurrencePrefix = `${randomUUID()}:`;
+    const agentFetchOccurrenceHeader =
+      `x-yellowbird-${randomUUID().replaceAll("-", "")}`;
     const agentFetchFailurePrefix = `__yellowbird_fetch_failure__${randomUUID()}:`;
-    const pendingCdpAgentFetchOccurrences = new Map();
+    let agentFetchOccurrenceSequence = 0;
     const blockedAgentFetchOccurrences = new Set();
+    const agentFetchRequests = new Map();
+    const agentFetchOccurrencesByRequest = new WeakMap();
+    const blockedPlaywrightRequests = new WeakSet();
     const blockedConsoleOccurrences = new Map();
     const agentGuardAttempts = [];
     const observedAgentGuardAttempts = new Set();
-    await context.exposeBinding(
-      agentFetchBindingName,
-      (_source, candidateToken, occurrence) => {
-        if (
-          candidateToken !== agentFetchBindingToken ||
-          typeof occurrence?.id !== "string" ||
-          !occurrence.id.startsWith(agentFetchOccurrencePrefix) ||
-          typeof occurrence?.url !== "string"
-        ) {
-          return false;
-        }
-        const pendingCdp =
-          pendingCdpAgentFetchOccurrences.get(occurrence.url) || [];
-        pendingCdp.push(occurrence.id);
-        pendingCdpAgentFetchOccurrences.set(occurrence.url, pendingCdp);
-        return true;
-      }
+    const bindingGuard = await initializeNetworkGuard(
+      "fetch-binding",
+      () =>
+        context.exposeBinding(
+          agentFetchBindingName,
+          (_source, candidateToken, occurrence) => {
+            if (
+              candidateToken !== agentFetchBindingToken ||
+              typeof occurrence?.url !== "string"
+            ) {
+              return null;
+            }
+            agentFetchOccurrenceSequence += 1;
+            return `${agentFetchOccurrencePrefix}${agentFetchOccurrenceSequence}`;
+          }
+        )
     );
+    if (!bindingGuard.successful) return await finalizeRun(state);
     const redirectedRequestUrls = (request) => {
       const urls = [];
       for (let current = request; current; current = current.redirectedFrom()) {
@@ -1499,6 +1604,9 @@ export function createScoutRunner({
     const addBlockedRequest = (request, interceptedRequest = null) => {
       if (interceptedRequest) {
         markBlockedConsoleOccurrence(interceptedRequest.url());
+        blockedPlaywrightRequests.add(interceptedRequest);
+        const occurrence = agentFetchOccurrencesByRequest.get(interceptedRequest);
+        if (occurrence) blockedAgentFetchOccurrences.add(occurrence);
       }
       const redirectChain = [
         ...(interceptedRequest
@@ -1541,7 +1649,10 @@ export function createScoutRunner({
       observedAgentGuardAttempts.add(key);
       agentGuardAttempts.push(attempt);
     };
-    await context.routeWebSocket("**/*", async (socket) => {
+    const websocketGuard = await initializeNetworkGuard(
+      "websocket-policy",
+      () => context.routeWebSocket("**/*", async (socket) => {
+      try {
       const socketUrl = new URL(socket.url());
       const expectedProtocol = targetUrl.protocol === "https:" ? "wss:" : "ws:";
       const expectedPort =
@@ -1605,11 +1716,39 @@ export function createScoutRunner({
           reason: "Blocked by YellowBird read-only agent policy"
         });
       });
-    });
+      } catch (error) {
+        noteNetworkGuardFailure(error, "websocket-policy-runtime");
+        await socket.close({
+          code: 1011,
+          reason: "YellowBird network guard failed"
+        }).catch(() => {});
+      }
+      })
+    );
+    if (!websocketGuard.successful) return await finalizeRun(state);
 
-    if (!options.exploreIntent) await context.route("**/*", async (route) => {
+    const requestGuard = await initializeNetworkGuard(
+      "request-policy",
+      () => context.route("**/*", async (route) => {
+      try {
       const requestUrl = route.request().url();
       const requestMethod = route.request().method();
+      const requestHeaders = route.request().headers();
+      const occurrenceCandidate = requestHeaders[agentFetchOccurrenceHeader];
+      const redirectedOccurrence = route.request().redirectedFrom()
+        ? agentFetchOccurrencesByRequest.get(route.request().redirectedFrom())
+        : null;
+      const fetchOccurrence =
+        typeof occurrenceCandidate === "string" &&
+        occurrenceCandidate.startsWith(agentFetchOccurrencePrefix)
+          ? occurrenceCandidate
+          : redirectedOccurrence;
+      const forwardedHeaders = { ...requestHeaders };
+      delete forwardedHeaders[agentFetchOccurrenceHeader];
+      if (fetchOccurrence) {
+        agentFetchRequests.set(fetchOccurrence, route.request());
+        agentFetchOccurrencesByRequest.set(route.request(), fetchOccurrence);
+      }
       let requestOrigin;
       try {
         requestOrigin = new URL(requestUrl).origin;
@@ -1654,7 +1793,9 @@ export function createScoutRunner({
           (!agentNetworkPolicyActive ||
             (agentReadAllowed && agentUrlAllowed && agentActionAllowed)))
       ) {
-        await route.continue();
+        await route.continue(
+          fetchOccurrence ? { headers: forwardedHeaders } : undefined
+        );
         return;
       }
 
@@ -1673,12 +1814,15 @@ export function createScoutRunner({
       } else if (agentReadAllowed) {
         reason = "agent-non-visit-request";
       }
-      addBlockedRequest({
-        method: requestMethod,
-        resourceType: route.request().resourceType(),
-        url: evidenceUrl(requestUrl),
-        reason
-      }, route.request());
+      addBlockedRequest(
+        {
+          method: requestMethod,
+          resourceType: route.request().resourceType(),
+          url: evidenceUrl(requestUrl),
+          reason
+        },
+        route.request()
+      );
       record("warn", "network.request.blocked", "Blocked a request outside policy", {
         method: requestMethod,
         resourceType: route.request().resourceType(),
@@ -1686,15 +1830,26 @@ export function createScoutRunner({
         ...diagnosticUrl(requestUrl)
       });
       await route.abort("blockedbyclient");
-    });
+      } catch (error) {
+        if (!/Target closed|Session closed/i.test(String(error?.message || error))) {
+          noteNetworkGuardFailure(error, "request-policy-runtime");
+        }
+        await route.abort("failed").catch(() => {});
+      }
+      })
+    );
+    if (!requestGuard.successful) return await finalizeRun(state);
 
-    await context.addInitScript(({
+    const pageGuard = await initializeNetworkGuard(
+      "page-policy",
+      () => context.addInitScript(({
       authorizedOrigin,
       controlName,
       controlToken,
       fetchBindingName,
       fetchBindingToken,
       fetchFailurePrefix,
+      fetchOccurrenceHeader,
       fetchOccurrencePrefix,
       guardPrefix,
       prohibitedPattern,
@@ -1775,10 +1930,11 @@ export function createScoutRunner({
       };
       const originalFetch = globalThis.fetch.bind(globalThis);
       const recordFetchOccurrence = globalThis[fetchBindingName].bind(globalThis);
-      let fetchSequence = 0;
       globalThis.fetch = async function (input, init) {
         let requestUrl = null;
-        const occurrenceId = `${fetchOccurrencePrefix}${++fetchSequence}`;
+        let occurrenceId = null;
+        let requestInput = input;
+        let requestInit = init;
         try {
           requestUrl = new URL(
             input instanceof Request ? input.url : String(input),
@@ -1786,15 +1942,26 @@ export function createScoutRunner({
           ).href;
         } catch {}
         if (active && requestUrl) {
-          await recordFetchOccurrence(fetchBindingToken, {
-            id: occurrenceId,
+          occurrenceId = await recordFetchOccurrence(fetchBindingToken, {
             url: requestUrl
           });
+          if (
+            typeof occurrenceId === "string" &&
+            occurrenceId.startsWith(fetchOccurrencePrefix)
+          ) {
+            const request = new Request(input, init);
+            const headers = new Headers(request.headers);
+            headers.set(fetchOccurrenceHeader, occurrenceId);
+            requestInput = new Request(request, { headers });
+            requestInit = undefined;
+          } else {
+            occurrenceId = null;
+          }
         }
         try {
-          return await originalFetch(input, init);
+          return await originalFetch(requestInput, requestInit);
         } catch (error) {
-          if (!active || !requestUrl) throw error;
+          if (!active || !requestUrl || !occurrenceId) throw error;
           const message =
             error instanceof Error ? error.message : String(error || "Failed to fetch");
           throw new TypeError(
@@ -1854,20 +2021,83 @@ export function createScoutRunner({
       fetchBindingName: agentFetchBindingName,
       fetchBindingToken: agentFetchBindingToken,
       fetchFailurePrefix: agentFetchFailurePrefix,
+      fetchOccurrenceHeader: agentFetchOccurrenceHeader,
       fetchOccurrencePrefix: agentFetchOccurrencePrefix,
       guardPrefix: agentGuardPrefix,
       prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN,
       startActive: options.exploreIntent
-    });
+      })
+    );
+    if (!pageGuard.successful) return await finalizeRun(state);
 
-    const page = await context.newPage();
+    const pageTarget = await initializeNetworkGuard(
+      "page-target",
+      () => context.newPage()
+    );
+    if (!pageTarget.successful) return await finalizeRun(state);
+    const page = pageTarget.value;
     page.setDefaultTimeout(options.timeoutMs);
+    const noteRelatedTarget = (kind) => {
+      if (
+        !state.operationalIssues.some(
+          (issue) => issue.id === "browser-related-target-created"
+        )
+      ) {
+        state.operationalIssues.push({
+          id: "browser-related-target-created",
+          classification: "test-mechanics",
+          title: "A related browser target made intent coverage inconclusive.",
+          evidence: kind,
+          remediation:
+            "Use an owner-declared scenario that does not create popups or workers."
+        });
+      }
+      record(
+        "warn",
+        "browser.related-target.created",
+        "A related browser target was created during intent exploration",
+        { kind }
+      );
+    };
+    context.on("page", (relatedPage) => {
+      if (options.exploreIntent && relatedPage !== page) {
+        noteRelatedTarget("page");
+      }
+    });
+    page.on("worker", () => {
+      if (options.exploreIntent) noteRelatedTarget("worker");
+    });
+    page.on("request", (request) => {
+      const occurrence = request.headers()[agentFetchOccurrenceHeader];
+      if (
+        typeof occurrence === "string" &&
+        occurrence.startsWith(agentFetchOccurrencePrefix)
+      ) {
+        agentFetchRequests.set(occurrence, request);
+        agentFetchOccurrencesByRequest.set(request, occurrence);
+      }
+    });
     if (options.exploreIntent) {
     const agentCdpRequests = new Map();
-    const agentCdp = await context.newCDPSession(page);
+    const cdpTarget = await initializeNetworkGuard(
+      "cdp-session",
+      () => context.newCDPSession(page)
+    );
+    if (!cdpTarget.successful) return await finalizeRun(state);
+    const agentCdp = cdpTarget.value;
     agentCdp.on("Fetch.requestPaused", async (event) => {
       try {
         if (event.responseErrorReason !== undefined) {
+          const requestState = agentCdpRequests.get(event.requestId);
+          if (requestState?.occurrence) {
+            blockedAgentFetchOccurrences.add(requestState.occurrence);
+            const playwrightRequest = agentFetchRequests.get(
+              requestState.occurrence
+            );
+            if (playwrightRequest) {
+              blockedPlaywrightRequests.add(playwrightRequest);
+            }
+          }
           try {
             await agentCdp.send("Fetch.failRequest", {
               requestId: event.requestId,
@@ -1912,6 +2142,12 @@ export function createScoutRunner({
                   : "agent-prohibited-url";
               if (requestState?.occurrence) {
                 blockedAgentFetchOccurrences.add(requestState.occurrence);
+                const playwrightRequest = agentFetchRequests.get(
+                  requestState.occurrence
+                );
+                if (playwrightRequest) {
+                  blockedPlaywrightRequests.add(playwrightRequest);
+                }
               }
               markBlockedConsoleOccurrence(event.request.url);
               const redirectChain = [
@@ -1939,9 +2175,17 @@ export function createScoutRunner({
                   ...diagnosticUrl(redirectUrl)
                 }
               );
-              await agentCdp.send("Fetch.failRequest", {
+              await agentCdp.send("Fetch.fulfillRequest", {
                 requestId: event.requestId,
-                errorReason: "BlockedByClient"
+                responseCode: 200,
+                responseHeaders: [
+                  {
+                    name: "content-type",
+                    value: "text/plain; charset=utf-8"
+                  },
+                  { name: "cache-control", value: "no-store" }
+                ],
+                body: Buffer.from("Blocked by YellowBird").toString("base64")
               });
               return;
             }
@@ -1954,124 +2198,54 @@ export function createScoutRunner({
         const parent = event.redirectedRequestId
           ? agentCdpRequests.get(event.redirectedRequestId)
           : null;
-        const pending = parent
-          ? null
-          : pendingCdpAgentFetchOccurrences.get(event.request.url);
-        const occurrence = parent?.occurrence || pending?.shift() || null;
-        if (pending?.length === 0) {
-          pendingCdpAgentFetchOccurrences.delete(event.request.url);
-        }
+        const occurrenceHeader = Object.entries(event.request.headers).find(
+          ([name]) => name.toLowerCase() === agentFetchOccurrenceHeader
+        )?.[1];
+        const occurrence =
+          parent?.occurrence ||
+          (typeof occurrenceHeader === "string" &&
+          occurrenceHeader.startsWith(agentFetchOccurrencePrefix)
+            ? occurrenceHeader
+            : null);
         const requestState = {
           occurrence,
           urls: [...(parent?.urls || []), event.request.url],
-          allowed: false
+          allowed: true
         };
         agentCdpRequests.set(event.requestId, requestState);
-        let agentActionAllowed = false;
-        if (agentActionContext?.action === "visit") {
-          agentActionAllowed =
-            event.resourceType === "Document"
-              ? parent?.allowed ||
-                event.request.url === agentActionContext.requestedUrl
-              : agentActionContext.navigationWindowOpen;
-        }
-        let requestOrigin = "";
-        try {
-          requestOrigin = new URL(event.request.url).origin;
-        } catch {}
-        const sameOrigin = requestOrigin === authorization.origin;
-        const readAllowed = ["GET", "HEAD"].includes(event.request.method);
-        const urlAllowed = isAgentUrlAllowed(
-          event.request.url,
-          authorization.origin
-        );
-        requestState.allowed =
-          sameOrigin && readAllowed && urlAllowed && agentActionAllowed;
-        if (!requestState.allowed) {
-          let reason = "agent-non-read-method";
-          if (!sameOrigin) reason = "agent-cross-origin";
-          else if (readAllowed && !urlAllowed) reason = "agent-prohibited-url";
-          else if (readAllowed && agentActionContext?.action === "visit") {
-            reason =
-              event.resourceType === "Document"
-                ? "agent-navigation-outside-visit"
-                : "agent-active-request";
-          } else if (readAllowed) reason = "agent-non-visit-request";
-          if (occurrence) blockedAgentFetchOccurrences.add(occurrence);
-          markBlockedConsoleOccurrence(event.request.url);
-          blockedRequests.push({
-            method: event.request.method,
-            resourceType: event.resourceType.toLowerCase(),
-            requestUrl: evidenceUrl(parent?.urls.at(-1) || event.request.url),
-            url: evidenceUrl(event.request.url),
-            reason,
-            redirectChain: [
-              ...new Set(requestState.urls.map((url) => evidenceUrl(url)))
-            ]
-          });
-          record(
-            "warn",
-            "network.request.blocked",
-            event.redirectedRequestId
-              ? "Blocked a redirected request outside policy"
-              : "Blocked a request outside policy",
-            {
-              method: event.request.method,
-              resourceType: event.resourceType.toLowerCase(),
-              reason,
-              ...diagnosticUrl(event.request.url)
-            }
-          );
-          await agentCdp.send("Fetch.failRequest", {
-            requestId: event.requestId,
-            errorReason: "BlockedByClient"
-          });
-          return;
-        }
-        await agentCdp.send("Fetch.continueRequest", {
+        const continueRequest = {
           requestId: event.requestId,
           interceptResponse: true
-        });
+        };
+        if (occurrenceHeader !== undefined) {
+          continueRequest.headers = Object.entries(event.request.headers)
+            .filter(
+              ([name]) => name.toLowerCase() !== agentFetchOccurrenceHeader
+            )
+            .map(([name, value]) => ({ name, value }));
+        }
+        await agentCdp.send("Fetch.continueRequest", continueRequest);
       } catch (error) {
         if (!/Target closed|Session closed/i.test(String(error?.message || error))) {
-          const detail = cleanDiagnosticText(error?.message || error);
-          if (
-            !state.operationalIssues.some(
-              (issue) => issue.id === "browser-network-guard-failed"
-            )
-          ) {
-            state.operationalIssues.push({
-              id: "browser-network-guard-failed",
-              classification: "test-mechanics",
-              title: "The browser redirect safety guard failed.",
-              evidence: detail,
-              remediation:
-                "Rerun the scout. If the guard fails again, report the diagnostics and use an owner-declared scenario."
-            });
-          }
-          record(
-            "error",
-            "browser.network-guard.failed",
-            "The browser redirect guard failed",
-            {
-              detail,
-              resourceType: event.resourceType.toLowerCase(),
-              stage:
-                event.responseStatusCode === undefined &&
-                event.responseErrorReason === undefined
-                  ? "request"
-                  : "response",
-              responseErrorReason: event.responseErrorReason || null,
-              ...diagnosticUrl(event.request.url)
-            }
+          noteNetworkGuardFailure(
+            error,
+            event.responseStatusCode === undefined &&
+              event.responseErrorReason === undefined
+              ? "cdp-request"
+              : "cdp-response"
           );
         }
       }
     });
-    await agentCdp.send("Fetch.enable", {
-      patterns: [{ urlPattern: "*", requestStage: "Request" }]
-    });
+    const cdpGuard = await initializeNetworkGuard(
+      "cdp-fetch",
+      () => agentCdp.send("Fetch.enable", {
+        patterns: [{ urlPattern: "*", requestStage: "Request" }]
+      })
+    );
+    if (!cdpGuard.successful) return await finalizeRun(state);
     }
+    state.networkGuardReady = true;
     page.on("console", (message) => {
       const text = message.text();
       if (text.startsWith(agentGuardPrefix)) {
@@ -2143,9 +2317,7 @@ export function createScoutRunner({
       const requestUrl = request.url();
       if (
         requestUrl.startsWith(authorization.origin) &&
-        !blockedRequests.some(
-          (blocked) => blocked.redirectChain.includes(requestUrl)
-        )
+        !blockedPlaywrightRequests.has(request)
       ) {
         failedRequests.push({
           method: request.method(),

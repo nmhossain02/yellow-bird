@@ -38,6 +38,8 @@ let submissionRequestCount = 0;
 let crossOriginRequestCount = 0;
 let prohibitedRedirectRequestCount = 0;
 let deleteAccountRequestCount = 0;
+let delete2FARequestCount = 0;
+let relatedTargetEffectCount = 0;
 let sameUrlCorrelationRequestCount = 0;
 let replaySettlementDelayedRequestCount = 0;
 let failVisitNavigation = false;
@@ -72,6 +74,38 @@ async function runCommand(command, cwd, env) {
     if (stdoutHandle.fd !== -1) await stdoutHandle.close();
     if (stderrHandle.fd !== -1) await stderrHandle.close();
   }
+}
+
+async function startPriceScoutTarget() {
+  const child = Bun.spawn({
+    cmd: [
+      process.execPath,
+      resolve("test/fixtures/price-scout/server.js")
+    ],
+    cwd: resolve("."),
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const reader = child.stdout.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+  while (!output.includes("\n")) {
+    const { done, value } = await reader.read();
+    if (done) {
+      const stderr = await new Response(child.stderr).text();
+      throw new Error(`Price Scout target exited before startup: ${stderr}`);
+    }
+    output += decoder.decode(value, { stream: true });
+  }
+  const { url } = JSON.parse(output.slice(0, output.indexOf("\n")));
+  reader.releaseLock();
+  return {
+    url,
+    async close() {
+      child.kill("SIGTERM");
+      await child.exited;
+    }
+  };
 }
 
 function assertConformsToSchema(schema, value, path = "$") {
@@ -262,9 +296,35 @@ beforeAll(async () => {
       response.end();
       return;
     }
+    if (request.url === "/delete2FA") {
+      delete2FARequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (request.url === "/agent-related-target-effect") {
+      relatedTargetEffectCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (request.url === "/agent-independent-failure") {
+      const timer = setTimeout(() => response.end("late"), 500);
+      response.once("close", () => clearTimeout(timer));
+      return;
+    }
     if (request.url === "/history-return") {
       response.writeHead(302, { location: "/history-surface" });
       response.end();
+      return;
+    }
+    if (request.url === "/agent-http-error-destination") {
+      response.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Missing preview</title></head>
+          <body><input name="query" aria-label="Query"></body>
+        </html>`);
       return;
     }
     const failing = request.url === "/failing";
@@ -334,6 +394,18 @@ beforeAll(async () => {
     );
     const replaySettlementDestination = request.url?.startsWith(
       "/agent-replay-settlement-destination"
+    );
+    const httpErrorSurface = request.url?.startsWith(
+      "/agent-http-error-surface"
+    );
+    const relatedTargetSurface = request.url?.startsWith(
+      "/agent-related-target-surface"
+    );
+    const realmCorrelationSurface = request.url?.startsWith(
+      "/agent-realm-correlation-surface"
+    );
+    const realmCorrelationDestination = request.url?.startsWith(
+      "/agent-realm-correlation-destination"
     );
     const detachingSurface = request.url?.startsWith(
       "/agent-detaching-surface"
@@ -696,6 +768,58 @@ beforeAll(async () => {
         </html>`);
       return;
     }
+    if (httpErrorSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>HTTP error surface</title></head>
+          <body><a href="/agent-http-error-destination">Inspect preview</a></body>
+        </html>`);
+      return;
+    }
+    if (relatedTargetSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Related target surface</title></head>
+          <body>
+            <button id="preview" type="button">View related details</button>
+            <script>
+              document.querySelector("#preview").addEventListener("click", () => {
+                const effectUrl = location.origin + "/agent-related-target-effect";
+                const source = "fetch(" + JSON.stringify(effectUrl) + ", { method: 'POST' })";
+                new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
+                window.open("/agent-related-target-effect", "yellowbird-related-target");
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (realmCorrelationSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Realm correlation surface</title></head>
+          <body>
+            <a href="/agent-realm-correlation-destination">Inspect setup</a>
+            <script>fetch("/deleteAccount");</script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (realmCorrelationDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Realm correlation destination</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <script>
+              const controller = new AbortController();
+              fetch("/agent-independent-failure", { signal: controller.signal });
+              controller.abort();
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
     if (detachingSurface) {
       const links = Array.from(
         { length: 30 },
@@ -866,6 +990,51 @@ async function launchBrowserWithFailingNetworkGuard() {
   };
 }
 
+async function launchBrowserWithFailingGuardSession() {
+  let context;
+  return {
+    async newContext(options) {
+      context = await sharedBrowser.newContext(options);
+      context.newCDPSession = async () => {
+        throw new Error("injected CDP session initialization failure");
+      };
+      return context;
+    },
+    async close() {
+      await context?.close();
+    }
+  };
+}
+
+async function launchBrowserWithFailingGuardEnable() {
+  let context;
+  return {
+    async newContext(options) {
+      context = await sharedBrowser.newContext(options);
+      const newCdpSession = context.newCDPSession.bind(context);
+      context.newCDPSession = async (page) => {
+        const session = await newCdpSession(page);
+        return {
+          on(event, candidate) {
+            session.on(event, candidate);
+            return this;
+          },
+          async send(method, parameters) {
+            if (method === "Fetch.enable") {
+              throw new Error("injected Fetch.enable failure");
+            }
+            return session.send(method, parameters);
+          }
+        };
+      };
+      return context;
+    },
+    async close() {
+      await context?.close();
+    }
+  };
+}
+
 const runSharedScout = createScoutRunner({
   launchBrowser: launchSharedBrowser
 });
@@ -934,6 +1103,26 @@ test("agent URL policy rejects credentials, auth shorthand, and fragments", () =
     ),
     false
   );
+});
+
+test("agent target policy runs before loopback transport probes", async () => {
+  delete2FARequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-target-policy-")
+  );
+  await assert.rejects(
+    createAgentRunner(() => {
+      throw new Error("planner must not run");
+    })({
+      target: `${target}/delete2FA`,
+      intent: "Assess the initial interface",
+      exploreIntent: true,
+      outputDirectory
+    }),
+    /target contains a prohibited action/
+  );
+  assert.equal(delete2FARequestCount, 0);
+  await assert.rejects(stat(join(outputDirectory, "evidence.json")));
 });
 
 test("action cleanup runs after a failed begin without masking its error", async () => {
@@ -1051,6 +1240,34 @@ test("loopback HTTP alternatives preserve implicit HTTPS port 443", async () => 
   }
 });
 
+test("loopback repairs are validated before their transport probe", async () => {
+  const originalFetch = globalThis.fetch;
+  const probedUrls = [];
+  globalThis.fetch = async (url) => {
+    probedUrls.push(String(url));
+    throw new Error("TLS probe failed");
+  };
+
+  try {
+    await assert.rejects(
+      resolveLoopbackScheme(
+        "https://127.0.0.1/path",
+        100,
+        () => {},
+        (candidate) => {
+          if (candidate.startsWith("http:")) {
+            throw new Error("repaired target rejected");
+          }
+        }
+      ),
+      /repaired target rejected/
+    );
+    assert.deepEqual(probedUrls, ["https://127.0.0.1/path"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("TLS remediation redacts credentials and query values", () => {
   const diagnostic = diagnoseNavigationError(
     "page.goto failed with net::ERR_SSL_PROTOCOL_ERROR and console secret-value",
@@ -1149,6 +1366,45 @@ test("a browser network guard failure cannot produce a clear report", async () =
     await readFile(report.artifacts.diagnostics, "utf8"),
     /browser\.network-guard\.failed/
   );
+});
+
+test("network guard initialization failures persist inconclusive reports", async () => {
+  for (const launchBrowser of [
+    launchBrowserWithFailingGuardSession,
+    launchBrowserWithFailingGuardEnable
+  ]) {
+    const outputDirectory = await mkdtemp(
+      join(tmpdir(), "yellowbird-agent-network-guard-init-")
+    );
+    const report = await createAgentRunner(
+      () => {
+        throw new Error("planner must not run");
+      },
+      undefined,
+      launchBrowser
+    )({
+      target,
+      intent: "Assess the initial interface",
+      exploreIntent: true,
+      outputDirectory
+    });
+
+    assert.equal(report.outcome, "inconclusive");
+    assert.deepEqual(report.findings, []);
+    assert.equal(report.observations.navigation.completed, false);
+    assert.equal(
+      report.observations.navigation.reason,
+      "network-guard-unavailable"
+    );
+    assert.ok(
+      report.invalidTestMechanics.some(
+        (issue) => issue.id === "browser-network-guard-failed"
+      )
+    );
+    await stat(report.artifacts.evidence);
+    await stat(report.artifacts.report);
+    await stat(report.artifacts.diagnostics);
+  }
 });
 
 test("intent-driven scout executes bounded same-origin navigation", async () => {
@@ -1627,6 +1883,48 @@ test("blocked fetch attribution is scoped to one request occurrence", async () =
   assert.equal(deleteAccountRequestCount, 0);
 }, 30_000);
 
+test("fetch occurrence identities remain unique across documents", async () => {
+  deleteAccountRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-realm-correlation-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Inspect the supplied setup route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The destination request failed independently.",
+          coverage: "partial",
+          summary: "The destination request failed independently."
+        };
+  })({
+    target: `${target}/agent-realm-correlation-surface`,
+    intent: "Assess the setup route",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(deleteAccountRequestCount, 0);
+  assert.equal(report.outcome, "attention");
+  assert.equal(report.observations.pageErrors.length, 1);
+  assert.match(report.observations.pageErrors[0].message, /aborted/i);
+  assert.ok(report.findings.some((finding) => finding.id === "page-errors"));
+});
+
 test("replay closes visit authority before asserting the recorded URL", async () => {
   replaySettlementDelayedRequestCount = 0;
   changeReplaySettlementUrl = false;
@@ -1880,6 +2178,55 @@ test("initial assertions remain aligned with the generated replay", async () => 
       regression.indexOf("yellowbirdAgentResponse1")
   );
 });
+
+test("agent replay rejects a destination HTTP error found live", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-http-error-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Inspect the supplied preview route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The preview route returned an HTTP error.",
+          coverage: "partial",
+          summary: "The preview route returned an HTTP error."
+        };
+  })({
+    target: `${target}/agent-http-error-surface`,
+    intent: "Assess the preview route",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "attention");
+  assert.ok(report.findings.some((finding) => finding.id === "http-errors"));
+  assert.equal(report.observations.exploration.steps[0].status, "failed");
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(regression, /toBeLessThan\(400\)/);
+
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.notEqual(replay.exitCode, 0, "Replay must retain the HTTP health invariant");
+}, 30_000);
 
 test("agent cannot select a form-submit control omitted by policy", async () => {
   const outputDirectory = await mkdtemp(
@@ -2407,6 +2754,52 @@ test("cross-origin effects attempted during exploration are inconclusive", async
   );
 });
 
+test("context policy guards popup and worker request targets", async () => {
+  relatedTargetEffectCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-related-targets-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "View the supplied related details control.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "Related targets attempted effects outside policy.",
+          coverage: "partial",
+          summary: "Related targets attempted effects outside policy."
+        };
+  })({
+    target: `${target}/agent-related-target-surface`,
+    intent: "Assess the related details interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(relatedTargetEffectCount, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) =>
+        request.url === `${target}/agent-related-target-effect` &&
+        ["GET", "POST"].includes(request.method)
+    )
+  );
+});
+
 test("agent policy omits cross-origin and authentication controls", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-safety-surface-")
@@ -2737,6 +3130,51 @@ test("CLI redacts repaired target query values while evidence stays exact", asyn
   assert.equal(evidence.target.repairs[0].to, repairedTarget);
 });
 
+test("CLI rejects missing and empty option operands", async () => {
+  for (const optionTail of [["--intent", ""], ["--intent"]]) {
+    const result = await runCommand(
+      [
+        process.execPath,
+        resolve("bin/yellowbird.js"),
+        "scout",
+        "--target",
+        target,
+        ...optionTail
+      ],
+      resolve(".")
+    );
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /--intent requires a non-empty value/);
+    assert.doesNotMatch(result.stdout, /Scout scout_/);
+  }
+});
+
+test("CLI keeps invalid engine configuration fatal", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-invalid-engine-")
+  );
+  const result = await runCommand(
+    [
+      process.execPath,
+      resolve("bin/yellowbird.js"),
+      "scout",
+      "--target",
+      target,
+      "--intent",
+      "Assess the initial interface",
+      "--engine-base-url",
+      "file:///tmp/not-an-engine",
+      "--output",
+      outputDirectory
+    ],
+    resolve(".")
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /engine endpoint must use http or https/);
+  await assert.rejects(stat(join(outputDirectory, "evidence.json")));
+});
+
 test("CLI intent runs a real bounded agent loop through a compatible endpoint", async () => {
   let plannerCalls = 0;
   const engineServer = createServer(async (request, response) => {
@@ -2861,6 +3299,133 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
     });
   }
 });
+
+test("Price Scout intent flow runs end to end including replay", async () => {
+  const priceScout = await startPriceScoutTarget();
+  let plannerCalls = 0;
+  const engineServer = createServer(async (request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.end(JSON.stringify({ data: [{ id: "price-scout-planner" }] }));
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404);
+      response.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const schemaName = body.response_format?.json_schema?.name;
+    const output =
+      schemaName === "yellowbird_capability_probe"
+        ? { status: "ready", nextAction: "inspect" }
+        : plannerCalls++ === 0
+          ? {
+              action: "act",
+              elementRef: "element-1",
+              value: null,
+              rationale: "Open the Price Scout watch preview.",
+              coverage: "continue",
+              summary: ""
+            }
+          : plannerCalls === 2
+            ? {
+                action: "act",
+                elementRef: "element-1",
+                value: null,
+                rationale: "Exercise the product URL field safely.",
+                coverage: "continue",
+                summary: ""
+              }
+            : {
+                action: "finish",
+                elementRef: null,
+                value: null,
+                rationale: "The Price Scout preview flow was inspected.",
+                coverage: "covered",
+                summary: "The Price Scout preview flow was inspected."
+              };
+    response.end(
+      JSON.stringify({
+        model: "price-scout-planner",
+        choices: [
+          {
+            finish_reason: "stop",
+            message: { content: JSON.stringify(output) }
+          }
+        ]
+      })
+    );
+  });
+  await new Promise((resolve, reject) => {
+    engineServer.once("error", reject);
+    engineServer.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const outputDirectory = await mkdtemp(
+      join(tmpdir(), "yellowbird-price-scout-e2e-")
+    );
+    const result = await runCommand(
+      [
+        process.execPath,
+        resolve("bin/yellowbird.js"),
+        "scout",
+        "--target",
+        priceScout.url,
+        "--intent",
+        "Assess the initial interface and basic user flow",
+        "--expect-title",
+        "Price Scout",
+        "--engine-base-url",
+        `http://127.0.0.1:${engineServer.address().port}/v1`,
+        "--engine-model",
+        "price-scout-planner",
+        "--output",
+        outputDirectory
+      ],
+      resolve(".")
+    );
+
+    assert.equal(result.exitCode, 0, `${result.stdout}\n${result.stderr}`);
+    const evidence = JSON.parse(
+      await readFile(join(outputDirectory, "evidence.json"), "utf8")
+    );
+    assert.equal(evidence.outcome, "clear");
+    assert.equal(evidence.observations.exploration.status, "completed");
+    assert.deepEqual(
+      evidence.observations.exploration.steps.map(
+        ({ action, status }) => ({ action, status })
+      ),
+      [
+        { action: "visit", status: "passed" },
+        { action: "fill", status: "passed" }
+      ]
+    );
+    assert.equal(
+      evidence.observations.exploration.steps[0].url,
+      `${priceScout.url}/watch`
+    );
+
+    const install = await runCommand(
+      [process.execPath, "install"],
+      outputDirectory
+    );
+    assert.equal(install.exitCode, 0, install.stderr);
+    const replay = await runCommand(
+      [process.execPath, "run", "test"],
+      outputDirectory
+    );
+    assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  } finally {
+    await new Promise((resolve, reject) => {
+      engineServer.close((error) => (error ? reject(error) : resolve()));
+    });
+    await priceScout.close();
+  }
+}, 30_000);
 
 test(
   "CLI reports a configured but unavailable intent engine as inconclusive",

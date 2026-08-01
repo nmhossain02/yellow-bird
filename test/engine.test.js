@@ -276,11 +276,32 @@ test("engine rejects reported model transitions after probing", async () => {
 });
 
 test("engine configuration rejects embedded URL credentials", async () => {
-  const resolved = await resolveAgentEngine({
-    baseUrl: "http://user:secret@127.0.0.1:11434/v1"
-  });
+  await assert.rejects(
+    resolveAgentEngine({
+      baseUrl: "http://user:secret@127.0.0.1:11434/v1"
+    }),
+    /credentials must not be embedded/
+  );
+});
 
-  assert.equal(resolved.engine, null);
-  assert.equal(resolved.diagnostic.id, "agent-engine-invalid");
-  assert.doesNotMatch(JSON.stringify(resolved.diagnostic), /user|secret/);
+test("syntactically invalid engine configuration is fatal", async () => {
+  await assert.rejects(
+    resolveAgentEngine({ baseUrl: "not a URL" }),
+    /URL/i
+  );
+  await assert.rejects(
+    resolveAgentEngine({ baseUrl: "file:///tmp/engine" }),
+    /must use http or https/
+  );
+  await assert.rejects(
+    resolveAgentEngine({ baseUrl: "" }),
+    /non-empty absolute URL/
+  );
+  await assert.rejects(
+    resolveAgentEngine({
+      baseUrl: "http://127.0.0.1:11434/v1",
+      model: "planner\nmodel"
+    }),
+    /not printable text/
+  );
 });

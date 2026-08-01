@@ -21,7 +21,10 @@ function endpointClass(baseUrl) {
 }
 
 function normalizeBaseUrl(value) {
-  const url = new URL(value || DEFAULT_LOCAL_BASE_URL);
+  if (typeof value !== "string" || !value || value !== value.trim()) {
+    throw new Error("engine endpoint must be a non-empty absolute URL");
+  }
+  const url = new URL(value);
   if (!["http:", "https:"].includes(url.protocol)) {
     throw new Error("engine endpoint must use http or https");
   }
@@ -45,6 +48,56 @@ function modelIdentifier(value, source) {
     throw new Error(`${source} model identifier was not printable text`);
   }
   return value;
+}
+
+export function validateAgentEngineConfig(config = {}) {
+  const baseUrl =
+    config.baseUrl !== undefined
+      ? config.baseUrl
+      : process.env.YELLOWBIRD_ENGINE_BASE_URL !== undefined
+        ? process.env.YELLOWBIRD_ENGINE_BASE_URL
+        : DEFAULT_LOCAL_BASE_URL;
+  const model =
+    config.model !== undefined
+      ? config.model
+      : process.env.YELLOWBIRD_ENGINE_MODEL !== undefined
+        ? process.env.YELLOWBIRD_ENGINE_MODEL
+        : null;
+  const apiKey =
+    config.apiKey !== undefined
+      ? config.apiKey
+      : process.env.YELLOWBIRD_ENGINE_API_KEY !== undefined
+        ? process.env.YELLOWBIRD_ENGINE_API_KEY
+        : null;
+  const timeoutMs = config.timeoutMs ?? DEFAULT_ENGINE_TIMEOUT_MS;
+  const fetchImpl = config.fetchImpl ?? fetch;
+
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  const normalizedModel =
+    model === null ? null : modelIdentifier(model, "configured");
+  if (
+    apiKey !== null &&
+    (typeof apiKey !== "string" || /[\u0000-\u001f\u007f]/.test(apiKey))
+  ) {
+    throw new Error("engine API key must be valid header text");
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
+    throw new Error("engine timeout must be a positive number of milliseconds");
+  }
+  if (typeof fetchImpl !== "function") {
+    throw new Error("engine fetch implementation must be a function");
+  }
+
+  return {
+    baseUrl: normalizedBaseUrl,
+    model: normalizedModel,
+    apiKey,
+    fetchImpl,
+    timeoutMs,
+    explicitlyConfigured:
+      config.baseUrl !== undefined ||
+      process.env.YELLOWBIRD_ENGINE_BASE_URL !== undefined
+  };
 }
 
 function engineIssue(code, message, remediation, detail = "") {
@@ -235,14 +288,30 @@ function validateSchemaValue(schema, value, path = "$") {
 }
 
 export function createCompatibleEngine({
-  baseUrl,
+  baseUrl = DEFAULT_LOCAL_BASE_URL,
   model,
   apiKey,
   fetchImpl = fetch,
   timeoutMs = DEFAULT_ENGINE_TIMEOUT_MS
 } = {}) {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
-  let selectedModel = model ? modelIdentifier(model, "configured") : null;
+  let selectedModel =
+    model === undefined || model === null
+      ? null
+      : modelIdentifier(model, "configured");
+  if (
+    apiKey !== undefined &&
+    apiKey !== null &&
+    (typeof apiKey !== "string" || /[\u0000-\u001f\u007f]/.test(apiKey))
+  ) {
+    throw new Error("engine API key must be valid header text");
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
+    throw new Error("engine timeout must be a positive number of milliseconds");
+  }
+  if (typeof fetchImpl !== "function") {
+    throw new Error("engine fetch implementation must be a function");
+  }
   let reportedModel = null;
   const headers = {
     "content-type": "application/json",
@@ -360,25 +429,10 @@ export function createCompatibleEngine({
 }
 
 export async function resolveAgentEngine(config = {}) {
-  const baseUrl =
-    config.baseUrl ||
-    process.env.YELLOWBIRD_ENGINE_BASE_URL ||
-    DEFAULT_LOCAL_BASE_URL;
-  const model = config.model || process.env.YELLOWBIRD_ENGINE_MODEL || null;
-  const apiKey =
-    config.apiKey || process.env.YELLOWBIRD_ENGINE_API_KEY || null;
-  const explicitlyConfigured = Boolean(
-    config.baseUrl || process.env.YELLOWBIRD_ENGINE_BASE_URL
-  );
+  const validated = validateAgentEngineConfig(config);
+  const engine = createCompatibleEngine(validated);
 
   try {
-    const engine = createCompatibleEngine({
-      baseUrl,
-      model,
-      apiKey,
-      fetchImpl: config.fetchImpl,
-      timeoutMs: config.timeoutMs
-    });
     const capabilities = await engine.probe();
     return { engine, capabilities, diagnostic: null };
   } catch (error) {
@@ -389,12 +443,12 @@ export async function resolveAgentEngine(config = {}) {
       capabilities: null,
       diagnostic: engineIssue(
         unavailable ? "agent-engine-unavailable" : "agent-engine-invalid",
-        unavailable && explicitlyConfigured
+        unavailable && validated.explicitlyConfigured
           ? "The configured agent engine is unavailable."
           : unavailable
             ? "No compatible local agent engine is available."
             : "The configured agent engine could not be used.",
-        unavailable && explicitlyConfigured
+        unavailable && validated.explicitlyConfigured
           ? "Start the configured engine endpoint and check its URL, credentials, and model, then rerun the scout."
           : unavailable
             ? "Start Ollama with a tool-capable model, or set YELLOWBIRD_ENGINE_BASE_URL and YELLOWBIRD_ENGINE_MODEL."
