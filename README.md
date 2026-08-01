@@ -51,7 +51,8 @@ bun run scout -- \
 ```
 
 The scout exits `2` when it finds asserted failures and `3` when test mechanics
-make the result inconclusive. It writes an evidence bundle under
+make the result inconclusive. If both occur, the product finding takes precedence
+and the run exits `2`. It writes an evidence bundle under
 `.yellowbird/scout/<run-id>/`:
 
 - `report.md` - human-readable findings, reproduction steps, and coverage gaps
@@ -189,7 +190,7 @@ are mediated with automatic redirects disabled so
 each redirect must pass policy before its destination can load. During the
 initial target load and each authorized visit, exact-origin `GET` and `HEAD`
 non-document requests, including `EventSource`, are allowed only through a
-bounded settlement interval after `DOMContentLoaded`. Later network requests
+150 ms settlement interval after `DOMContentLoaded`. Later network requests
 outside an explicitly mediated visit document chain are blocked, and WebSockets
 are blocked throughout agent mode.
 
@@ -197,6 +198,10 @@ The generated regression re-enforces exact-origin and read-only agent guards,
 including submission and outbound WebSocket blocking, without calling the model.
 Recorded non-navigation actions also replay through verified locators and assert
 their match counts before using the recorded ordinal.
+
+Fetch errors caused by policy enforcement are correlated to the exact blocked
+URL and excluded from product-failure evidence. Independent console, page, and
+request errors remain product signals.
 
 A bounded snapshot of the current page URL, title, text, and control inventory,
 including supplied link URLs and select options, is sent to the configured model
