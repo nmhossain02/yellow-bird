@@ -204,10 +204,12 @@ blocked, and WebSockets are blocked throughout agent mode.
 
 The generated regression re-enforces the live scout's exact-origin, read-only,
 redirect, and 150 ms visit-settlement guards, including submission and outbound
-WebSocket blocking, without calling the model. Recorded non-navigation actions
-also replay through verified locators and assert their match counts before using
-the recorded ordinal. It also fails for the same exact-origin HTTP response and
-request failures that produce live product findings.
+WebSocket blocking, without calling the model. Every authorized visit attempt is
+retained for replay, including one that failed during the live scout. Recorded
+non-navigation actions also replay through verified locators and assert their
+match counts before using the recorded ordinal. The replay also fails for the
+same exact-origin HTTP response and request failures that produce live product
+findings.
 
 Fetch errors caused by policy enforcement are correlated to the exact blocked
 request occurrence and excluded from product-failure evidence. Independent
@@ -217,9 +219,9 @@ remain product signals.
 A bounded snapshot of the current page URL, title, text, and control inventory,
 including supplied link URLs and select options, is sent to the configured model
 endpoint. URLs are sent exactly and can include query values. The default
-endpoint is loopback. Operators choosing a remote endpoint are responsible for
-that data boundary. Query values and console contents remain out of operational
-diagnostics.
+endpoint is loopback. Planning requests never follow endpoint redirects.
+Operators choosing a remote endpoint are responsible for that data boundary.
+Query values and console contents remain out of operational diagnostics.
 
 Owner-declared scenarios retain their explicit permission model for exact
 `fill`, `click`, `expectText`, and `expectVisible` steps. A failed action is
