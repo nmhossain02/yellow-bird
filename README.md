@@ -60,7 +60,7 @@ finalization write an evidence bundle under
 
 - `report.md` - human-readable findings, reproduction steps, and coverage gaps
 - `evidence.json` - versioned machine-readable observations and provenance
-- `page.png` - full-page visual evidence when a browser page was available
+- `page.png` - full-page visual evidence when screenshot capture succeeds
 - `regression.spec.js` - deterministic Playwright assertions suitable for review
 - `playwright.config.js` - makes the regression immediately replayable from the
   hidden evidence directory
@@ -147,8 +147,8 @@ lifecycle events retained in `diagnostics.jsonl`. Exit `0` means no failure was
 observed within the tested scope; consult the coverage gaps before treating that
 as broader product health.
 
-The repository also provides an authenticated local validation against the real
-Price Scout checkout and its portable replay. See
+The repository also provides an identity-checked local validation against the
+real Price Scout checkout and its portable replay. See
 [`docs/validation/price-scout-e2e.md`](./docs/validation/price-scout-e2e.md).
 
 ## Scout safety boundary
@@ -248,6 +248,11 @@ An isolated browser-context creation failure is also finalized as
 `inconclusive`. The report marks navigation and declared workflow steps skipped,
 keeps the screenshot artifact `null`, and retains an actionable operational
 diagnostic.
+
+A screenshot capture failure likewise finalizes with a test-mechanics issue,
+keeps `artifacts.screenshot` set to `null`, records the visual-evidence coverage
+gap, and preserves the remaining evidence bundle. With no product findings, the
+outcome is `inconclusive`.
 
 ## Run the dashboard
 
