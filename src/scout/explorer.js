@@ -8,8 +8,10 @@ const SAFE_FILL_TYPES = new Set([
   "text",
   "url"
 ]);
-const UNSAFE_BUTTON_LABEL =
-  /\b(?:accept|activate|buy|check now|compile|confirm|create|delete|pay|pause|purchase|reject|remove|resume|run|save|submit)\b/i;
+const PROHIBITED_ACTION_TEXT =
+  /\b(?:accept|activate|add|apply|approve|authenticate|authorize|buy|check[ -]?(?:now|out)|compile|confirm|create|delete|log[ -]?(?:in|out)|order|pay|pause|purchase|register|reject|remove|resume|run|save|sign[ -]?(?:in|out|up)|submit|subscribe|update|upload)\b/i;
+const AUTHENTICATION_CONTEXT =
+  /\b(?:auth(?:enticate|orize)?|log[ -]?(?:in|out)|register|sign[ -]?(?:in|out|up))\b/i;
 const ACTION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -61,7 +63,37 @@ function normalizeText(value, limit) {
     .slice(0, limit);
 }
 
+function hasProhibitedSemantics(element) {
+  const values = [
+    element.label,
+    element.name,
+    element.ariaLabel,
+    element.href
+  ];
+  return (
+    element.formHasPassword ||
+    AUTHENTICATION_CONTEXT.test(element.formAction || "") ||
+    AUTHENTICATION_CONTEXT.test(element.pageUrl || "") ||
+    values.some((value) => {
+      if (!value) return false;
+      try {
+        return PROHIBITED_ACTION_TEXT.test(decodeURIComponent(value));
+      } catch {
+        return PROHIBITED_ACTION_TEXT.test(value);
+      }
+    })
+  );
+}
+
 function elementAction(element, authorizedOrigin) {
+  if (element.disabled || hasProhibitedSemantics(element)) return null;
+  if (element.formAction) {
+    try {
+      if (new URL(element.formAction).origin !== authorizedOrigin) return null;
+    } catch {
+      return null;
+    }
+  }
   if (element.tag === "a") {
     try {
       return new URL(element.href).origin === authorizedOrigin ? "visit" : null;
@@ -69,7 +101,6 @@ function elementAction(element, authorizedOrigin) {
       return null;
     }
   }
-  if (element.disabled) return null;
   if (element.tag === "textarea") return "fill";
   if (element.tag === "input" && SAFE_FILL_TYPES.has(element.type)) {
     return "fill";
@@ -77,29 +108,55 @@ function elementAction(element, authorizedOrigin) {
   if (element.tag === "select") return "select";
   if (
     element.tag === "button" &&
-    element.type === "button" &&
-    !UNSAFE_BUTTON_LABEL.test(element.label)
+    element.type === "button"
   ) {
     return "click";
   }
   return null;
 }
 
-function replayLocator(element) {
-  if (element.name) {
-    return {
-      kind: "css",
-      selector: `${element.tag}[name=${JSON.stringify(element.name)}]`
-    };
+async function replayLocator(page, element) {
+  const candidates = [
+    ...(element.id
+      ? [{ kind: "css", selector: `${element.tag}[id=${JSON.stringify(element.id)}]` }]
+      : []),
+    ...(element.name
+      ? [
+          {
+            kind: "css",
+            selector: `${element.tag}[name=${JSON.stringify(element.name)}]`
+          }
+        ]
+      : []),
+    ...(element.ariaLabel
+      ? [{ kind: "role", role: element.role, name: element.ariaLabel }]
+      : []),
+    ...(element.label
+      ? [{ kind: "role", role: element.role, name: element.label }]
+      : []),
+    { kind: "css", selector: element.tag }
+  ];
+  for (const candidate of candidates) {
+    const locator =
+      candidate.kind === "css"
+        ? page.locator(candidate.selector)
+        : page.getByRole(candidate.role, { name: candidate.name, exact: true });
+    let refs;
+    try {
+      refs = await locator.evaluateAll((elements) =>
+        elements.map((candidateElement) =>
+          candidateElement.getAttribute("data-yellowbird-agent-ref")
+        )
+      );
+    } catch {
+      continue;
+    }
+    const ordinal = refs.indexOf(element.ref);
+    if (ordinal >= 0) {
+      return { ...candidate, ordinal, matchCount: refs.length };
+    }
   }
-  if (element.ariaLabel) {
-    return {
-      kind: "role",
-      role: element.role,
-      name: element.ariaLabel
-    };
-  }
-  return { kind: "role", role: element.role, name: element.label };
+  return null;
 }
 
 function syntheticValue(element) {
@@ -146,6 +203,7 @@ async function snapshotPage(page, authorizedOrigin) {
                 : tag === "input" && element.type === "number"
                   ? "spinbutton"
                   : "textbox";
+        const form = element.form || element.closest("form");
         return {
           ref,
           tag,
@@ -153,9 +211,12 @@ async function snapshotPage(page, authorizedOrigin) {
           label,
           href: element.href || null,
           type: element.type || null,
+          id: element.getAttribute("id"),
           name: element.getAttribute("name"),
           ariaLabel: element.getAttribute("aria-label"),
           disabled: Boolean(element.disabled),
+          formAction: form?.action || null,
+          formHasPassword: Boolean(form?.querySelector('input[type="password"]')),
           options:
             tag === "select"
               ? [...element.options].map((option) => ({
@@ -168,7 +229,10 @@ async function snapshotPage(page, authorizedOrigin) {
   }));
   const elements = [];
   for (const rawElement of raw.elements) {
-    const action = elementAction(rawElement, authorizedOrigin);
+    const action = elementAction(
+      { ...rawElement, pageUrl: raw.url },
+      authorizedOrigin
+    );
     if (!action) continue;
     let href = rawElement.href;
     if (action === "visit") {
@@ -190,7 +254,11 @@ async function snapshotPage(page, authorizedOrigin) {
       })),
       runtimeSelector: `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`
     };
-    element.locator = replayLocator({ ...rawElement, label: element.label });
+    element.locator = await replayLocator(page, {
+      ...rawElement,
+      label: element.label
+    });
+    if (!element.locator) continue;
     element.key = [raw.url, rawElement.ref, action].join("|");
     elements.push(element);
   }
@@ -250,7 +318,7 @@ function plannerMessages({
   return [
     {
       role: "system",
-      content: `You are YellowBird's bounded safe-interaction web test planner. Choose action act with exactly one supplied elementRef, or choose finish. YellowBird, not you, enforces each element's allowedAction. Set value to null for fill actions because YellowBird supplies a deterministic synthetic value. For select actions, value must exactly match a supplied option value. You may not invent elements or URLs, use real personal data or credentials, submit forms, mutate server state, authenticate, change expected results, or report product bugs. Prefer primary setup paths such as New, Add, or Create over existing-record detail pages when the owner asks to assess a basic user flow. Visiting a supplied link is a browser action. When the owner asks to assess, review, or inspect a basic flow, loading the relevant primary route and observing its controls is covered coverage; do not downgrade coverage solely because submission is prohibited. Safely exercising fields can add coverage but is not required unless the intent asks about form interaction. If the intent explicitly asks to create, submit, mutate, authenticate, or complete another prohibited effect, finish with partial or blocked coverage. Product findings require browser evidence outside your output.`
+      content: `You are YellowBird's bounded safe-interaction web test planner. Choose action act with exactly one supplied elementRef, or choose finish. YellowBird, not you, enforces each element's allowedAction. Set value to null for fill actions because YellowBird supplies a deterministic synthetic value. For select actions, value must exactly match a supplied option value. You may not invent elements or URLs, use real personal data or credentials, submit forms, mutate server state, authenticate, change expected results, or report product bugs. Prefer supplied read-only setup or navigation paths over existing-record detail pages when the owner asks to assess a basic user flow. Visiting a supplied link is a browser action. When the owner asks to assess, review, or inspect a basic flow, loading the relevant primary route and observing its controls may support covered coverage; preserve partial coverage whenever any requested area remains unverified. Safely exercising fields can add coverage but is not required unless the intent asks about form interaction. If the intent explicitly asks to create, submit, mutate, authenticate, or complete another prohibited effect, finish with partial or blocked coverage. Product findings require browser evidence outside your output.`
     },
     {
       role: "user",
@@ -297,22 +365,14 @@ function completedExploration({ coverage, summary, steps, pages, issue }) {
 }
 
 function normalizedCoverage(intent, plannerCoverage, steps) {
-  const assessmentIntent =
-    /^\s*(?:assess|check|evaluate|explore|inspect|review)\b/i.test(intent);
-  const prohibitedEffectRequested =
-    /\b(?:authenticate|buy|checkout|create|delete|log[ -]?in|pay|purchase|register|remove|save|sign[ -]?(?:in|up)|submit)\b/i.test(
-      intent
-    );
-  const exercisedSafeFlow = steps.some(
-    (step) => step.status === "passed" && step.action === "visit"
-  );
+  if (hasProhibitedSemantics({ label: intent }) && plannerCoverage === "covered") {
+    return steps.some((step) => step.status === "passed") ? "partial" : "blocked";
+  }
   if (
-    assessmentIntent &&
-    !prohibitedEffectRequested &&
-    exercisedSafeFlow &&
-    plannerCoverage === "partial"
+    plannerCoverage === "covered" &&
+    !steps.some((step) => step.status === "passed")
   ) {
-    return "covered";
+    return "blocked";
   }
   return plannerCoverage;
 }

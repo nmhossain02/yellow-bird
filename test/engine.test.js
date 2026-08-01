@@ -93,6 +93,123 @@ test("configured engine rejects malformed structured content", async () => {
   assert.match(resolved.diagnostic.evidence, /malformed structured content/);
 });
 
+test("capability probe rejects JSON that violates the strict schema", async () => {
+  const resolved = await resolveAgentEngine({
+    baseUrl: "http://127.0.0.1:9999/v1",
+    model: "probe-model",
+    fetchImpl: async (url) => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "probe-model" }] });
+      }
+      return jsonResponse({
+        model: "probe-model",
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({
+                status: "ready",
+                nextAction: "inspect",
+                extra: true
+              })
+            }
+          }
+        ]
+      });
+    }
+  });
+
+  assert.equal(resolved.engine, null);
+  assert.equal(resolved.diagnostic.id, "agent-engine-invalid");
+  assert.match(resolved.diagnostic.evidence, /violated JSON Schema/);
+});
+
+test("engine validates every structured response against its JSON Schema", async () => {
+  let completion = 0;
+  const engine = createCompatibleEngine({
+    baseUrl: "http://127.0.0.1:11434/v1",
+    model: "strict-model",
+    fetchImpl: async (url) => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "strict-model" }] });
+      }
+      completion += 1;
+      const output =
+        completion === 1
+          ? { status: "ready", nextAction: "inspect" }
+          : { action: "inspect", extra: true };
+      return jsonResponse({
+        model: "strict-model",
+        choices: [
+          {
+            finish_reason: "stop",
+            message: { content: JSON.stringify(output) }
+          }
+        ]
+      });
+    }
+  });
+
+  await engine.probe();
+  await assert.rejects(
+    engine.completeStructured({
+      purpose: "planner",
+      messages: [],
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["action"],
+        properties: { action: { const: "inspect" } }
+      }
+    }),
+    /violated JSON Schema.*extra was not allowed/
+  );
+});
+
+test("engine rejects reported model transitions after probing", async () => {
+  let completion = 0;
+  const engine = createCompatibleEngine({
+    baseUrl: "http://127.0.0.1:11434/v1",
+    model: "planner-alias",
+    fetchImpl: async (url) => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "planner-alias" }] });
+      }
+      completion += 1;
+      return jsonResponse({
+        model: completion === 1 ? "planner-a" : "planner-b",
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify(
+                completion === 1
+                  ? { status: "ready", nextAction: "inspect" }
+                  : { action: "inspect" }
+              )
+            }
+          }
+        ]
+      });
+    }
+  });
+
+  await engine.probe();
+  await assert.rejects(
+    engine.completeStructured({
+      purpose: "planner",
+      messages: [],
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["action"],
+        properties: { action: { const: "inspect" } }
+      }
+    }),
+    /changed the reported model from planner-a to planner-b/
+  );
+});
+
 test("engine configuration rejects embedded URL credentials", async () => {
   const resolved = await resolveAgentEngine({
     baseUrl: "http://user:secret@127.0.0.1:11434/v1"

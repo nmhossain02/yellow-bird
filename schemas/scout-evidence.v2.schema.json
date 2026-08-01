@@ -300,7 +300,44 @@
                   "evidence": { "type": "string" },
                   "rationale": { "type": "string" },
                   "value": { "type": ["string", "null"] },
-                  "locator": { "type": "object" },
+                  "locator": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "selector",
+                          "ordinal",
+                          "matchCount"
+                        ],
+                        "properties": {
+                          "kind": { "const": "css" },
+                          "selector": { "type": "string" },
+                          "ordinal": { "type": "integer", "minimum": 0 },
+                          "matchCount": { "type": "integer", "minimum": 1 }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "role",
+                          "name",
+                          "ordinal",
+                          "matchCount"
+                        ],
+                        "properties": {
+                          "kind": { "const": "role" },
+                          "role": { "type": "string" },
+                          "name": { "type": "string" },
+                          "ordinal": { "type": "integer", "minimum": 0 },
+                          "matchCount": { "type": "integer", "minimum": 1 }
+                        }
+                      }
+                    ]
+                  },
                   "durationMs": { "type": "integer", "minimum": 0 }
                 }
               }

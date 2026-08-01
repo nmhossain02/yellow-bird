@@ -91,6 +91,134 @@ function parseStructuredContent(payload) {
   }
 }
 
+function schemaTypeMatches(type, value) {
+  if (type === "null") return value === null;
+  if (type === "array") return Array.isArray(value);
+  if (type === "object") {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+  if (type === "integer") return Number.isInteger(value);
+  if (type === "number") return typeof value === "number" && Number.isFinite(value);
+  return typeof value === type;
+}
+
+function schemaValueEquals(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validateSchemaValue(schema, value, path = "$") {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    throw new Error("supplied response schema was invalid");
+  }
+  if (Array.isArray(schema.allOf)) {
+    for (const candidate of schema.allOf) {
+      validateSchemaValue(candidate, value, path);
+    }
+  }
+  for (const keyword of ["anyOf", "oneOf"]) {
+    if (!Array.isArray(schema[keyword])) continue;
+    let matches = 0;
+    for (const candidate of schema[keyword]) {
+      try {
+        validateSchemaValue(candidate, value, path);
+        matches += 1;
+      } catch {}
+    }
+    if (
+      (keyword === "anyOf" && matches === 0) ||
+      (keyword === "oneOf" && matches !== 1)
+    ) {
+      throw new Error(`${path} did not satisfy ${keyword}`);
+    }
+  }
+  if (schema.not) {
+    let matched = true;
+    try {
+      validateSchemaValue(schema.not, value, path);
+    } catch {
+      matched = false;
+    }
+    if (matched) throw new Error(`${path} satisfied a forbidden schema`);
+  }
+  if (Object.hasOwn(schema, "const") && !schemaValueEquals(value, schema.const)) {
+    throw new Error(`${path} did not match const`);
+  }
+  if (
+    Array.isArray(schema.enum) &&
+    !schema.enum.some((candidate) => schemaValueEquals(value, candidate))
+  ) {
+    throw new Error(`${path} was not an allowed value`);
+  }
+  if (schema.type) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (!types.some((type) => schemaTypeMatches(type, value))) {
+      throw new Error(`${path} had an unsupported type`);
+    }
+  }
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const properties = schema.properties || {};
+    for (const property of schema.required || []) {
+      if (!Object.hasOwn(value, property)) {
+        throw new Error(`${path}.${property} was required`);
+      }
+    }
+    for (const [property, propertyValue] of Object.entries(value)) {
+      if (Object.hasOwn(properties, property)) {
+        validateSchemaValue(properties[property], propertyValue, `${path}.${property}`);
+      } else if (schema.additionalProperties === false) {
+        throw new Error(`${path}.${property} was not allowed`);
+      } else if (
+        schema.additionalProperties &&
+        typeof schema.additionalProperties === "object"
+      ) {
+        validateSchemaValue(
+          schema.additionalProperties,
+          propertyValue,
+          `${path}.${property}`
+        );
+      }
+    }
+  }
+  if (Array.isArray(value)) {
+    if (Number.isInteger(schema.minItems) && value.length < schema.minItems) {
+      throw new Error(`${path} had too few items`);
+    }
+    if (Number.isInteger(schema.maxItems) && value.length > schema.maxItems) {
+      throw new Error(`${path} had too many items`);
+    }
+    if (schema.uniqueItems) {
+      const serialized = value.map((entry) => JSON.stringify(entry));
+      if (new Set(serialized).size !== serialized.length) {
+        throw new Error(`${path} contained duplicate items`);
+      }
+    }
+    if (schema.items) {
+      value.forEach((entry, index) =>
+        validateSchemaValue(schema.items, entry, `${path}[${index}]`)
+      );
+    }
+  }
+  if (typeof value === "string") {
+    if (Number.isInteger(schema.minLength) && value.length < schema.minLength) {
+      throw new Error(`${path} was too short`);
+    }
+    if (Number.isInteger(schema.maxLength) && value.length > schema.maxLength) {
+      throw new Error(`${path} was too long`);
+    }
+    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value)) {
+      throw new Error(`${path} did not match the required pattern`);
+    }
+  }
+  if (typeof value === "number") {
+    if (typeof schema.minimum === "number" && value < schema.minimum) {
+      throw new Error(`${path} was below the minimum`);
+    }
+    if (typeof schema.maximum === "number" && value > schema.maximum) {
+      throw new Error(`${path} exceeded the maximum`);
+    }
+  }
+}
+
 export function createCompatibleEngine({
   baseUrl,
   model,
@@ -147,13 +275,26 @@ export function createCompatibleEngine({
       },
       timeoutMs
     );
-    reportedModel =
-      typeof payload?.model === "string" && payload.model
-        ? payload.model
-        : selectedModel;
+    const responseModel =
+      typeof payload?.model === "string" && payload.model ? payload.model : null;
+    if (responseModel && reportedModel && responseModel !== reportedModel) {
+      throw new Error(
+        `endpoint changed the reported model from ${reportedModel} to ${responseModel}`
+      );
+    }
+    reportedModel = responseModel || reportedModel;
+    const output = parseStructuredContent(payload);
+    try {
+      validateSchemaValue(schema, output);
+    } catch (error) {
+      throw new Error(
+        `model returned structured content that violated JSON Schema: ${error.message}`
+      );
+    }
     return {
-      output: parseStructuredContent(payload),
-      usage: payload?.usage || null
+      output,
+      usage: payload?.usage || null,
+      modelReported: reportedModel || selectedModel
     };
   }
 

@@ -22,6 +22,8 @@ const STEP_CAPABILITIES = {
   expectVisible: "browser.read"
 };
 const SUPPORTED_STEP_ACTIONS = new Set(Object.keys(STEP_CAPABILITIES));
+const PROHIBITED_AGENT_REQUEST_URL =
+  /\b(?:activate|approve|buy|check[ -]?out|confirm|delete|log[ -]?out|order|pay|purchase|remove|save|submit|subscribe|update)\b/i;
 const require = createRequire(import.meta.url);
 const PLAYWRIGHT_VERSION = require("@playwright/test/package.json").version;
 
@@ -250,7 +252,7 @@ ${explorationRows}
 - Console errors: ${report.observations.consoleErrors.length}
 - Uncaught page errors: ${report.observations.pageErrors.length}
 - Failed same-origin requests: ${report.observations.failedRequests.length}
-- Blocked cross-origin requests: ${report.observations.blockedRequests.length}
+- Blocked policy requests: ${report.observations.blockedRequests.length}
 
 ## Coverage gaps
 
@@ -284,21 +286,38 @@ function buildRegression(options, explorationSteps = []) {
     "  });",
     "",
     `  const yellowbirdTarget = new URL(${quoteForJavaScript(options.target)});`,
+    "  let yellowbirdAgentReplay = false;",
+    "  const yellowbirdUnsafeRequest = /\\b(?:activate|approve|buy|check[ -]?out|confirm|delete|log[ -]?out|order|pay|purchase|remove|save|submit|subscribe|update)\\b/i;",
     '  await page.context().route("**/*", async (route) => {',
     "    const requestUrl = route.request().url();",
+    "    const requestMethod = route.request().method();",
     '    if (requestUrl.startsWith("data:") || requestUrl.startsWith("blob:"))',
     "      return route.continue();",
     "    let allowed = false;",
-    "    try { allowed = new URL(requestUrl).origin === yellowbirdTarget.origin; } catch {}",
+    "    try {",
+    "      const parsedRequestUrl = new URL(requestUrl);",
+    "      const safeAgentUrl = !yellowbirdUnsafeRequest.test(decodeURIComponent(parsedRequestUrl.pathname + parsedRequestUrl.search));",
+    "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
+    '        (!yellowbirdAgentReplay || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl));',
+    "    } catch {}",
     "    return allowed ? route.continue() : route.abort(\"blockedbyclient\");",
     "  });",
     "  const yellowbirdSocketProtocol = yellowbirdTarget.protocol === \"https:\" ? \"wss:\" : \"ws:\";",
     "  const yellowbirdSocketPort = yellowbirdTarget.port || (yellowbirdTarget.protocol === \"https:\" ? \"443\" : \"80\");",
-    "  await page.context().routeWebSocket(url => {",
+    '  await page.context().routeWebSocket("**/*", socket => {',
+    "    const url = new URL(socket.url());",
     "    const socketPort = url.port || (url.protocol === \"wss:\" ? \"443\" : \"80\");",
-    "    return url.protocol !== yellowbirdSocketProtocol ||",
-    "      url.hostname !== yellowbirdTarget.hostname || socketPort !== yellowbirdSocketPort;",
-    "  }, socket => socket.close({ code: 1008, reason: \"Blocked by YellowBird exact-origin policy\" }));",
+    "    const sameOrigin = url.protocol === yellowbirdSocketProtocol &&",
+    "      url.hostname === yellowbirdTarget.hostname && socketPort === yellowbirdSocketPort;",
+    "    if (!sameOrigin)",
+    "      return socket.close({ code: 1008, reason: \"Blocked by YellowBird exact-origin policy\" });",
+    "    const server = socket.connectToServer();",
+    "    socket.onMessage(message => {",
+    "      if (yellowbirdAgentReplay)",
+    "        return socket.close({ code: 1008, reason: \"Blocked by YellowBird read-only agent policy\" });",
+    "      server.send(message);",
+    "    });",
+    "  });",
     "",
     `  const response = await page.goto(yellowbirdTarget.href, { waitUntil: "domcontentloaded" });`,
     `  expect(response?.status()).toBe(${options.expectedStatus});`
@@ -335,6 +354,9 @@ function buildRegression(options, explorationSteps = []) {
       lines.push(`  await expect(${locator}).toBeVisible();`);
     }
   });
+  if (explorationSteps.some((candidate) => candidate.status !== "invalid")) {
+    lines.push("  yellowbirdAgentReplay = true;");
+  }
   explorationSteps
     .filter((candidate) => candidate.status !== "invalid")
     .forEach((step, index) => {
@@ -350,20 +372,35 @@ function buildRegression(options, explorationSteps = []) {
         }
         return;
       }
+      if (
+        !step.locator ||
+        !Number.isInteger(step.locator.ordinal) ||
+        !Number.isInteger(step.locator.matchCount) ||
+        step.locator.ordinal < 0 ||
+        step.locator.matchCount <= step.locator.ordinal
+      ) {
+        throw new Error(`agent replay step ${step.id} has no verified locator`);
+      }
       const locator =
         step.locator?.kind === "css"
-          ? `page.locator(${quoteForJavaScript(step.locator.selector)}).first()`
-          : `page.getByRole(${quoteForJavaScript(step.locator?.role)}, { name: ${quoteForJavaScript(step.locator?.name)}, exact: true }).first()`;
+          ? `page.locator(${quoteForJavaScript(step.locator.selector)})`
+          : `page.getByRole(${quoteForJavaScript(step.locator?.role)}, { name: ${quoteForJavaScript(step.locator?.name)}, exact: true })`;
+      const locatorVariable = `yellowbirdAgentLocator${index + 1}`;
+      lines.push(
+        `  const ${locatorVariable} = ${locator};`,
+        `  await expect(${locatorVariable}).toHaveCount(${step.locator.matchCount});`
+      );
+      const selectedLocator = `${locatorVariable}.nth(${step.locator.ordinal})`;
       if (step.action === "fill") {
         lines.push(
-          `  await ${locator}.fill(${quoteForJavaScript(step.value)});`
+          `  await ${selectedLocator}.fill(${quoteForJavaScript(step.value)});`
         );
       } else if (step.action === "select") {
         lines.push(
-          `  await ${locator}.selectOption(${quoteForJavaScript(step.value)});`
+          `  await ${selectedLocator}.selectOption(${quoteForJavaScript(step.value)});`
         );
       } else if (step.action === "click") {
-        lines.push(`  await ${locator}.click();`);
+        lines.push(`  await ${selectedLocator}.click();`);
       }
     });
   if (!options.ignoreConsoleErrors) {
@@ -427,6 +464,28 @@ async function finalizeRun(state) {
     workflowFindings,
     workflowSteps
   } = state;
+  const blockedAgentWrites = blockedRequests.filter((request) =>
+    request.reason?.startsWith("agent-")
+  );
+  if (
+    options.exploreIntent &&
+    blockedAgentWrites.length > 0 &&
+    state.exploration.issue?.id !== "agent-model-transition"
+  ) {
+    state.exploration.status = "inconclusive";
+    state.exploration.coverage = state.exploration.steps.some(
+      (step) => step.status === "passed"
+    )
+      ? "partial"
+      : "blocked";
+    state.exploration.issue = {
+      id: "agent-effect-blocked",
+      classification: "test-mechanics",
+      title: "An agent interaction attempted an unauthorized effect.",
+      evidence: `${blockedAgentWrites.length} write-capable request or message(s) blocked`,
+      remediation: "Use an owner-declared scenario if this effect must be exercised."
+    };
+  }
   const findings = [];
   const setupIssues = [];
   if (!state.browserLaunch.successful) {
@@ -480,12 +539,27 @@ async function finalizeRun(state) {
       });
     }
   }
-  if (productEvaluated && !options.ignoreConsoleErrors && consoleErrors.length) {
+  const policyBlockedUrls = new Set(
+    blockedRequests.map((request) => request.url)
+  );
+  const productConsoleErrors = consoleErrors.filter(
+    (entry) =>
+      !policyBlockedUrls.has(entry.location?.url) ||
+      !/ERR_BLOCKED_BY_CLIENT/i.test(entry.text)
+  );
+  if (
+    productEvaluated &&
+    !options.ignoreConsoleErrors &&
+    productConsoleErrors.length
+  ) {
     findings.push({
       id: "console-errors",
       severity: "medium",
-      title: `${consoleErrors.length} browser console error(s) observed`,
-      evidence: consoleErrors.map((entry) => entry.text).join("; ").slice(0, 500)
+      title: `${productConsoleErrors.length} browser console error(s) observed`,
+      evidence: productConsoleErrors
+        .map((entry) => entry.text)
+        .join("; ")
+        .slice(0, 500)
     });
   }
   if (productEvaluated && pageErrors.length) {
@@ -561,9 +635,17 @@ async function finalizeRun(state) {
         : "The product was not evaluated because the browser was unavailable."
     );
   }
-  if (blockedRequests.length) {
+  const blockedCrossOrigin = blockedRequests.filter(
+    (request) => !request.reason?.startsWith("agent-")
+  );
+  if (blockedCrossOrigin.length) {
     coverageGaps.push(
-      `${blockedRequests.length} cross-origin request(s) were blocked by the exact-origin network policy.`
+      `${blockedCrossOrigin.length} cross-origin request(s) were blocked by the exact-origin network policy.`
+    );
+  }
+  if (blockedAgentWrites.length) {
+    coverageGaps.push(
+      `${blockedAgentWrites.length} write-capable request or message(s) were blocked during agent exploration.`
     );
   }
 
@@ -884,25 +966,25 @@ export function createScoutRunner({
       serviceWorkers: "block",
       viewport: { width: 1440, height: 900 }
     });
+    let agentNetworkPolicyActive = false;
     const targetUrl = new URL(options.target);
-    await context.routeWebSocket(
-      (socketUrl) => {
-        const expectedProtocol = targetUrl.protocol === "https:" ? "wss:" : "ws:";
-        const expectedPort =
-          targetUrl.port || (targetUrl.protocol === "https:" ? "443" : "80");
-        const socketPort =
-          socketUrl.port || (socketUrl.protocol === "wss:" ? "443" : "80");
-        return (
-          socketUrl.protocol !== expectedProtocol ||
-          socketUrl.hostname !== targetUrl.hostname ||
-          socketPort !== expectedPort
-        );
-      },
-      async (socket) => {
+    await context.routeWebSocket("**/*", async (socket) => {
+      const socketUrl = new URL(socket.url());
+      const expectedProtocol = targetUrl.protocol === "https:" ? "wss:" : "ws:";
+      const expectedPort =
+        targetUrl.port || (targetUrl.protocol === "https:" ? "443" : "80");
+      const socketPort =
+        socketUrl.port || (socketUrl.protocol === "wss:" ? "443" : "80");
+      const sameOrigin =
+        socketUrl.protocol === expectedProtocol &&
+        socketUrl.hostname === targetUrl.hostname &&
+        socketPort === expectedPort;
+      if (!sameOrigin) {
         blockedRequests.push({
           method: "WEBSOCKET",
           resourceType: "websocket",
-          url: socket.url()
+          url: socket.url(),
+          reason: "cross-origin"
         });
         record("warn", "network.websocket.blocked", "Blocked a cross-origin WebSocket", {
           ...diagnosticUrl(socket.url())
@@ -911,11 +993,36 @@ export function createScoutRunner({
           code: 1008,
           reason: "Blocked by YellowBird exact-origin policy"
         });
+        return;
       }
-    );
+      const serverSocket = socket.connectToServer();
+      socket.onMessage(async (message) => {
+        if (!agentNetworkPolicyActive) {
+          serverSocket.send(message);
+          return;
+        }
+        blockedRequests.push({
+          method: "WEBSOCKET",
+          resourceType: "websocket",
+          url: socket.url(),
+          reason: "agent-websocket-message"
+        });
+        record(
+          "warn",
+          "network.websocket.blocked",
+          "Blocked a WebSocket message during agent exploration",
+          { ...diagnosticUrl(socket.url()), reason: "agent-websocket-message" }
+        );
+        await socket.close({
+          code: 1008,
+          reason: "Blocked by YellowBird read-only agent policy"
+        });
+      });
+    });
 
     await context.route("**/*", async (route) => {
       const requestUrl = route.request().url();
+      const requestMethod = route.request().method();
       let requestOrigin;
       try {
         requestOrigin = new URL(requestUrl).origin;
@@ -923,23 +1030,41 @@ export function createScoutRunner({
         requestOrigin = "";
       }
 
+      const localResource =
+        requestUrl.startsWith("data:") || requestUrl.startsWith("blob:");
+      const sameOrigin = requestOrigin === authorization.origin;
+      const agentReadAllowed = ["GET", "HEAD"].includes(requestMethod);
+      let agentUrlAllowed = false;
+      try {
+        const parsedRequestUrl = new URL(requestUrl);
+        agentUrlAllowed = !PROHIBITED_AGENT_REQUEST_URL.test(
+          decodeURIComponent(parsedRequestUrl.pathname + parsedRequestUrl.search)
+        );
+      } catch {}
       if (
-        requestOrigin === authorization.origin ||
-        requestUrl.startsWith("data:") ||
-        requestUrl.startsWith("blob:")
+        localResource ||
+        (sameOrigin &&
+          (!agentNetworkPolicyActive || (agentReadAllowed && agentUrlAllowed)))
       ) {
         await route.continue();
         return;
       }
 
+      const reason = !sameOrigin
+        ? "cross-origin"
+        : agentReadAllowed
+          ? "agent-prohibited-url"
+          : "agent-non-read-method";
       blockedRequests.push({
-        method: route.request().method(),
+        method: requestMethod,
         resourceType: route.request().resourceType(),
-        url: requestUrl
+        url: requestUrl,
+        reason
       });
-      record("warn", "network.request.blocked", "Blocked a cross-origin request", {
-        method: route.request().method(),
+      record("warn", "network.request.blocked", "Blocked a request outside policy", {
+        method: requestMethod,
         resourceType: route.request().resourceType(),
+        reason,
         ...diagnosticUrl(requestUrl)
       });
       await route.abort("blockedbyclient");
@@ -1170,18 +1295,20 @@ export function createScoutRunner({
             }
           );
         } else {
-          const provenance = resolvedEngine.engine.provenance();
-          const engineName = `${provenance.adapter}:${provenance.modelReported}`;
-          state.exploration.engine = engineName;
-          state.exploration.provenance = provenance;
+          const initialProvenance = resolvedEngine.engine.provenance();
+          const initialEngineName = `${initialProvenance.adapter}:${initialProvenance.modelReported}`;
+          state.exploration.engine = initialEngineName;
+          state.exploration.provenance = initialProvenance;
           state.exploration.capabilities = resolvedEngine.capabilities;
           record("info", "agent.engine.ready", "Agent engine is ready", {
-            adapter: provenance.adapter,
-            endpointClass: provenance.endpointClass,
-            model: provenance.modelReported,
+            adapter: initialProvenance.adapter,
+            endpointClass: initialProvenance.endpointClass,
+            model: initialProvenance.modelReported,
             capabilities: resolvedEngine.capabilities
           });
-          const exploration = await exploreIntentWithEngine({
+          let exploration;
+          agentNetworkPolicyActive = true;
+          exploration = await exploreIntentWithEngine({
             page,
             intent: options.intent,
             authorizedOrigin: authorization.origin,
@@ -1190,13 +1317,41 @@ export function createScoutRunner({
             timeoutMs: options.timeoutMs,
             record
           });
+          const finalProvenance = resolvedEngine.engine.provenance();
+          const finalEngineName = `${finalProvenance.adapter}:${finalProvenance.modelReported}`;
+          if (
+            finalProvenance.modelReported !== initialProvenance.modelReported
+          ) {
+            exploration = {
+              ...exploration,
+              status: "inconclusive",
+              coverage: "blocked",
+              issue: {
+                id: "agent-model-transition",
+                classification: "test-mechanics",
+                title: "The agent engine changed models during exploration.",
+                evidence: `${initialProvenance.modelReported} to ${finalProvenance.modelReported}`,
+                remediation:
+                  "Configure the endpoint to use one stable model for probing and exploration."
+              }
+            };
+            record(
+              "error",
+              "agent.engine.changed",
+              "The agent engine changed models during exploration",
+              {
+                from: initialProvenance.modelReported,
+                to: finalProvenance.modelReported
+              }
+            );
+          }
           state.exploration = {
             ...state.exploration,
             ...exploration,
             requested: true,
             mode: "agent-safe-interaction",
-            engine: engineName,
-            provenance,
+            engine: finalEngineName,
+            provenance: finalProvenance,
             capabilities: resolvedEngine.capabilities
           };
         }

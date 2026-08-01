@@ -153,12 +153,15 @@ scoped run grants, sandboxing, and policy approval before they are enabled.
 An explicit natural-language intent may visit supplied exact-origin links, fill
 eligible fields with YellowBird-owned synthetic values, select supplied options,
 and use non-submit buttons whose labels do not indicate a destructive or
-mutation-oriented action. Form submission, authentication, credentials,
-cross-origin navigation, and destructive controls are not exposed to the model.
-The model proposes one supplied element at a time; YellowBird validates and
-executes the action. Model text is coverage guidance, never product-failure
-evidence. If the intent needs an action outside this profile, the result is
-`inconclusive` instead of a false pass.
+mutation-oriented action. YellowBird applies the same semantic denial to every
+control type and blocks non-read HTTP methods, destructive request URLs, and
+WebSocket messages throughout agent exploration. Form submission,
+authentication, credentials, cross-origin navigation, and destructive controls
+are not exposed to the model. The model
+proposes one supplied element at a time; YellowBird validates and executes the
+action. Model text is coverage guidance, never product-failure evidence. Partial
+planner coverage remains partial, and an intent needing an action outside this
+profile produces an `inconclusive` result instead of a false pass.
 
 Page text and the bounded control inventory are sent to the configured model
 endpoint. The default endpoint is loopback. Operators choosing a remote endpoint

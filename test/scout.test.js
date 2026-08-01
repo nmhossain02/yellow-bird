@@ -19,6 +19,7 @@ import { resolveOutputOption } from "../src/scout/output.js";
 
 let server;
 let target;
+let mutationRequestCount = 0;
 
 async function runCommand(command, cwd, env) {
   const child = Bun.spawn({
@@ -88,10 +89,46 @@ function assertConformsToSchema(schema, value, path = "$") {
 
 beforeAll(async () => {
   server = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/agent-write") {
+      mutationRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
     const failing = request.url === "/failing";
     const agentFlow = request.url?.startsWith("/agent-flow");
     const staticPage = request.url?.startsWith("/static");
+    const policyBoundary = request.url?.startsWith("/agent-policy-boundary");
+    const duplicateFields = request.url?.startsWith("/duplicate-fields");
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    if (policyBoundary) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Policy boundary</title></head>
+          <body>
+            <a href="/delete-account">Delete account</a>
+            <button type="button">Add</button>
+            <button id="details" type="button">Inspect details</button>
+            <script>
+              document.querySelector("#details").addEventListener("click", () => {
+                fetch("/agent-write", { method: "POST" }).catch(() => {});
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (duplicateFields) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Duplicate fields</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <input name="query" aria-label="Query">
+          </body>
+        </html>`);
+      return;
+    }
     response.end(`<!doctype html>
       <html>
         <head><title>${agentFlow ? "Monitor setup" : "Feather Shop"}</title></head>
@@ -318,7 +355,7 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
       elementRef: null,
       value: null,
       rationale: "The safe read-only portion of the flow was inspected.",
-      coverage: "partial",
+      coverage: "covered",
       summary: "The initial page and monitor setup route were inspected without mutation."
     }
   ];
@@ -352,11 +389,47 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
   const regression = await readFile(report.artifacts.regression, "utf8");
   assert.match(regression, new RegExp(`${server.address().port}/agent-flow`));
   assert.match(regression, /yellowbirdAgentResponse1/);
-  assert.match(regression, /input\[name=\\"email\\"\].*fill/);
+  assert.match(regression, /input\[name=\\"email\\"\]/);
+  assert.match(regression, /\.nth\(0\)\.fill/);
   const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
   assert.match(diagnostics, /"event":"agent.engine.ready"/);
   assert.match(diagnostics, /"event":"agent.action.completed"/);
   assert.match(diagnostics, /"event":"agent.completed"/);
+});
+
+test("partial planner coverage is never promoted to covered", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-partial-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Inspect settings before billing.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "Billing remains unverified.",
+      coverage: "partial",
+      summary: "Settings were inspected, but billing was not."
+    }
+  ];
+
+  const report = await createAgentRunner(() => decisions.shift())({
+    target,
+    intent: "Assess settings and billing flows",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.status, "inconclusive");
+  assert.equal(report.observations.exploration.coverage, "partial");
 });
 
 test("mutation-oriented intent remains inconclusive at the safe boundary", async () => {
@@ -377,7 +450,7 @@ test("mutation-oriented intent remains inconclusive at the safe boundary", async
       elementRef: null,
       value: null,
       rationale: "Submission is outside the authorized profile.",
-      coverage: "partial",
+      coverage: "covered",
       summary: "The setup page was inspected, but no monitor was submitted."
     }
   ];
@@ -495,6 +568,164 @@ test("agent cannot select a form-submit control omitted by policy", async () => 
   assert.equal(report.observations.exploration.steps.length, 0);
   assert.equal(report.invalidTestMechanics[0].id, "agent-action-invalid");
   assert.doesNotMatch(report.observations.exploration.summary, /completed/i);
+});
+
+test("agent policy omits destructive controls and blocks write requests", async () => {
+  mutationRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-write-boundary-")
+  );
+  const exposedLabels = [];
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const plannerInput = JSON.parse(request.messages.at(-1).content);
+    exposedLabels.push(
+      ...plannerInput.page.availableElements.map((element) => element.label)
+    );
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: "element-3",
+          value: null,
+          rationale: "Inspect the details control.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The details interaction was inspected.",
+          coverage: "covered",
+          summary: "The details interaction was inspected."
+        };
+  })({
+    target: `${target}/agent-policy-boundary`,
+    intent: "Assess the details interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.deepEqual([...new Set(exposedLabels)], ["Inspect details"]);
+  assert.equal(mutationRequestCount, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.findings.length, 0);
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.equal(report.invalidTestMechanics[0].id, "agent-effect-blocked");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) =>
+        request.method === "POST" &&
+        request.reason === "agent-non-read-method"
+    )
+  );
+});
+
+test("agent replay persists and verifies duplicate locator ordinals", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-duplicate-locator-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-2",
+      value: null,
+      rationale: "Exercise the second query field.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The requested field was exercised.",
+      coverage: "covered",
+      summary: "The second query field was exercised."
+    }
+  ];
+  const report = await createAgentRunner(() => decisions.shift())({
+    target: `${target}/duplicate-fields`,
+    intent: "Assess the second query field interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.deepEqual(report.observations.exploration.steps[0].locator, {
+    kind: "css",
+    selector: 'input[name="query"]',
+    ordinal: 1,
+    matchCount: 2
+  });
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(regression, /toHaveCount\(2\)/);
+  assert.match(regression, /\.nth\(1\)\.fill/);
+  assert.doesNotMatch(regression, /\.first\(\)/);
+});
+
+test("scout refreshes provenance and rejects planner model transitions", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-model-transition-")
+  );
+  let modelReported = "probe-model";
+  let planningCall = 0;
+  const report = await createAgentRunner(
+    () => null,
+    async () => ({
+      capabilities: {
+        jsonSchema: "verified",
+        toolCalls: "unverified",
+        imageInput: "unverified"
+      },
+      diagnostic: null,
+      engine: {
+        provenance: () => ({
+          adapter: "test-compatible-engine",
+          endpointClass: "loopback",
+          modelRequested: "planner-fixture",
+          modelReported,
+          capabilityManifestVersion: "yellowbird.engine-capabilities.v1"
+        }),
+        completeStructured: async () => {
+          planningCall += 1;
+          modelReported = "planner-model";
+          return {
+            output:
+              planningCall === 1
+                ? {
+                    action: "act",
+                    elementRef: "element-1",
+                    value: null,
+                    rationale: "Inspect the setup route.",
+                    coverage: "continue",
+                    summary: ""
+                  }
+                : {
+                    action: "finish",
+                    elementRef: null,
+                    value: null,
+                    rationale: "The route was inspected.",
+                    coverage: "covered",
+                    summary: "The setup route was inspected."
+                  }
+          };
+        }
+      }
+    })
+  )({
+    target,
+    intent: "Assess the setup flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.invalidTestMechanics[0].id, "agent-model-transition");
+  assert.equal(report.provenance.engine.modelReported, "planner-model");
+  assert.equal(
+    report.provenance.agenticEngine,
+    "test-compatible-engine:planner-model"
+  );
 });
 
 test("an engine resolver defect still finalizes a truthful run", async () => {
