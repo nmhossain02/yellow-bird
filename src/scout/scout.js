@@ -235,10 +235,12 @@ ${workflowRows}
 - Mode: ${exploration.mode}
 - Status: ${exploration.status}
 - Coverage: ${exploration.coverage}
+- Coverage authority: ${exploration.verification?.satisfied ? `${exploration.verification.authority} (${exploration.verification.profile})` : "model-guided within YellowBird policy"}
 - Engine: ${exploration.engine || "not used"}
-- Planner summary: ${exploration.summary || "none"}
+- Coverage summary: ${exploration.summary || "none"}
 
-The planner summary describes model-guided coverage. It is not product-failure evidence.
+Coverage summaries and model proposals are not product-failure evidence. A named
+YellowBird-observed profile lists its completion criteria in machine-readable evidence.
 
 | Step | Status | Page | Evidence |
 | --- | --- | --- | --- |
@@ -898,6 +900,7 @@ export function createScoutRunner({
       summary: "",
       steps: [],
       pages: [],
+      verification: null,
       engine: null,
       capabilities: null,
       provenance: null,
@@ -1262,7 +1265,7 @@ export function createScoutRunner({
           resolvedEngine = await resolveEngine({
             baseUrl: options.engineBaseUrl,
             model: options.engineModel,
-            timeoutMs: Math.max(options.timeoutMs, 30_000)
+            timeoutMs: Math.max(options.timeoutMs, 120_000)
           });
         } catch {
           resolvedEngine = {

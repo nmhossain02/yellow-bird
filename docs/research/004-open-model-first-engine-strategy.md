@@ -51,6 +51,8 @@ The local scout now implements the first usable slice of this decision:
 - a generic OpenAI-compatible Chat Completions adapter;
 - a harmless strict JSON Schema conformance probe;
 - model and adapter provenance plus capability state in portable scout evidence;
+- named Yellow Bird-owned coverage criteria for the initial-interface basic-flow
+  profile, while other partial planner coverage remains inconclusive;
 - exact-origin link visits, deterministic synthetic field values, supplied select
   options, and narrowly filtered non-submit button actions;
 - deterministic replay that does not call the planning model;

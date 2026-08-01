@@ -305,6 +305,15 @@ function availableElements(snapshot, usedActionKeys, visited) {
     }));
 }
 
+function deterministicVisitFallback(elements) {
+  const visits = elements.filter((element) => element.allowedAction === "visit");
+  const primarySetupVisits = visits.filter((element) =>
+    /\b(?:begin|new|onboard|setup|start)\b/i.test(element.label || "")
+  );
+  if (primarySetupVisits.length === 1) return primarySetupVisits[0];
+  return visits.length === 1 ? visits[0] : null;
+}
+
 function plannerMessages({
   intent,
   snapshot,
@@ -318,7 +327,7 @@ function plannerMessages({
   return [
     {
       role: "system",
-      content: `You are YellowBird's bounded safe-interaction web test planner. Choose action act with exactly one supplied elementRef, or choose finish. YellowBird, not you, enforces each element's allowedAction. Set value to null for fill actions because YellowBird supplies a deterministic synthetic value. For select actions, value must exactly match a supplied option value. You may not invent elements or URLs, use real personal data or credentials, submit forms, mutate server state, authenticate, change expected results, or report product bugs. Prefer supplied read-only setup or navigation paths over existing-record detail pages when the owner asks to assess a basic user flow. Visiting a supplied link is a browser action. When the owner asks to assess, review, or inspect a basic flow, loading the relevant primary route and observing its controls may support covered coverage; preserve partial coverage whenever any requested area remains unverified. Safely exercising fields can add coverage but is not required unless the intent asks about form interaction. If the intent explicitly asks to create, submit, mutate, authenticate, or complete another prohibited effect, finish with partial or blocked coverage. Product findings require browser evidence outside your output.`
+      content: `You are YellowBird's bounded safe-interaction web test planner. Choose action act with exactly one supplied elementRef, or choose finish. YellowBird, not you, enforces each element's allowedAction. Set value to null for fill actions because YellowBird supplies a deterministic synthetic value. For select actions, value must exactly match a supplied option value. You may not invent elements or URLs, use real personal data or credentials, submit forms, mutate server state, authenticate, change expected results, or report product bugs. Prefer supplied read-only setup or navigation paths over existing-record detail pages when the owner asks to assess a basic user flow. An element supplied with allowedAction visit is a YellowBird-authorized read-only GET navigation; opening a path labeled New, Start, or Setup observes a form and does not submit it. Visiting a supplied link is a browser action. When requireAtLeastOneAction is true, finish is invalid until you select an authorized action. When the owner asks to assess, review, or inspect a basic flow, loading the relevant primary route and observing its controls may support covered coverage; preserve partial coverage whenever any requested area remains unverified. Safely exercising fields can add coverage but is not required unless the intent asks about form interaction. If the intent explicitly asks to create, submit, mutate, authenticate, or complete another prohibited effect, finish with partial or blocked coverage. Product findings require browser evidence outside your output.`
     },
     {
       role: "user",
@@ -345,7 +354,14 @@ function plannerMessages({
   ];
 }
 
-function completedExploration({ coverage, summary, steps, pages, issue }) {
+function completedExploration({
+  coverage,
+  summary,
+  steps,
+  pages,
+  issue,
+  verification = null
+}) {
   const completed = coverage === "covered";
   return {
     status: completed ? "completed" : "inconclusive",
@@ -353,6 +369,7 @@ function completedExploration({ coverage, summary, steps, pages, issue }) {
     summary,
     steps,
     pages,
+    verification,
     issue: completed
       ? null
       : issue || mechanicsIssue(
@@ -361,6 +378,51 @@ function completedExploration({ coverage, summary, steps, pages, issue }) {
           summary || `Agent coverage ended as ${coverage}`,
           "Grant a suitable deterministic scenario or refine the intent to fit safe, non-submitting browser interaction."
         )
+  };
+}
+
+function verifyOwnedCoverageProfile(intent, steps, pages, snapshot) {
+  const initialInterfaceFlow =
+    /^\s*(?:assess|evaluate|inspect|review)(?:\s+the)?\s+initial\s+interface\s+and(?:\s+the)?\s+basic\s+user\s+flow\s*[.!]?\s*$/i.test(
+      intent
+    );
+  if (!initialInterfaceFlow || hasProhibitedSemantics({ label: intent })) {
+    return null;
+  }
+  const criteria = [
+    {
+      id: "initial-page-observed",
+      satisfied: pages.length >= 1
+    },
+    {
+      id: "primary-route-visited",
+      satisfied: steps.some(
+        (step) => step.action === "visit" && step.status === "passed"
+      )
+    },
+    {
+      id: "distinct-destination-observed",
+      satisfied: new Set(pages.map((page) => page.url)).size >= 2
+    },
+    {
+      id: "destination-controls-observed",
+      satisfied: snapshot.elements.length > 0
+    },
+    {
+      id: "authorized-actions-passed",
+      satisfied:
+        steps.length > 0 && steps.every((step) => step.status === "passed")
+    }
+  ];
+  const satisfied = criteria.every((criterion) => criterion.satisfied);
+  return {
+    profile: "initial-interface-basic-flow.v1",
+    authority: "yellowbird-observed-criteria",
+    satisfied,
+    criteria,
+    summary: satisfied
+      ? "YellowBird observed the initial page, visited a distinct authorized setup route, and inventoried safe controls on the destination."
+      : "YellowBird could not satisfy every observed criterion for the initial-interface basic-flow profile."
   };
 }
 
@@ -493,16 +555,49 @@ export async function exploreIntentWithEngine({
       steps.length === 0 &&
       elements.length
     ) {
+      const fallback = round > 1 ? deterministicVisitFallback(elements) : null;
+      if (fallback) {
+        proposed = {
+          action: "act",
+          elementRef: fallback.ref,
+          value: null,
+          rationale:
+            "YellowBird selected the only unambiguous authorized setup navigation after the planner attempted to finish before required exploration.",
+          coverage: "continue",
+          summary: ""
+        };
+        record(
+          "warn",
+          "agent.planning.corrected",
+          "Applied a deterministic authorized navigation fallback",
+          { round, elementRef: fallback.ref, action: fallback.allowedAction }
+        );
+      } else {
       feedback =
-        "No browser action was exercised. Select the safest element that materially assesses the requested flow before finishing.";
-      continue;
+          "Finish is invalid because no browser action was exercised. Choose action act and select one supplied allowedAction visit, preferring a New, Start, or Setup path that materially assesses the requested flow.";
+        continue;
+      }
     }
     if (proposed.action === "finish") {
-      const summary = normalizeText(proposed.summary, 1_000);
-      const coverage = normalizedCoverage(intent, proposed.coverage, steps);
+      const verification = verifyOwnedCoverageProfile(
+        intent,
+        steps,
+        pages,
+        snapshot
+      );
+      const coverage = verification?.satisfied
+        ? "covered"
+        : normalizedCoverage(intent, proposed.coverage, steps);
+      const summary = verification?.satisfied
+        ? verification.summary
+        : normalizeText(proposed.summary, 1_000);
       record("info", "agent.completed", "Intent exploration completed", {
         coverage,
         plannerCoverage: proposed.coverage,
+        coverageAuthority: verification?.satisfied
+          ? verification.authority
+          : "model-guided",
+        coverageProfile: verification?.profile || null,
         visitedPageCount: pages.length,
         stepCount: steps.length
       });
@@ -510,7 +605,8 @@ export async function exploreIntentWithEngine({
         coverage,
         summary,
         steps,
-        pages
+        pages,
+        verification
       });
     }
     if (mustFinish) {

@@ -200,6 +200,11 @@ async function scout() {
   );
   if (report.observations.exploration.requested) {
     console.log(`Agent: ${report.observations.exploration.status}`);
+    if (report.observations.exploration.verification?.satisfied) {
+      console.log(
+        `Coverage verified: ${report.observations.exploration.verification.profile}`
+      );
+    }
     console.log(
       `Engine: ${report.observations.exploration.engine || "unavailable"}`
     );

@@ -30,7 +30,8 @@ bun run doctor
 ```
 
 `doctor` reports the selected model and whether strict JSON Schema output passed
-the harmless conformance probe. Unless `--no-agent` disables exploration, a scout
+the harmless conformance probe. The first probe may wait up to two minutes for a
+local model to load cold. Unless `--no-agent` disables exploration, a scout
 with explicit `--intent` is `inconclusive` with exit code `3` if no compatible
 engine is available. It never falls back to an initial-page `clear` result that
 did not cover the intent.
@@ -163,9 +164,12 @@ authentication, credential use, cross-origin navigation, and destructive
 controls are not available to the model as actions. The model proposes one
 supplied element at a time; YellowBird validates and executes the action. Model
 text is coverage guidance, never product-failure evidence. Partial planner
-coverage remains partial, and an intent needing server-side mutation or another
-action outside this profile produces an `inconclusive` result instead of a false
-pass.
+coverage remains partial unless a named YellowBird-owned profile satisfies every
+machine-readable observed criterion. The initial-interface basic-flow profile,
+for example, requires the initial page, a passed visit to a distinct authorized
+route, safe controls observed on that destination, and no failed agent action.
+An intent needing server-side mutation or another action outside this profile
+produces an `inconclusive` result instead of a false pass.
 
 Page text and the bounded control inventory are sent to the configured model
 endpoint. The default endpoint is loopback. Operators choosing a remote endpoint

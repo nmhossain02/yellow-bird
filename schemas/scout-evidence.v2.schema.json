@@ -185,6 +185,7 @@
             "summary",
             "steps",
             "pages",
+            "verification",
             "engine",
             "capabilities",
             "provenance",
@@ -258,6 +259,40 @@
               ]
             },
             "issue": { "type": ["object", "null"] },
+            "verification": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "required": [
+                    "profile",
+                    "authority",
+                    "satisfied",
+                    "criteria",
+                    "summary"
+                  ],
+                  "properties": {
+                    "profile": { "type": "string" },
+                    "authority": {
+                      "const": "yellowbird-observed-criteria"
+                    },
+                    "satisfied": { "type": "boolean" },
+                    "criteria": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["id", "satisfied"],
+                        "properties": {
+                          "id": { "type": "string" },
+                          "satisfied": { "type": "boolean" }
+                        }
+                      }
+                    },
+                    "summary": { "type": "string" }
+                  }
+                }
+              ]
+            },
             "pages": {
               "type": "array",
               "items": {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -22,19 +22,34 @@ let target;
 let mutationRequestCount = 0;
 
 async function runCommand(command, cwd, env) {
-  const child = Bun.spawn({
-    cmd: command,
-    cwd,
-    env: env ? { ...process.env, ...env } : undefined,
-    stdout: "pipe",
-    stderr: "pipe"
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text()
+  const captureDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-command-output-")
+  );
+  const stdoutPath = join(captureDirectory, "stdout.txt");
+  const stderrPath = join(captureDirectory, "stderr.txt");
+  const [stdoutHandle, stderrHandle] = await Promise.all([
+    open(stdoutPath, "w"),
+    open(stderrPath, "w")
   ]);
-  return { exitCode, stdout, stderr };
+  try {
+    const child = Bun.spawn({
+      cmd: command,
+      cwd,
+      env: env ? { ...process.env, ...env } : undefined,
+      stdout: stdoutHandle.fd,
+      stderr: stderrHandle.fd
+    });
+    const exitCode = await child.exited;
+    await Promise.all([stdoutHandle.close(), stderrHandle.close()]);
+    const [stdout, stderr] = await Promise.all([
+      readFile(stdoutPath, "utf8"),
+      readFile(stderrPath, "utf8")
+    ]);
+    return { exitCode, stdout, stderr };
+  } finally {
+    if (stdoutHandle.fd !== -1) await stdoutHandle.close();
+    if (stderrHandle.fd !== -1) await stderrHandle.close();
+  }
 }
 
 function assertConformsToSchema(schema, value, path = "$") {
@@ -448,6 +463,53 @@ test("partial planner coverage is never promoted to covered", async () => {
   assert.equal(report.outcome, "inconclusive");
   assert.equal(report.observations.exploration.status, "inconclusive");
   assert.equal(report.observations.exploration.coverage, "partial");
+});
+
+test("planner finish loops fall back to one unambiguous safe setup visit", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-finish-fallback-")
+  );
+  const report = await createAgentRunner(() => ({
+    action: "finish",
+    elementRef: null,
+    value: null,
+    rationale: "No action is needed.",
+    coverage: "partial",
+    summary: "The planner remained conservative."
+  }))({
+    target,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.deepEqual(report.observations.exploration.verification, {
+    profile: "initial-interface-basic-flow.v1",
+    authority: "yellowbird-observed-criteria",
+    satisfied: true,
+    criteria: [
+      { id: "initial-page-observed", satisfied: true },
+      { id: "primary-route-visited", satisfied: true },
+      { id: "distinct-destination-observed", satisfied: true },
+      { id: "destination-controls-observed", satisfied: true },
+      { id: "authorized-actions-passed", satisfied: true }
+    ],
+    summary:
+      "YellowBird observed the initial page, visited a distinct authorized setup route, and inventoried safe controls on the destination."
+  });
+  assert.deepEqual(
+    report.observations.exploration.steps.map(({ action, url, status }) => ({
+      action,
+      url,
+      status
+    })),
+    [{ action: "visit", url: `${target}/agent-flow`, status: "passed" }]
+  );
+  assert.match(
+    await readFile(report.artifacts.diagnostics, "utf8"),
+    /"event":"agent.planning.corrected"/
+  );
 });
 
 test("mutation-oriented intent remains inconclusive at the safe boundary", async () => {
@@ -1038,47 +1100,51 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
   }
 });
 
-test("CLI reports a configured but unavailable intent engine as inconclusive", async () => {
-  const unavailable = createServer();
-  await new Promise((resolve, reject) => {
-    unavailable.once("error", reject);
-    unavailable.listen(0, "127.0.0.1", resolve);
-  });
-  const unavailablePort = unavailable.address().port;
-  await new Promise((resolve, reject) => {
-    unavailable.close((error) => (error ? reject(error) : resolve()));
-  });
-  const outputDirectory = await mkdtemp(
-    join(tmpdir(), "yellowbird-cli-engine-unavailable-")
-  );
-  const result = await runCommand(
-    [
-      process.execPath,
-      resolve("bin/yellowbird.js"),
-      "scout",
-      "--target",
-      target,
-      "--intent",
-      "Assess the initial interface",
-      "--engine-base-url",
-      `http://127.0.0.1:${unavailablePort}/v1`,
-      "--output",
-      outputDirectory
-    ],
-    resolve(".")
-  );
+test(
+  "CLI reports a configured but unavailable intent engine as inconclusive",
+  async () => {
+    const unavailable = createServer();
+    await new Promise((resolve, reject) => {
+      unavailable.once("error", reject);
+      unavailable.listen(0, "127.0.0.1", resolve);
+    });
+    const unavailablePort = unavailable.address().port;
+    await new Promise((resolve, reject) => {
+      unavailable.close((error) => (error ? reject(error) : resolve()));
+    });
+    const outputDirectory = await mkdtemp(
+      join(tmpdir(), "yellowbird-cli-engine-unavailable-")
+    );
+    const result = await runCommand(
+      [
+        process.execPath,
+        resolve("bin/yellowbird.js"),
+        "scout",
+        "--target",
+        target,
+        "--intent",
+        "Assess the initial interface",
+        "--engine-base-url",
+        `http://127.0.0.1:${unavailablePort}/v1`,
+        "--output",
+        outputDirectory
+      ],
+      resolve(".")
+    );
 
-  assert.equal(result.exitCode, 3, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stdout, /inconclusive/);
-  assert.match(result.stdout, /agent-engine-unavailable/);
-  assert.match(result.stdout, /Start the configured engine endpoint/);
-  assert.doesNotMatch(result.stderr, /yellowbird:/i);
-  const evidence = JSON.parse(
-    await readFile(join(outputDirectory, "evidence.json"), "utf8")
-  );
-  assert.equal(evidence.outcome, "inconclusive");
-  assert.equal(evidence.observations.exploration.coverage, "blocked");
-});
+    assert.equal(result.exitCode, 3, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /inconclusive/);
+    assert.match(result.stdout, /agent-engine-unavailable/);
+    assert.match(result.stdout, /Start the configured engine endpoint/);
+    assert.doesNotMatch(result.stderr, /yellowbird:/i);
+    const evidence = JSON.parse(
+      await readFile(join(outputDirectory, "evidence.json"), "utf8")
+    );
+    assert.equal(evidence.outcome, "inconclusive");
+    assert.equal(evidence.observations.exploration.coverage, "blocked");
+  },
+  15_000
+);
 
 test("scout writes portable evidence and a deterministic regression", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-clear-"));
@@ -1226,7 +1292,7 @@ test("scout repairs a loopback HTTPS-to-HTTP transport mismatch with diagnostics
     outputDirectory
   );
   assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
-});
+}, 15_000);
 
 test("navigation setup failures are inconclusive and not duplicate product findings", async () => {
   const unavailable = createServer();

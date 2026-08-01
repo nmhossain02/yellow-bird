@@ -1,6 +1,7 @@
 import { cleanDiagnosticText, diagnosticUrl } from "./diagnostics.js";
 
 const DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
+const DEFAULT_ENGINE_TIMEOUT_MS = 120_000;
 const PROBE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -224,7 +225,7 @@ export function createCompatibleEngine({
   model,
   apiKey,
   fetchImpl = fetch,
-  timeoutMs = 30_000
+  timeoutMs = DEFAULT_ENGINE_TIMEOUT_MS
 } = {}) {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   let selectedModel = model || null;
@@ -388,7 +389,10 @@ export async function resolveAgentEngine(config = {}) {
 }
 
 export async function inspectAgentEngine(config = {}) {
-  const resolved = await resolveAgentEngine({ ...config, timeoutMs: 5_000 });
+  const resolved = await resolveAgentEngine({
+    ...config,
+    timeoutMs: config.timeoutMs ?? DEFAULT_ENGINE_TIMEOUT_MS
+  });
   return resolved.engine
     ? {
         available: true,
