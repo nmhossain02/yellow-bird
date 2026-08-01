@@ -110,6 +110,7 @@ yellowbird scout \
   --target http://127.0.0.1:3000 \
   --intent "Assess the initial interface and basic user flow" \
   --agent-primary-route /monitors/new \
+  --agent-expect-text "Product URL" \
   --output yellowbird-report.md \
   --verbose
 ```
@@ -132,6 +133,11 @@ requests are blocked unless their URLs are declared with repeated
 `--agent-load-route` options. Load declarations may end in `*` for an explicit
 path prefix. Relative declarations resolve against the target, and every
 declaration must remain on its exact origin.
+
+Repeated `--agent-expect-text` declarations bind the owned coverage profile to
+text the owner expects on the visited primary destination. YellowBird records
+whether each bounded destination assertion was satisfied and preserves the same
+assertions in the portable replay.
 
 The compatible endpoint can be selected per command:
 

@@ -440,6 +440,9 @@ beforeAll(async () => {
     const deepSnapshotBoundary = request.url?.startsWith(
       "/agent-deep-snapshot-boundary"
     );
+    const replayLocatorBoundary = request.url?.startsWith(
+      "/agent-replay-locator-boundary"
+    );
     const undeclaredNavigationSurface = request.url?.startsWith(
       "/agent-undeclared-navigation-surface"
     );
@@ -515,6 +518,18 @@ beforeAll(async () => {
             <form action="http://localhost:${server.address().port}/agent-flow">
               <button type="button">View details</button>
             </form>
+            <section hidden>
+              <p>hidden-copy-secret</p>
+              <a href="/agent-flow">Hidden setup choice</a>
+            </section>
+            <section aria-hidden="true">
+              <p>aria-copy-secret</p>
+              <a href="/agent-flow">Aria hidden setup choice</a>
+            </section>
+            <section style="display: none">
+              <p>css-copy-secret</p>
+              <a href="/agent-flow">CSS hidden setup choice</a>
+            </section>
             <a href="/agent-flow">Inspect setup</a>
           </body>
         </html>`);
@@ -983,6 +998,20 @@ beforeAll(async () => {
         <html>
           <head><title>Deep snapshot boundary</title></head>
           <body>${inertNodes}<a href="/agent-flow">Late setup route</a></body>
+        </html>`);
+      return;
+    }
+    if (replayLocatorBoundary) {
+      const hiddenInputs = '<input name="query" aria-label="Hidden query">'.repeat(
+        5_100
+      );
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Replay locator boundary</title></head>
+          <body>
+            <input name="query" aria-label="Visible query">
+            <section style="display: none">${hiddenInputs}</section>
+          </body>
         </html>`);
       return;
     }
@@ -2133,6 +2162,7 @@ test("planner finish loops fall back to one unambiguous safe setup visit", async
     target,
     intent: "Assess the initial interface and basic user flow",
     exploreIntent: true,
+    agentExpectedTexts: ["Create monitor", "Choose a product URL"],
     outputDirectory
   });
 
@@ -2146,10 +2176,14 @@ test("planner finish loops fall back to one unambiguous safe setup visit", async
       { id: "primary-route-visited", satisfied: true },
       { id: "distinct-destination-observed", satisfied: true },
       { id: "destination-controls-observed", satisfied: true },
-      { id: "authorized-actions-passed", satisfied: true }
+      { id: "authorized-actions-passed", satisfied: true },
+      {
+        id: "owner-declared-destination-text-observed",
+        satisfied: true
+      }
     ],
     summary:
-      "YellowBird observed the initial page, visited a distinct authorized setup route, and inventoried safe controls on the destination."
+      "YellowBird observed the initial page, visited a distinct authorized setup route, and matched the owner-declared destination text."
   });
   assert.deepEqual(
     report.observations.exploration.steps.map(({ action, url, status }) => ({
@@ -2162,6 +2196,43 @@ test("planner finish loops fall back to one unambiguous safe setup visit", async
   assert.match(
     await readFile(report.artifacts.diagnostics, "utf8"),
     /"event":"agent.planning.corrected"/
+  );
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(regression, /toContainText\("Create monitor"\)/);
+  assert.match(regression, /toContainText\("Choose a product URL"\)/);
+});
+
+test("owned coverage rejects a primary destination missing declared text", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-destination-assertion-")
+  );
+  const report = await createAgentRunner(() => ({
+    action: "finish",
+    elementRef: null,
+    value: null,
+    rationale: "No action is needed.",
+    coverage: "partial",
+    summary: "The planner remained conservative."
+  }))({
+    target,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentExpectedTexts: ["Price Scout product URL"],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.verification.satisfied, false);
+  assert.deepEqual(
+    report.observations.exploration.steps[0].destinationAssertions,
+    [{ text: "Price Scout product URL", satisfied: false }]
+  );
+  assert.equal(
+    report.observations.exploration.verification.criteria.find(
+      (criterion) =>
+        criterion.id === "owner-declared-destination-text-observed"
+    ).satisfied,
+    false
   );
 });
 
@@ -3417,6 +3488,55 @@ test("agent snapshots stop traversal before controls beyond the DOM bound", asyn
   assert.ok(Date.now() - startedAt < 2_000);
 }, 5_000);
 
+test("agent replay locators stay bounded when broad matches exceed the DOM limit", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-replay-locator-boundary-")
+  );
+  let planningCall = 0;
+  let firstAvailableElements;
+  const report = await createAgentRunner((request) => {
+    const plannerInput = JSON.parse(request.messages.at(-1).content);
+    planningCall += 1;
+    if (planningCall === 1) {
+      firstAvailableElements = plannerInput.page.availableElements;
+      return {
+        action: "act",
+        elementRef: firstAvailableElements[0].ref,
+        value: null,
+        rationale: "Exercise the visible query field.",
+        coverage: "continue",
+        summary: ""
+      };
+    }
+    return {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The visible field was inspected.",
+      coverage: "partial",
+      summary: "The visible field was inspected."
+    };
+  })({
+    target: `${target}/agent-replay-locator-boundary`,
+    intent: "Assess the visible query field interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.deepEqual(
+    firstAvailableElements.map((element) => element.label),
+    ["Visible query"]
+  );
+  assert.deepEqual(report.observations.exploration.steps[0].locator, {
+    kind: "css",
+    selector: ":root > body:nth-child(2) > input:nth-child(1)",
+    ordinal: 0,
+    matchCount: 1
+  });
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(regression, /toHaveCount\(1\)/);
+}, 10_000);
+
 test("detached accessible-name candidates are skipped within a bounded interval", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-detaching-snapshot-")
@@ -3689,7 +3809,7 @@ test("agent policy omits cross-origin and authentication controls", async () => 
   assert.deepEqual(exposedLabels[0], ["Inspect setup"]);
   assert.doesNotMatch(
     plannerInputs.join("\n"),
-    /secret|user_auth|auth_callback|authCallback|deleteAccount|createMonitor/
+    /secret|user_auth|auth_callback|authCallback|deleteAccount|createMonitor|hidden-copy-secret|aria-copy-secret|css-copy-secret/
   );
   assert.equal(report.outcome, "clear");
   assert.equal(report.observations.exploration.steps[0].action, "visit");
@@ -4141,6 +4261,8 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
         "--no-agent",
         "--agent-primary-route",
         "/agent-flow",
+        "--agent-expect-text",
+        "Create monitor",
         "--engine-base-url",
         `http://127.0.0.1:${engineServer.address().port}/v1`,
         "--engine-model",
@@ -4174,7 +4296,11 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
     );
     assert.equal(
       evidence.observations.exploration.summary,
-      "YellowBird observed the initial page, visited a distinct authorized setup route, and inventoried safe controls on the destination."
+      "YellowBird observed the initial page, visited a distinct authorized setup route, and matched the owner-declared destination text."
+    );
+    assert.deepEqual(
+      evidence.observations.exploration.steps[0].destinationAssertions,
+      [{ text: "Create monitor", satisfied: true }]
     );
     const markdown = await readFile(join(outputDirectory, "report.md"), "utf8");
     assert.doesNotMatch(markdown, /script|alert\(1\)|owned/);
@@ -4451,6 +4577,7 @@ test("historical v2 evidence without exploration remains valid", async () => {
     outputDirectory
   });
   delete evidence.observations.exploration;
+  delete evidence.assertions.agentExpectedTexts;
   const schema = JSON.parse(
     await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
   );

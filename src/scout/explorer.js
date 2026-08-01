@@ -206,50 +206,6 @@ function elementAction(element, authorizedOrigin, authorizedNavigationRoutes) {
   return null;
 }
 
-async function replayLocator(page, element) {
-  const candidates = [
-    ...(element.id
-      ? [{ kind: "css", selector: `${element.tag}[id=${JSON.stringify(element.id)}]` }]
-      : []),
-    ...(element.name
-      ? [
-          {
-            kind: "css",
-            selector: `${element.tag}[name=${JSON.stringify(element.name)}]`
-          }
-        ]
-      : []),
-    ...(element.ariaLabel
-      ? [{ kind: "role", role: element.role, name: element.ariaLabel }]
-      : []),
-    ...(element.label
-      ? [{ kind: "role", role: element.role, name: element.label }]
-      : []),
-    { kind: "css", selector: element.tag }
-  ];
-  for (const candidate of candidates) {
-    const locator =
-      candidate.kind === "css"
-        ? page.locator(candidate.selector)
-        : page.getByRole(candidate.role, { name: candidate.name, exact: true });
-    let refs;
-    try {
-      refs = await locator.evaluateAll((elements) =>
-        elements.map((candidateElement) =>
-          candidateElement.getAttribute("data-yellowbird-agent-ref")
-        )
-      );
-    } catch {
-      continue;
-    }
-    const ordinal = refs.indexOf(element.ref);
-    if (ordinal >= 0) {
-      return { ...candidate, ordinal, matchCount: refs.length };
-    }
-  }
-  return null;
-}
-
 function syntheticValue(element) {
   if (element.type === "email" || /\bemail\b/i.test(element.label)) {
     return "yellowbird@example.test";
@@ -305,8 +261,51 @@ async function snapshotPage(
       remainingCharacters -= length;
       return text.slice(0, length);
     };
+    const hiddenState = new WeakMap();
+    const isLocallyHidden = (element) => {
+      if (
+        !element.isConnected ||
+        element.hidden ||
+        element.inert ||
+        element.getAttribute("aria-hidden")?.trim().toLowerCase() === "true" ||
+        ["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(element.tagName) ||
+        (element.tagName === "INPUT" &&
+          String(element.type).toLowerCase() === "hidden")
+      ) {
+        return true;
+      }
+      try {
+        const style = window.getComputedStyle(element);
+        return (
+          style.display === "none" ||
+          ["hidden", "collapse"].includes(style.visibility) ||
+          style.contentVisibility === "hidden" ||
+          Number(style.opacity) === 0
+        );
+      } catch {
+        return true;
+      }
+    };
+    const isHiddenInTree = (element) => {
+      if (!element) return true;
+      if (hiddenState.has(element)) return hiddenState.get(element);
+      const ancestry = [];
+      let current = element;
+      while (current && !hiddenState.has(current)) {
+        if (ancestry.length >= limits.traversalNodeCount) return true;
+        ancestry.push(current);
+        current = current.parentElement;
+      }
+      let hidden = current ? hiddenState.get(current) : false;
+      for (let index = ancestry.length - 1; index >= 0; index -= 1) {
+        const candidate = ancestry[index];
+        hidden = hidden || isLocallyHidden(candidate);
+        hiddenState.set(candidate, hidden);
+      }
+      return hiddenState.get(element);
+    };
     const boundedNodeText = (root, maximum) => {
-      if (!root || maximum <= 0) return "";
+      if (!root || maximum <= 0 || isHiddenInTree(root)) return "";
       const chunks = [];
       let characters = 0;
       let visitedNodes = 0;
@@ -321,16 +320,12 @@ async function snapshotPage(
         const textNode = textWalker.nextNode();
         if (!textNode) break;
         visitedNodes += 1;
-        if (textNode.nodeType !== Node.TEXT_NODE) continue;
-        const parent = textNode.parentElement;
-        if (
-          !parent ||
-          parent.hidden ||
-          parent.getAttribute("aria-hidden") === "true" ||
-          ["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(parent.tagName)
-        ) {
+        if (textNode.nodeType === Node.ELEMENT_NODE) {
+          isHiddenInTree(textNode);
           continue;
         }
+        const parent = textNode.parentElement;
+        if (isHiddenInTree(parent)) continue;
         const text = String(textNode.nodeValue || "");
         if (!text) continue;
         const separatorLength = chunks.length ? 1 : 0;
@@ -364,12 +359,82 @@ async function snapshotPage(
       const candidate = walker.nextNode();
       if (!candidate) break;
       visitedElementNodes += 1;
-      if (candidate.matches("a[href], button, input, textarea, select")) {
+      if (
+        !isHiddenInTree(candidate) &&
+        candidate.matches("a[href], button, input, textarea, select")
+      ) {
         candidateElements.push(candidate);
       }
     }
+    const replayElements = [];
+    const replayWalker = document.createTreeWalker(
+      document.documentElement,
+      NodeFilter.SHOW_ELEMENT
+    );
+    while (replayElements.length < limits.traversalNodeCount) {
+      const candidate = replayWalker.nextNode();
+      if (!candidate) break;
+      replayElements.push(candidate);
+    }
+    const replayTraversalComplete = replayWalker.nextNode() === null;
+    const structuralReplayLocator = (element) => {
+      if (!element.isConnected) return null;
+      const segments = [];
+      let inspected = 0;
+      let current = element;
+      while (current && current !== document.documentElement) {
+        inspected += 1;
+        if (inspected > limits.traversalNodeCount) return null;
+        let ordinal = 1;
+        let sibling = current.previousElementSibling;
+        while (sibling) {
+          inspected += 1;
+          if (inspected > limits.traversalNodeCount) return null;
+          ordinal += 1;
+          sibling = sibling.previousElementSibling;
+        }
+        segments.push(`${current.tagName.toLowerCase()}:nth-child(${ordinal})`);
+        current = current.parentElement;
+      }
+      if (current !== document.documentElement) return null;
+      const selector = `:root > ${segments.reverse().join(" > ")}`;
+      return selector.length <= limits.url
+        ? { kind: "css", selector, ordinal: 0, matchCount: 1 }
+        : null;
+    };
+    const replayLocator = (element) => {
+      if (!replayTraversalComplete) return structuralReplayLocator(element);
+      const tag = element.tagName.toLowerCase();
+      const candidates = [
+        ...(element.id
+          ? [`${tag}[id=${JSON.stringify(element.id)}]`]
+          : []),
+        ...(element.getAttribute("name")
+          ? [`${tag}[name=${JSON.stringify(element.getAttribute("name"))}]`]
+          : []),
+        tag
+      ];
+      for (const selector of candidates) {
+        let matchCount = 0;
+        let ordinal = -1;
+        try {
+          for (const candidate of replayElements) {
+            if (!candidate.matches(selector)) continue;
+            if (candidate === element) ordinal = matchCount;
+            matchCount += 1;
+          }
+        } catch {
+          continue;
+        }
+        if (ordinal >= 0) {
+          return { kind: "css", selector, ordinal, matchCount };
+        }
+      }
+      return structuralReplayLocator(element);
+    };
     const elements = candidateElements
       .flatMap((element, index) => {
+        if (!element.isConnected || isHiddenInTree(element)) return [];
         const tag = element.tagName.toLowerCase();
         if ((element.labels?.length || 0) > limits.labelCount) return [];
         const labelTexts = Array.from(element.labels || [], (labelElement) =>
@@ -467,6 +532,8 @@ async function snapshotPage(
         ) {
           return [];
         }
+        const locator = replayLocator(element);
+        if (!locator) return [];
         const ref = `element-${index + 1}`;
         const candidate = {
           ref,
@@ -484,7 +551,8 @@ async function snapshotPage(
           disabled: Boolean(element.disabled),
           formAction: form?.action ? String(form.action) : null,
           formHasPassword,
-          options: optionRecords
+          options: optionRecords,
+          locator
         };
         const candidateCharacters = JSON.stringify(candidate).length;
         if (candidateCharacters > remainingCharacters) return [];
@@ -547,12 +615,9 @@ async function snapshotPage(
         label: normalizeText(option.label, 120),
         value: String(option.value).slice(0, 200)
       })),
-      runtimeSelector: `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`
+      runtimeSelector: `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`,
+      locator: rawElement.locator
     };
-    element.locator = await replayLocator(page, {
-      ...rawElement,
-      label: element.label
-    });
     if (!element.locator) continue;
     element.key = [raw.url, rawElement.ref, action].join("|");
     elements.push(element);
@@ -694,7 +759,8 @@ function verifyOwnedCoverageProfile(
   intent,
   steps,
   pages,
-  authorizedPrimaryRoutes
+  authorizedPrimaryRoutes,
+  expectedDestinationTexts
 ) {
   const initialInterfaceFlow =
     /^\s*(?:assess|evaluate|inspect|review)(?:\s+the)?\s+initial\s+interface\s+and(?:\s+the)?\s+basic\s+user\s+flow\s*[.!]?\s*$/i.test(
@@ -748,7 +814,20 @@ function verifyOwnedCoverageProfile(
       id: "authorized-actions-passed",
       satisfied:
         steps.length > 0 && steps.every((step) => step.status === "passed")
-    }
+    },
+    ...(expectedDestinationTexts.length
+      ? [
+          {
+            id: "owner-declared-destination-text-observed",
+            satisfied:
+              passedVisit?.destinationAssertions?.length ===
+                expectedDestinationTexts.length &&
+              passedVisit.destinationAssertions.every(
+                (assertion) => assertion.satisfied
+              )
+          }
+        ]
+      : [])
   ];
   const satisfied = criteria.every((criterion) => criterion.satisfied);
   return {
@@ -757,9 +836,18 @@ function verifyOwnedCoverageProfile(
     satisfied,
     criteria,
     summary: satisfied
-      ? "YellowBird observed the initial page, visited a distinct authorized setup route, and inventoried safe controls on the destination."
+      ? expectedDestinationTexts.length
+        ? "YellowBird observed the initial page, visited a distinct authorized setup route, and matched the owner-declared destination text."
+        : "YellowBird observed the initial page, visited a distinct authorized setup route, and inventoried safe controls on the destination."
       : "YellowBird could not satisfy every observed criterion for the initial-interface basic-flow profile."
   };
+}
+
+function destinationAssertions(snapshot, expectedDestinationTexts) {
+  return expectedDestinationTexts.map((text) => ({
+    text,
+    satisfied: snapshot.bodyText.includes(text)
+  }));
 }
 
 function unverifiedCoverage(plannerCoverage, steps) {
@@ -779,7 +867,8 @@ export async function exploreIntentWithEngine({
   record,
   actionPolicy = null,
   authorizedNavigationRoutes = new Set(),
-  authorizedPrimaryRoutes = new Set()
+  authorizedPrimaryRoutes = new Set(),
+  expectedDestinationTexts = []
 }) {
   const steps = [];
   const pages = [];
@@ -924,7 +1013,8 @@ export async function exploreIntentWithEngine({
         intent,
         steps,
         pages,
-        authorizedPrimaryRoutes
+        authorizedPrimaryRoutes,
+        expectedDestinationTexts
       );
       const coverage = verification
         ? verification.satisfied
@@ -1083,6 +1173,10 @@ export async function exploreIntentWithEngine({
         url: actionPageUrl,
         title: snapshot.title,
         destinationControlCount: snapshot.elements.length,
+        destinationAssertions:
+          action === "visit"
+            ? destinationAssertions(snapshot, expectedDestinationTexts)
+            : [],
         httpStatus: response?.status() ?? null,
         evidence:
           response && response.status() >= 400
@@ -1126,6 +1220,7 @@ export async function exploreIntentWithEngine({
         url: diagnosticUrl(page.url()).url,
         title: "",
         destinationControlCount: null,
+        destinationAssertions: [],
         httpStatus: response?.status() ?? null,
         evidence: detail,
         rationale: normalizeText(proposed.rationale, 500),

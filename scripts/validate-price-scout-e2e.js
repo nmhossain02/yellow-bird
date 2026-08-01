@@ -15,6 +15,12 @@ const priceScoutDirectory = resolve(
 );
 const target = "https://localhost:3000";
 const healthUrl = "http://localhost:3000/";
+const priceScoutExpectedDestinationTexts = [
+  "Track any public product page",
+  "Product URL",
+  "Tracking instruction",
+  "Frequency"
+];
 
 function requireCondition(condition, message) {
   if (!condition) throw new Error(message);
@@ -57,6 +63,34 @@ function canonicalRepository(value) {
     .replace(/\/$/, "");
 }
 
+async function verifyPriceScoutCheckout(stage, expectedCommit) {
+  const [commit, status] = await Promise.all([
+    checked(
+      ["git", "rev-parse", "HEAD"],
+      priceScoutDirectory,
+      `${stage} revision verification`,
+      externalCommandEnvironment
+    ),
+    checked(
+      ["git", "status", "--porcelain"],
+      priceScoutDirectory,
+      `${stage} cleanliness verification`,
+      externalCommandEnvironment
+    )
+  ]);
+  requireCondition(
+    status === "",
+    `The Price Scout checkout must be clean ${stage}`
+  );
+  if (expectedCommit) {
+    requireCondition(
+      commit === expectedCommit,
+      `The Price Scout checkout revision changed ${stage}`
+    );
+  }
+  return commit;
+}
+
 const engineConfig = validateAgentEngineConfig();
 requireCondition(
   !process.env.YELLOWBIRD_PRICE_SCOUT_TARGET &&
@@ -78,21 +112,8 @@ requireCondition(
   canonicalRepository(origin) === expectedRepository,
   `Expected the real Price Scout repository at ${priceScoutDirectory}, received ${origin}`
 );
-const priceScoutCommit = await checked(
-  ["git", "rev-parse", "HEAD"],
-  priceScoutDirectory,
-  "Price Scout revision verification",
-  externalCommandEnvironment
-);
-const priceScoutStatus = await checked(
-  ["git", "status", "--porcelain"],
-  priceScoutDirectory,
-  "Price Scout checkout cleanliness verification",
-  externalCommandEnvironment
-);
-requireCondition(
-  priceScoutStatus === "",
-  "The Price Scout checkout must be clean before the end-to-end gate starts it"
+const priceScoutCommit = await verifyPriceScoutCheckout(
+  "before the end-to-end gate starts it"
 );
 await checked(
   ["make", "up"],
@@ -100,15 +121,9 @@ await checked(
   "Price Scout target startup from the verified checkout",
   externalCommandEnvironment
 );
-const startedPriceScoutCommit = await checked(
-  ["git", "rev-parse", "HEAD"],
-  priceScoutDirectory,
-  "Started Price Scout revision verification",
-  externalCommandEnvironment
-);
-requireCondition(
-  startedPriceScoutCommit === priceScoutCommit,
-  "The Price Scout checkout revision changed during target startup"
+await verifyPriceScoutCheckout(
+  "after target startup",
+  priceScoutCommit
 );
 
 let healthResponse;
@@ -131,6 +146,10 @@ requireCondition(
 const outputDirectory = await mkdtemp(
   join(tmpdir(), "yellowbird-real-price-scout-")
 );
+await verifyPriceScoutCheckout(
+  "immediately before the scout",
+  priceScoutCommit
+);
 const scout = await run(
   [
     process.execPath,
@@ -144,6 +163,10 @@ const scout = await run(
     engineConfig.baseUrl,
     "--agent-primary-route",
     "/monitors/new",
+    ...priceScoutExpectedDestinationTexts.flatMap((text) => [
+      "--agent-expect-text",
+      text
+    ]),
     "--agent-load-route",
     "/assets/*",
     "--agent-load-route",
@@ -198,7 +221,7 @@ requireCondition(
     ),
   "The evidence did not preserve the declared Price Scout route authority"
 );
-const passedMonitorVisit = evidence.observations.exploration.steps.some(
+const passedMonitorVisit = evidence.observations.exploration.steps.find(
   (step) =>
     step.action === "visit" &&
     step.status === "passed" &&
@@ -207,6 +230,16 @@ const passedMonitorVisit = evidence.observations.exploration.steps.some(
 requireCondition(
   passedMonitorVisit,
   "The scout did not complete the real /monitors/new flow"
+);
+requireCondition(
+  passedMonitorVisit.destinationAssertions?.length ===
+    priceScoutExpectedDestinationTexts.length &&
+    priceScoutExpectedDestinationTexts.every((text) =>
+      passedMonitorVisit.destinationAssertions.some(
+        (assertion) => assertion.text === text && assertion.satisfied
+      )
+    ),
+  "The /monitors/new flow did not expose the declared Price Scout form controls"
 );
 requireCondition(
   evidence.observations.title === "Price Scout",
@@ -236,6 +269,7 @@ process.stdout.write(
       outcome: evidence.outcome,
       coverageProfile: evidence.observations.exploration.verification.profile,
       visitedPath: "/monitors/new",
+      destinationAssertions: priceScoutExpectedDestinationTexts,
       artifacts: outputDirectory
     },
     null,

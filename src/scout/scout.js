@@ -149,6 +149,39 @@ export function validateWorkflow(input = {}) {
   };
 }
 
+function normalizeAgentExpectedTexts(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("agent destination text assertions must be an array");
+  }
+  if (value.length > 20) {
+    throw new Error("agent destination text assertions are limited to 20 entries");
+  }
+  let totalCharacters = 0;
+  return value.map((text, index) => {
+    if (typeof text !== "string") {
+      throw new Error(
+        `agent destination text assertion ${index + 1} must be a string`
+      );
+    }
+    const normalized = cleanDiagnosticText(text)
+      .replaceAll(/\s+/g, " ")
+      .trim();
+    if (!normalized || normalized.length > 400) {
+      throw new Error(
+        `agent destination text assertion ${index + 1} must contain 1 to 400 characters`
+      );
+    }
+    totalCharacters += normalized.length;
+    if (totalCharacters > 4_000) {
+      throw new Error(
+        "agent destination text assertions are limited to 4000 total characters"
+      );
+    }
+    return normalized;
+  });
+}
+
 function markdownEscape(value) {
   return cleanDiagnosticText(value)
     .replaceAll("\\", "\\\\")
@@ -923,6 +956,11 @@ function buildRegression(options, explorationSteps = []) {
           `  expect(${response}?.status()).toBeLessThan(400);`
         );
       }
+      for (const assertion of step.destinationAssertions || []) {
+        lines.push(
+          `  await expect(page.locator("body")).toContainText(${quoteForJavaScript(assertion.text)});`
+        );
+      }
       return;
     }
     lines.push(
@@ -1330,6 +1368,7 @@ async function finalizeRun(state) {
       expectedStatus: options.expectedStatus,
       expectedTitle: options.expectedTitle,
       expectedTexts: options.expectedTexts,
+      agentExpectedTexts: options.agentExpectedTexts,
       consoleErrorsAllowed: options.ignoreConsoleErrors
     },
     findings,
@@ -1480,6 +1519,14 @@ export function createScoutRunner({
   if (!Number.isInteger(maxAgentSteps) || maxAgentSteps < 1 || maxAgentSteps > 20) {
     throw new Error("max agent steps must be an integer from 1 to 20");
   }
+  const agentExpectedTexts = normalizeAgentExpectedTexts(
+    input.agentExpectedTexts
+  );
+  if (agentExpectedTexts.length && !exploreIntent) {
+    throw new Error(
+      "agent destination text assertions require intent exploration"
+    );
+  }
   const runId = `scout_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
   const outputDirectory = resolve(
     input.outputDirectory || join(".yellowbird", "scout", runId)
@@ -1579,6 +1626,7 @@ export function createScoutRunner({
       ...new Set([targetDocumentUrl.href, ...agentNavigationRoutes])
     ],
     agentLoadRoutes,
+    agentExpectedTexts,
     ignoreConsoleErrors: Boolean(input.ignoreConsoleErrors),
     headed: Boolean(input.headed),
     timeoutMs
@@ -2972,6 +3020,7 @@ export function createScoutRunner({
               authorizedOrigin: authorization.origin,
               authorizedNavigationRoutes: agentNavigationRoutes,
               authorizedPrimaryRoutes: agentPrimaryRoutes,
+              expectedDestinationTexts: options.agentExpectedTexts,
               engine: resolvedEngine.engine,
               maxSteps: options.maxAgentSteps,
               timeoutMs: options.timeoutMs,

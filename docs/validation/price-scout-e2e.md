@@ -31,7 +31,8 @@ The validator canonicalizes `.git` suffixes, trailing slashes, and
 `git@github.com:` SSH origins, then refuses any checkout whose `origin` does not
 match `https://github.com/nmhossain02/price-scout`. It requires a clean checkout,
 records its revision, starts the target with `make up` from that verified
-checkout, and confirms that the revision did not change during startup. It also
+checkout, and rechecks both the revision and cleanliness after startup and
+immediately before the scout. It also
 refuses a non-loopback planning-engine endpoint and verifies loopback engine
 provenance in the resulting evidence. It then runs the same intent scout from
 the Price Scout working directory with `/monitors/new` declared as the primary
@@ -39,9 +40,12 @@ read-only agent route, the application's asset prefixes declared as prefix load
 routes, and `/api/v1/monitors` plus `/api/v1/events` declared as exact load
 routes. It requires the observed
 `initial-interface-basic-flow.v1` profile, requires a passed visit to
-`/monitors/new`, verifies that the evidence retains the declared primary and API
-load-route authority, installs the generated replay bundle, and runs that replay
-from its independent temporary artifact directory. The default external
+`/monitors/new`, requires the destination to expose the Price Scout form's
+heading, product URL, tracking instruction, and frequency text, and verifies
+that the evidence retains the declared primary and API load-route authority.
+Those destination assertions are preserved in the generated replay before the
+validator installs and runs it from its independent temporary artifact
+directory. The default external
 checkout remains uncommitted because `test/fixtures/external/` is ignored.
 Target and health endpoint overrides are rejected so the configured URL cannot
 be redirected to a service unrelated to the stack started by this gate.

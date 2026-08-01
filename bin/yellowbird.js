@@ -191,6 +191,7 @@ async function scout() {
     agentPrimaryRoutes: argumentsFor("agent-primary-route"),
     agentNavigationRoutes: argumentsFor("agent-navigation-route"),
     agentLoadRoutes: argumentsFor("agent-load-route"),
+    agentExpectedTexts: argumentsFor("agent-expect-text"),
     ...output,
     headed: flag("headed"),
     ignoreConsoleErrors: flag("ignore-console-errors"),
@@ -274,6 +275,7 @@ Usage:
                    [--output DIRECTORY|REPORT.md] [--verbose]
                    [--agent|--no-agent] [--max-agent-steps 4]
                    [--engine-base-url URL] [--engine-model ID]
+                   [--agent-expect-text TEXT ...]
                    [--headed] [--ignore-console-errors]
 `);
 }

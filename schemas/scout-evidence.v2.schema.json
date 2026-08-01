@@ -96,6 +96,11 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "agentExpectedTexts": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "string", "minLength": 1, "maxLength": 400 }
+        },
         "consoleErrorsAllowed": { "type": "boolean" }
       }
     },
@@ -348,6 +353,7 @@
                   "url",
                   "title",
                   "destinationControlCount",
+                  "destinationAssertions",
                   "httpStatus",
                   "evidence",
                   "rationale",
@@ -371,6 +377,23 @@
                   "destinationControlCount": {
                     "type": ["integer", "null"],
                     "minimum": 0
+                  },
+                  "destinationAssertions": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["text", "satisfied"],
+                      "properties": {
+                        "text": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 400
+                        },
+                        "satisfied": { "type": "boolean" }
+                      }
+                    }
                   },
                   "httpStatus": { "type": ["integer", "null"] },
                   "evidence": { "type": "string" },
