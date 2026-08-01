@@ -357,15 +357,6 @@ function buildRegression(options, explorationSteps = []) {
     '      return typeof failure?.id === "string" && typeof failure?.url === "string" ? failure : null;',
     "    } catch { return null; }",
     "  };",
-    "  await page.context().exposeBinding(yellowbirdFetchBindingName, (_source, candidateToken, occurrence) => {",
-    "    if (candidateToken !== yellowbirdFetchBindingToken ||",
-    '        typeof occurrence?.url !== "string") return null;',
-    "    yellowbirdFetchOccurrenceSequence += 1;",
-    "    const occurrenceId = `${yellowbirdFetchOccurrencePrefix}${yellowbirdFetchOccurrenceSequence}`;",
-    "    if (occurrence.policyRejected === true)",
-    "      yellowbirdBlockedFetchOccurrences.add(occurrenceId);",
-    "    return occurrenceId;",
-    "  });",
     '  page.on("console", (message) => {',
     "    const text = message.text();",
     "    if (text.startsWith(yellowbirdGuardPrefix)) {",
@@ -451,6 +442,24 @@ function buildRegression(options, explorationSteps = []) {
     "        decoded !== null && !yellowbirdUnsafeRequest.test(yellowbirdCanonicalizeAgentText(decoded));",
     "    } catch { return false; }",
     "  };",
+    "  await page.context().exposeBinding(yellowbirdFetchBindingName, (_source, candidateToken, occurrence) => {",
+    "    if (candidateToken !== yellowbirdFetchBindingToken ||",
+    '        typeof occurrence?.url !== "string" || typeof occurrence?.method !== "string") return null;',
+    "    yellowbirdFetchOccurrenceSequence += 1;",
+    "    const occurrenceId = `${yellowbirdFetchOccurrencePrefix}${yellowbirdFetchOccurrenceSequence}`;",
+    '    const localResource = occurrence.url.startsWith("data:") || occurrence.url.startsWith("blob:");',
+    "    let policyRejected = false;",
+    "    if (yellowbirdAgentMode && !localResource) {",
+    "      const readAllowed = [\"GET\", \"HEAD\"].includes(occurrence.method);",
+    "      policyRejected = !yellowbirdSameOrigin(occurrence.url) || !readAllowed ||",
+    "        !yellowbirdAgentUrlAllowed(occurrence.url) || yellowbirdAgentAction?.action !== \"visit\";",
+    "    }",
+    "    if (policyRejected) {",
+    "      yellowbirdBlockedFetchOccurrences.add(occurrenceId);",
+    "      yellowbirdBlockedUrls.add(occurrence.url);",
+    "    }",
+    "    return { occurrenceId, policyRejected };",
+    "  });",
     "  await page.context().addInitScript(({ authorizedOrigin, controlName, controlToken, fetchBindingName, fetchBindingToken, fetchFailurePrefix, fetchOccurrenceHeader, fetchOccurrencePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
     "    const prohibited = new RegExp(prohibitedPattern, \"i\");",
     "    const canonicalizeSemanticText = value => String(value ?? \"\")",
@@ -512,6 +521,7 @@ function buildRegression(options, explorationSteps = []) {
     "    globalThis.fetch = async function (input, init) {",
     "      let requestUrl = null;",
     "      let occurrenceId = null;",
+    "      let policyRejected = false;",
     "      let requestInput = input;",
     "      let requestInit = init;",
     "      let request = null;",
@@ -520,12 +530,15 @@ function buildRegression(options, explorationSteps = []) {
     "        requestUrl = request.url;",
     "      } catch {}",
     "      if (active && request) {",
-    '        const localResource = requestUrl.startsWith("data:") || requestUrl.startsWith("blob:");',
-    '        const policyRejected = !localResource && (!["GET", "HEAD"].includes(request.method) ||',
-    '          !urlAllowed(requestUrl) || action !== "visit");',
-    "        occurrenceId = await recordFetchOccurrence(fetchBindingToken, { url: requestUrl, policyRejected });",
+    "        const occurrence = await recordFetchOccurrence(fetchBindingToken, {",
+    "          url: requestUrl, method: request.method",
+    "        });",
+    "        occurrenceId = occurrence?.occurrenceId;",
+    "        policyRejected = occurrence?.policyRejected === true;",
     '        if (typeof occurrenceId === "string" && occurrenceId.startsWith(fetchOccurrencePrefix)) {',
-    "          if (!policyRejected) {",
+    "          if (policyRejected) {",
+    '            throw new TypeError(`${fetchFailurePrefix}${JSON.stringify({ id: occurrenceId, url: requestUrl, message: "Blocked by YellowBird read-only policy" })}`);',
+    "          } else {",
     "            const headers = new Headers(request.headers);",
     "            headers.set(fetchOccurrenceHeader, occurrenceId);",
     "            requestInput = new Request(request, { headers });",
@@ -1734,29 +1747,6 @@ export function createScoutRunner({
     const blockedConsoleOccurrences = new Map();
     const agentGuardAttempts = [];
     const observedAgentGuardAttempts = new Set();
-    const bindingGuard = await initializeNetworkGuard(
-      "fetch-binding",
-      () =>
-        context.exposeBinding(
-          agentFetchBindingName,
-          (_source, candidateToken, occurrence) => {
-            if (
-              candidateToken !== agentFetchBindingToken ||
-              typeof occurrence?.url !== "string"
-            ) {
-              return null;
-            }
-            agentFetchOccurrenceSequence += 1;
-            const occurrenceId =
-              `${agentFetchOccurrencePrefix}${agentFetchOccurrenceSequence}`;
-            if (occurrence.policyRejected === true) {
-              blockedAgentFetchOccurrences.add(occurrenceId);
-            }
-            return occurrenceId;
-          }
-        )
-    );
-    if (!bindingGuard.successful) return;
     const redirectedRequestUrls = (request) => {
       const urls = [];
       for (let current = request; current; current = current.redirectedFrom()) {
@@ -1798,6 +1788,70 @@ export function createScoutRunner({
         redirectChain: [...new Set(redirectChain)]
       });
     };
+    const bindingGuard = await initializeNetworkGuard(
+      "fetch-binding",
+      () =>
+        context.exposeBinding(
+          agentFetchBindingName,
+          (_source, candidateToken, occurrence) => {
+            if (
+              candidateToken !== agentFetchBindingToken ||
+              typeof occurrence?.url !== "string" ||
+              typeof occurrence?.method !== "string"
+            ) {
+              return null;
+            }
+            agentFetchOccurrenceSequence += 1;
+            const occurrenceId =
+              `${agentFetchOccurrencePrefix}${agentFetchOccurrenceSequence}`;
+            const localResource =
+              occurrence.url.startsWith("data:") ||
+              occurrence.url.startsWith("blob:");
+            let policyReason = null;
+            if (agentNetworkPolicyActive && !localResource) {
+              let requestOrigin = "";
+              try {
+                requestOrigin = new URL(occurrence.url).origin;
+              } catch {}
+              const readAllowed = ["GET", "HEAD"].includes(occurrence.method);
+              if (requestOrigin !== authorization.origin) {
+                policyReason = "agent-cross-origin";
+              } else if (
+                readAllowed &&
+                !isAgentUrlAllowed(occurrence.url, authorization.origin)
+              ) {
+                policyReason = "agent-prohibited-url";
+              } else if (!readAllowed) {
+                policyReason = "agent-non-read-method";
+              } else if (agentActionContext?.action !== "visit") {
+                policyReason = "agent-non-visit-request";
+              }
+            }
+            if (policyReason) {
+              blockedAgentFetchOccurrences.add(occurrenceId);
+              addBlockedRequest({
+                method: occurrence.method,
+                resourceType: "fetch",
+                url: evidenceUrl(occurrence.url),
+                reason: policyReason
+              });
+              record(
+                "warn",
+                "network.request.blocked",
+                "Blocked a fetch before browser dispatch",
+                {
+                  method: occurrence.method,
+                  resourceType: "fetch",
+                  reason: policyReason,
+                  ...diagnosticUrl(occurrence.url)
+                }
+              );
+            }
+            return { occurrenceId, policyRejected: Boolean(policyReason) };
+          }
+        )
+    );
+    if (!bindingGuard.successful) return;
     const parseAgentFetchFailure = (detail) => {
       const text = String(detail || "");
       const markerIndex = text.indexOf(agentFetchFailurePrefix);
@@ -2111,6 +2165,7 @@ export function createScoutRunner({
       globalThis.fetch = async function (input, init) {
         let requestUrl = null;
         let occurrenceId = null;
+        let policyRejected = false;
         let requestInput = input;
         let requestInit = init;
         let request = null;
@@ -2119,22 +2174,21 @@ export function createScoutRunner({
           requestUrl = request.url;
         } catch {}
         if (active && request) {
-          const localResource =
-            requestUrl.startsWith("data:") || requestUrl.startsWith("blob:");
-          const policyRejected =
-            !localResource &&
-            (!["GET", "HEAD"].includes(request.method) ||
-              !urlAllowed(requestUrl) ||
-              action !== "visit");
-          occurrenceId = await recordFetchOccurrence(fetchBindingToken, {
+          const occurrence = await recordFetchOccurrence(fetchBindingToken, {
             url: requestUrl,
-            policyRejected
+            method: request.method
           });
+          occurrenceId = occurrence?.occurrenceId;
+          policyRejected = occurrence?.policyRejected === true;
           if (
             typeof occurrenceId === "string" &&
             occurrenceId.startsWith(fetchOccurrencePrefix)
           ) {
-            if (!policyRejected) {
+            if (policyRejected) {
+              throw new TypeError(
+                `${fetchFailurePrefix}${JSON.stringify({ id: occurrenceId, url: requestUrl, message: "Blocked by YellowBird read-only policy" })}`
+              );
+            } else {
               const headers = new Headers(request.headers);
               headers.set(fetchOccurrenceHeader, occurrenceId);
               requestInput = new Request(request, { headers });

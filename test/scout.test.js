@@ -360,6 +360,9 @@ beforeAll(async () => {
     const crossOriginSurface = request.url?.startsWith(
       "/agent-cross-origin-surface"
     );
+    const preAbortedCrossOriginSurface = request.url?.startsWith(
+      "/agent-pre-aborted-cross-origin-surface"
+    );
     const redirectSurface = request.url?.startsWith("/agent-redirect-surface");
     const prohibitedRedirectSurface = request.url?.startsWith(
       "/agent-prohibited-redirect-surface"
@@ -596,6 +599,25 @@ beforeAll(async () => {
             <script>
               document.querySelector("#preview").addEventListener("click", () => {
                 fetch("http://localhost:${server.address().port}/agent-cross-origin-read");
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (preAbortedCrossOriginSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Pre-aborted cross-origin boundary</title></head>
+          <body>
+            <button id="preview" type="button">View preview</button>
+            <script>
+              document.querySelector("#preview").addEventListener("click", () => {
+                const controller = new AbortController();
+                controller.abort();
+                fetch("http://localhost:${server.address().port}/agent-cross-origin-read", {
+                  signal: controller.signal
+                });
               });
             </script>
           </body>
@@ -3173,6 +3195,64 @@ test("cross-origin effects attempted during exploration are inconclusive", async
     )
   );
   assert.deepEqual(report.observations.pageErrors, []);
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.equal(crossOriginRequestCount, 0);
+}, 30_000);
+
+test("pre-aborted cross-origin fetches are blocked and recorded before dispatch", async () => {
+  crossOriginRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-pre-aborted-cross-origin-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "View the supplied preview control.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The preview control was inspected.",
+          coverage: "covered",
+          summary: "The preview control was inspected."
+        };
+  })({
+    target: `${target}/agent-pre-aborted-cross-origin-surface`,
+    intent: "Assess the preview interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(crossOriginRequestCount, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) =>
+        request.reason === "agent-cross-origin" &&
+        request.url ===
+          `http://localhost:${server.address().port}/agent-cross-origin-read`
+    )
+  );
+  assert.deepEqual(report.observations.pageErrors, []);
+  assert.deepEqual(report.observations.failedRequests, []);
   const install = await runCommand([process.execPath, "install"], outputDirectory);
   assert.equal(install.exitCode, 0, install.stderr);
   const replay = await runCommand(
