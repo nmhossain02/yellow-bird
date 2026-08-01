@@ -34,8 +34,8 @@ its physical worktree root, clears ambient Git configuration and repository
 overrides, and requires it to contain the trusted repository's remote `HEAD`.
 An operator can instead authorize one immutable revision with
 `YELLOWBIRD_PRICE_SCOUT_COMMIT=<full-commit-digest>`. The validator creates a
-temporary shared clone with no working tree, checks out that digest detached,
-and executes only from the resulting fresh index and worktree. Dirty source
+temporary shared clone with no initial checkout, checks out that digest into a
+detached worktree, and executes only from its fresh index and files. Dirty source
 files, untracked dotenv files, and source index flags therefore cannot enter the
 validated tree. The validator also refuses a non-loopback planning-engine
 endpoint.
