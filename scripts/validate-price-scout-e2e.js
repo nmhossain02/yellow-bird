@@ -13,10 +13,8 @@ const priceScoutDirectory = resolve(
   process.env.YELLOWBIRD_PRICE_SCOUT_DIR ||
     "test/fixtures/external/price-scout"
 );
-const target =
-  process.env.YELLOWBIRD_PRICE_SCOUT_TARGET || "https://localhost:3000";
-const healthUrl =
-  process.env.YELLOWBIRD_PRICE_SCOUT_HEALTH_URL || "http://localhost:3000/";
+const target = "https://localhost:3000";
+const healthUrl = "http://localhost:3000/";
 
 function requireCondition(condition, message) {
   if (!condition) throw new Error(message);
@@ -58,6 +56,11 @@ function canonicalRepository(value) {
 
 const engineConfig = validateAgentEngineConfig();
 requireCondition(
+  !process.env.YELLOWBIRD_PRICE_SCOUT_TARGET &&
+    !process.env.YELLOWBIRD_PRICE_SCOUT_HEALTH_URL,
+  "Price Scout endpoint overrides are not accepted because the gate must test the stack it starts"
+);
+requireCondition(
   classifyAgentEngineEndpoint(engineConfig.baseUrl) === "loopback",
   `The real Price Scout gate requires a loopback planning engine, received ${engineConfig.baseUrl}`
 );
@@ -76,6 +79,29 @@ const priceScoutCommit = await checked(
   priceScoutDirectory,
   "Price Scout revision verification"
 );
+const priceScoutStatus = await checked(
+  ["git", "status", "--porcelain"],
+  priceScoutDirectory,
+  "Price Scout checkout cleanliness verification"
+);
+requireCondition(
+  priceScoutStatus === "",
+  "The Price Scout checkout must be clean before the end-to-end gate starts it"
+);
+await checked(
+  ["make", "up"],
+  priceScoutDirectory,
+  "Price Scout target startup from the verified checkout"
+);
+const startedPriceScoutCommit = await checked(
+  ["git", "rev-parse", "HEAD"],
+  priceScoutDirectory,
+  "Started Price Scout revision verification"
+);
+requireCondition(
+  startedPriceScoutCommit === priceScoutCommit,
+  "The Price Scout checkout revision changed during target startup"
+);
 
 let healthResponse;
 try {
@@ -86,7 +112,7 @@ try {
   });
 } catch (error) {
   throw new Error(
-    `Price Scout is not reachable at ${healthUrl}. Start it with make -C ${priceScoutDirectory} up. ${error.message}`
+    `Price Scout did not become reachable at ${healthUrl} after startup from ${priceScoutDirectory}. ${error.message}`
   );
 }
 requireCondition(
@@ -108,6 +134,12 @@ const scout = await run(
     "Assess initial interface and basic user flow",
     "--engine-base-url",
     engineConfig.baseUrl,
+    "--agent-primary-route",
+    "/monitors/new",
+    "--agent-load-route",
+    "/assets/*",
+    "--agent-load-route",
+    "/static/*",
     "--output",
     outputDirectory,
     "--verbose"

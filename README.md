@@ -109,6 +109,7 @@ cd /path/to/product
 yellowbird scout \
   --target http://127.0.0.1:3000 \
   --intent "Assess the initial interface and basic user flow" \
+  --agent-primary-route /monitors/new \
   --output yellowbird-report.md \
   --verbose
 ```
@@ -123,12 +124,22 @@ requested only through `--agent`. Use a versioned `--scenario` when the owner
 needs an exact deterministic workflow, including an empty initial-page smoke
 check or mutation-capable actions with explicit assertions.
 
+Agent document visits require repeated `--agent-primary-route` or
+`--agent-navigation-route` declarations. Primary routes are the owner-identified
+destinations that may satisfy an owned coverage profile. Navigation routes are
+safe to visit but cannot satisfy the primary-route criterion. Same-origin load
+requests are blocked unless their URLs are declared with repeated
+`--agent-load-route` options. Load declarations may end in `*` for an explicit
+path prefix. Relative declarations resolve against the target, and every
+declaration must remain on its exact origin.
+
 The compatible endpoint can be selected per command:
 
 ```bash
 yellowbird scout \
   --target http://127.0.0.1:3000 \
   --intent "Assess the initial interface and basic user flow" \
+  --agent-primary-route /monitors/new \
   --engine-base-url http://127.0.0.1:11434/v1 \
   --engine-model qwen3.5:9b
 ```
@@ -168,7 +179,8 @@ This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
 scoped run grants, sandboxing, and policy approval before they are enabled.
 
-An explicit natural-language intent may visit supplied exact-origin links, fill
+An explicit natural-language intent may visit owner-declared exact-origin
+links, fill
 eligible fields with YellowBird-owned synthetic values, select supplied options,
 and use non-submit buttons whose labels do not indicate a destructive or
 mutation-oriented action. YellowBird applies the same semantic denial to every
@@ -199,8 +211,9 @@ blocked browser operations through a per-run channel. Agent document visits
 intercept every redirect response so an unsafe destination is blocked before the
 browser follows it. Policy-rejected `fetch` calls are recorded and rejected
 before dispatch. During the initial target load and each authorized visit,
-exact-origin `GET` and `HEAD` non-document requests, including `EventSource`, are
-allowed only through a 150 ms settlement interval after `DOMContentLoaded`.
+owner-declared exact-origin `GET` and `HEAD` non-document request URLs, including
+`EventSource`, are allowed only through a 150 ms settlement interval after
+`DOMContentLoaded`.
 Allowed response bodies continue streaming without YellowBird buffering them.
 Later network requests outside an explicitly mediated visit document chain are
 blocked, and WebSockets are blocked throughout agent mode.

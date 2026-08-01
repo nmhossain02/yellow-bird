@@ -437,7 +437,35 @@ beforeAll(async () => {
     const snapshotBoundary = request.url?.startsWith(
       "/agent-snapshot-boundary"
     );
+    const undeclaredNavigationSurface = request.url?.startsWith(
+      "/agent-undeclared-navigation-surface"
+    );
+    const unrelatedRouteSurface = request.url?.startsWith(
+      "/agent-unrelated-route-surface"
+    );
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    if (undeclaredNavigationSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Declared route boundary</title></head>
+          <body>
+            <a href="/agent-read-mutation">View preview</a>
+            <a href="/agent-flow">Setup monitor</a>
+          </body>
+        </html>`);
+      return;
+    }
+    if (unrelatedRouteSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Route relevance boundary</title></head>
+          <body>
+            <a href="/privacy">Review privacy</a>
+            <a href="/agent-flow">Setup monitor</a>
+          </body>
+        </html>`);
+      return;
+    }
     if (policyBoundary) {
       response.end(`<!doctype html>
         <html>
@@ -1196,7 +1224,7 @@ function createAgentRunner(
   resolveEngineOverride,
   launchBrowser = launchSharedBrowser
 ) {
-  return createScoutRunner({
+  const runner = createScoutRunner({
     launchBrowser,
     resolveEngine:
       resolveEngineOverride ||
@@ -1221,6 +1249,41 @@ function createAgentRunner(
         }
       }))
   });
+  return (input) => {
+    const primaryRoutes = [
+      "/agent-flow",
+      "/history-return",
+      "/agent-redirect",
+      "/agent-prohibited-redirect",
+      "/agent-fetch-redirect-destination",
+      "/agent-same-url-correlation-destination",
+      "/agent-realm-correlation-destination",
+      "/agent-replay-settlement-destination",
+      "/agent-same-document-destination",
+      "/agent-guard-tamper-destination",
+      "/agent-http-error-destination",
+      "/agent-product-http-error-destination",
+      "/agent-product-network-failure-destination",
+      "/agent-failed-visit-destination",
+      "/agent-delayed-visit-destination"
+    ];
+    const loadRoutes = [
+      "/agent-initial-visit-data",
+      "/agent-visit-data",
+      "/agent-visit-events",
+      "/agent-fetch-redirect",
+      "/agent-same-url-correlation",
+      "/agent-independent-failure",
+      "/agent-replay-settlement-delayed",
+      "/agent-product-http-error",
+      "/agent-product-network-failure"
+    ];
+    return runner({
+      agentPrimaryRoutes: primaryRoutes,
+      agentLoadRoutes: loadRoutes,
+      ...input
+    });
+  };
 }
 
 test("scout authorization is loopback-only", () => {
@@ -1287,6 +1350,10 @@ test("action cleanup runs after a failed begin without masking its error", async
       page,
       intent: "Assess the setup route",
       authorizedOrigin: target,
+      authorizedNavigationRoutes: new Set([
+        `${target}/agent-redirect`,
+        `${target}/agent-flow`
+      ]),
       engine: {
         completeStructured: async (request) => {
           const availableElements = JSON.parse(
@@ -1338,6 +1405,10 @@ test("action cleanup failure preserves completed exploration evidence", async ()
       page,
       intent: "Assess the setup route",
       authorizedOrigin: target,
+      authorizedNavigationRoutes: new Set([
+        `${target}/agent-redirect`,
+        `${target}/agent-flow`
+      ]),
       engine: {
         completeStructured: async (request) => {
           const availableElements = JSON.parse(
@@ -1388,6 +1459,10 @@ test("later invalid planner output preserves partial coverage", async () => {
       page,
       intent: "Assess the setup route",
       authorizedOrigin: target,
+      authorizedNavigationRoutes: new Set([
+        `${target}/agent-redirect`,
+        `${target}/agent-flow`
+      ]),
       engine: {
         completeStructured: async (request) => {
           planningCalls += 1;
@@ -2115,6 +2190,53 @@ test("owned coverage profile links a distinct destination to its visit", async (
   assert.doesNotMatch(markdown, /model-guided within YellowBird policy/);
 });
 
+test("owned coverage profile rejects a non-primary authorized route", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-route-relevance-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements.find(
+            (element) => new URL(element.href).pathname === "/privacy"
+          ).ref,
+          value: null,
+          rationale: "Review the authorized privacy route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The route was reviewed.",
+          coverage: "covered",
+          summary: "The basic flow was covered."
+        };
+  })({
+    target: `${target}/agent-unrelated-route-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentNavigationRoutes: ["/privacy"],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.equal(
+    report.observations.exploration.verification.criteria.find(
+      (criterion) => criterion.id === "primary-route-visited"
+    ).satisfied,
+    false
+  );
+});
+
 test("agent replay preserves selected and observed redirect URLs", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-redirect-replay-")
@@ -2826,6 +2948,53 @@ test("agent policy omits destructive controls and blocks write requests", async 
         request.reason === "agent-non-read-method"
     )
   );
+});
+
+test("agent navigation requires owner-declared positive route authority", async () => {
+  readMutationRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-route-authority-")
+  );
+  const exposedPaths = [];
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    exposedPaths.push(
+      ...availableElements
+        .filter((element) => element.href)
+        .map((element) => new URL(element.href).pathname)
+    );
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Open the declared setup route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The declared route was inspected.",
+          coverage: "partial",
+          summary: "The declared route was inspected."
+        };
+  })({
+    target: `${target}/agent-undeclared-navigation-surface`,
+    intent: "Assess the setup route",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.ok(exposedPaths.includes("/agent-flow"));
+  assert.equal(exposedPaths.includes("/agent-read-mutation"), false);
+  assert.equal(readMutationRequestCount, 0);
+  assert.equal(report.observations.exploration.steps.length, 1);
 });
 
 test("agent action broker and replay block read-method mutation behind safe-looking controls", async () => {
@@ -3642,6 +3811,44 @@ test("an engine resolver defect still finalizes a truthful run", async () => {
   );
 });
 
+test("policy blocks remain alongside an independent engine failure", async () => {
+  deleteAccountRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-issue-aggregation-")
+  );
+  const runWithoutAgent = createScoutRunner({
+    launchBrowser: launchSharedBrowser,
+    resolveEngine: async () => ({
+      engine: null,
+      capabilities: null,
+      diagnostic: {
+        id: "agent-engine-unavailable",
+        classification: "test-mechanics",
+        title: "No compatible local agent engine is available.",
+        evidence: "connection refused",
+        remediation: "Start a compatible engine."
+      }
+    })
+  });
+
+  const report = await runWithoutAgent({
+    target: `${target}/agent-realm-correlation-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(deleteAccountRequestCount, 0);
+  assert.equal(
+    report.observations.exploration.issue.id,
+    "agent-engine-unavailable"
+  );
+  assert.deepEqual(
+    report.invalidTestMechanics.map((issue) => issue.id).slice(0, 2),
+    ["agent-engine-unavailable", "agent-effect-blocked"]
+  );
+});
+
 test("unavailable intent engine is inconclusive instead of a narrow clear", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-unavailable-")
@@ -3867,6 +4074,8 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
         "--intent",
         "Assess the initial interface and basic user flow",
         "--no-agent",
+        "--agent-primary-route",
+        "/agent-flow",
         "--engine-base-url",
         `http://127.0.0.1:${engineServer.address().port}/v1`,
         "--engine-model",
@@ -3994,6 +4203,8 @@ test("standalone intent fixture runs end to end including replay", async () => {
         "Assess the initial interface and basic user flow",
         "--expect-title",
         "Intent flow fixture",
+        "--agent-primary-route",
+        "/watch",
         "--engine-base-url",
         `http://127.0.0.1:${engineServer.address().port}/v1`,
         "--engine-model",
@@ -4164,6 +4375,22 @@ test("historical v1 scout evidence remains valid", async () => {
   };
 
   assertConformsToSchema(schema, historicalEvidence);
+});
+
+test("historical v2 evidence without exploration remains valid", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-historical-v2-")
+  );
+  const evidence = await runSharedScout({
+    target,
+    outputDirectory
+  });
+  delete evidence.observations.exploration;
+  const schema = JSON.parse(
+    await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
+  );
+
+  assertConformsToSchema(schema, evidence);
 });
 
 test("scout reports explicit failures without changing expected results", async () => {

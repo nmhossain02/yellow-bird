@@ -23,7 +23,9 @@ const SNAPSHOT_LIMITS = Object.freeze({
   url: 4_096,
   optionCount: 40,
   optionLabel: 240,
-  optionValue: 200
+  optionValue: 200,
+  labelCount: 20,
+  labelledByCount: 20
 });
 const ACTION_SCHEMA = {
   type: "object",
@@ -136,6 +138,23 @@ export function isAgentUrlAllowed(value, authorizedOrigin) {
   }
 }
 
+export function isAgentRouteAuthorized(value, authorizedRoutes) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    for (const route of authorizedRoutes) {
+      if (route.endsWith("*")) {
+        if (url.href.startsWith(route.slice(0, -1))) return true;
+      } else if (route === url.href) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function hasProhibitedSemantics(element) {
   const values = [
     element.label,
@@ -158,13 +177,16 @@ function hasProhibitedSemantics(element) {
   );
 }
 
-function elementAction(element, authorizedOrigin) {
+function elementAction(element, authorizedOrigin, authorizedNavigationRoutes) {
   if (element.disabled || hasProhibitedSemantics(element)) return null;
   if (element.formAction) {
     if (!isAgentUrlAllowed(element.formAction, authorizedOrigin)) return null;
   }
   if (element.tag === "a") {
-    return isAgentUrlAllowed(element.href, authorizedOrigin) ? "visit" : null;
+    return isAgentUrlAllowed(element.href, authorizedOrigin) &&
+      isAgentRouteAuthorized(element.href, authorizedNavigationRoutes)
+      ? "visit"
+      : null;
   }
   if (element.tag === "textarea") return "fill";
   if (element.tag === "input" && SAFE_FILL_TYPES.has(element.type)) {
@@ -240,7 +262,11 @@ function syntheticValue(element) {
   return "YellowBird synthetic test value";
 }
 
-async function snapshotPage(page, authorizedOrigin) {
+async function snapshotPage(
+  page,
+  authorizedOrigin,
+  authorizedNavigationRoutes
+) {
   const raw = await page.evaluate(({ limits, prohibitedPattern }) => {
     let remainingCharacters = limits.totalCharacters;
     const prohibited = new RegExp(prohibitedPattern, "i");
@@ -285,20 +311,32 @@ async function snapshotPage(page, authorizedOrigin) {
     remainingCharacters -= url.length;
     const title = takeText(document.title, limits.fieldText);
     const bodyText = takeText(document.body?.innerText || "", limits.bodyText);
-    const elements = [
-      ...document.querySelectorAll("a[href], button, input, textarea, select")
-    ]
-      .slice(0, limits.elementCount)
+    const candidateElements = [];
+    const walker = document.createTreeWalker(
+      document.documentElement,
+      NodeFilter.SHOW_ELEMENT
+    );
+    while (candidateElements.length < limits.elementCount) {
+      const candidate = walker.nextNode();
+      if (!candidate) break;
+      if (candidate.matches("a[href], button, input, textarea, select")) {
+        candidateElements.push(candidate);
+      }
+    }
+    const elements = candidateElements
       .flatMap((element, index) => {
         const tag = element.tagName.toLowerCase();
-        const labelTexts = [...(element.labels || [])].map((labelElement) =>
+        if ((element.labels?.length || 0) > limits.labelCount) return [];
+        const labelTexts = Array.from(element.labels || [], (labelElement) =>
           String(labelElement.innerText || labelElement.textContent || "")
         );
         const ariaLabel = element.getAttribute("aria-label") || "";
         const ariaLabelledBy = element.getAttribute("aria-labelledby") || "";
+        if (ariaLabelledBy.length > limits.fieldText) return [];
         const ariaLabelledByIds = ariaLabelledBy.trim()
           ? ariaLabelledBy.trim().split(/\s+/)
           : [];
+        if (ariaLabelledByIds.length > limits.labelledByCount) return [];
         const ariaLabelledByElements = ariaLabelledByIds.map((id) =>
           document.getElementById(id)
         );
@@ -326,14 +364,16 @@ async function snapshotPage(page, authorizedOrigin) {
                   ? "spinbutton"
                   : "textbox";
         const form = element.form || element.closest("form");
+        if (tag === "select" && element.options.length > limits.optionCount) {
+          return [];
+        }
         const optionRecords =
           tag === "select"
-            ? [...element.options].map((option) => ({
+            ? Array.from(element.options, (option) => ({
                 label: String(option.textContent || option.value),
                 value: String(option.value)
               }))
             : [];
-        if (optionRecords.length > limits.optionCount) return [];
         const safetyFields = [
           [label, limits.fieldText],
           ...labelTexts.map((value) => [value, limits.fieldText]),
@@ -419,7 +459,8 @@ async function snapshotPage(page, authorizedOrigin) {
     }
     const action = elementAction(
       { ...rawElement, pageUrl: raw.url },
-      authorizedOrigin
+      authorizedOrigin,
+      authorizedNavigationRoutes
     );
     if (!action) continue;
     let href = rawElement.href;
@@ -583,7 +624,12 @@ function normalizedObservedUrl(value) {
   }
 }
 
-function verifyOwnedCoverageProfile(intent, steps, pages) {
+function verifyOwnedCoverageProfile(
+  intent,
+  steps,
+  pages,
+  authorizedPrimaryRoutes
+) {
   const initialInterfaceFlow =
     /^\s*(?:assess|evaluate|inspect|review)(?:\s+the)?\s+initial\s+interface\s+and(?:\s+the)?\s+basic\s+user\s+flow\s*[.!]?\s*$/i.test(
       intent
@@ -592,7 +638,10 @@ function verifyOwnedCoverageProfile(intent, steps, pages) {
     return null;
   }
   const passedVisits = steps.filter(
-    (step) => step.action === "visit" && step.status === "passed"
+    (step) =>
+      step.action === "visit" &&
+      step.status === "passed" &&
+      isAgentRouteAuthorized(step.url, authorizedPrimaryRoutes)
   );
   const passedVisit =
     passedVisits.find((step) => {
@@ -662,7 +711,9 @@ export async function exploreIntentWithEngine({
   maxSteps,
   timeoutMs,
   record,
-  actionPolicy = null
+  actionPolicy = null,
+  authorizedNavigationRoutes = new Set(),
+  authorizedPrimaryRoutes = new Set()
 }) {
   const steps = [];
   const pages = [];
@@ -672,7 +723,11 @@ export async function exploreIntentWithEngine({
   let snapshot;
 
   try {
-    snapshot = await snapshotPage(page, authorizedOrigin);
+    snapshot = await snapshotPage(
+      page,
+      authorizedOrigin,
+      authorizedNavigationRoutes
+    );
     visited.add(new URL(snapshot.url).href);
     pages.push({
       url: snapshot.url,
@@ -802,7 +857,8 @@ export async function exploreIntentWithEngine({
       const verification = verifyOwnedCoverageProfile(
         intent,
         steps,
-        pages
+        pages,
+        authorizedPrimaryRoutes
       );
       const coverage = verification
         ? verification.satisfied
@@ -929,10 +985,21 @@ export async function exploreIntentWithEngine({
       await page.waitForTimeout(actionPolicy?.navigationSettlementMs ?? 150);
       if (action === "visit") await actionPolicy?.resume?.(action);
       const actionPageUrl = page.url();
-      if (!isAgentUrlAllowed(actionPageUrl, authorizedOrigin)) {
+      if (
+        !isAgentUrlAllowed(actionPageUrl, authorizedOrigin) ||
+        (action === "visit" &&
+          !isAgentRouteAuthorized(
+            actionPageUrl,
+            authorizedNavigationRoutes
+          ))
+      ) {
         throw new Error("The interaction reached a URL outside agent policy.");
       }
-      snapshot = await snapshotPage(page, authorizedOrigin);
+      snapshot = await snapshotPage(
+        page,
+        authorizedOrigin,
+        authorizedNavigationRoutes
+      );
       if (!pages.some((entry) => entry.url === snapshot.url)) {
         pages.push({
           url: snapshot.url,

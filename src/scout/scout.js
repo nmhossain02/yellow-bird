@@ -18,6 +18,7 @@ import {
 } from "./engine.js";
 import {
   exploreIntentWithEngine,
+  isAgentRouteAuthorized,
   isAgentUrlAllowed,
   PROHIBITED_AGENT_ACTION_PATTERN
 } from "./explorer.js";
@@ -298,6 +299,42 @@ function evidenceUrl(value) {
   }
 }
 
+function normalizeAgentRoutes(
+  values,
+  target,
+  authorizedOrigin,
+  optionName,
+  allowPrefix = false
+) {
+  if (values === undefined) return [];
+  if (!Array.isArray(values)) {
+    throw new Error(`${optionName} must be an array of route declarations`);
+  }
+  const routes = values.map((value) => {
+    if (typeof value !== "string" || !value.trim()) {
+      throw new Error(`${optionName} must contain non-empty route strings`);
+    }
+    const prefix = value.trim().endsWith("*");
+    if (value.includes("*") && (!allowPrefix || !prefix)) {
+      throw new Error(`${optionName} supports only a trailing prefix wildcard`);
+    }
+    let route;
+    try {
+      route = new URL(value.trim(), target);
+    } catch {
+      throw new Error(`${optionName} contains an invalid route`);
+    }
+    route.hash = "";
+    if (!isAgentUrlAllowed(route.href, authorizedOrigin)) {
+      throw new Error(
+        `${optionName} routes must be safe exact-origin http(s) URLs`
+      );
+    }
+    return route.href;
+  });
+  return [...new Set(routes)];
+}
+
 function buildRegression(options, explorationSteps = []) {
   const replaySteps = explorationSteps.filter(
     (candidate) =>
@@ -387,6 +424,8 @@ function buildRegression(options, explorationSteps = []) {
     `  const yellowbirdTarget = new URL(${quoteForJavaScript(options.target)});`,
     "  const yellowbirdTargetRequestUrl = new URL(yellowbirdTarget);",
     '  yellowbirdTargetRequestUrl.hash = "";',
+    `  const yellowbirdAgentNavigationRoutes = new Set(${quoteForJavaScript(options.agentNavigationRoutes)});`,
+    `  const yellowbirdAgentLoadRoutes = new Set(${quoteForJavaScript(options.agentLoadRoutes)});`,
     `  const yellowbirdAgentMode = ${options.exploreIntent};`,
     "  const yellowbirdBlockedUrls = new Set();",
     "  const yellowbirdSameOrigin = value => {",
@@ -442,6 +481,17 @@ function buildRegression(options, explorationSteps = []) {
     "        decoded !== null && !yellowbirdUnsafeRequest.test(yellowbirdCanonicalizeAgentText(decoded));",
     "    } catch { return false; }",
     "  };",
+    "  const yellowbirdAgentRouteAllowed = (value, routes) => {",
+    "    try {",
+    "      const url = new URL(value);",
+    '      url.hash = "";',
+    "      for (const route of routes) {",
+    '        if (route.endsWith("*") && url.href.startsWith(route.slice(0, -1))) return true;',
+    "        if (route === url.href) return true;",
+    "      }",
+    "      return false;",
+    "    } catch { return false; }",
+    "  };",
     "  await page.context().exposeBinding(yellowbirdFetchBindingName, (_source, candidateToken, occurrence) => {",
     "    if (candidateToken !== yellowbirdFetchBindingToken ||",
     '        typeof occurrence?.url !== "string" || typeof occurrence?.method !== "string") return null;',
@@ -452,7 +502,9 @@ function buildRegression(options, explorationSteps = []) {
     "    if (yellowbirdAgentMode && !localResource) {",
     "      const readAllowed = [\"GET\", \"HEAD\"].includes(occurrence.method);",
     "      policyRejected = !yellowbirdSameOrigin(occurrence.url) || !readAllowed ||",
-    "        !yellowbirdAgentUrlAllowed(occurrence.url) || yellowbirdAgentAction?.action !== \"visit\";",
+    "        !yellowbirdAgentUrlAllowed(occurrence.url) ||",
+    "        !yellowbirdAgentRouteAllowed(occurrence.url, yellowbirdAgentLoadRoutes) ||",
+    "        yellowbirdAgentAction?.action !== \"visit\";",
     "    }",
     "    if (policyRejected) {",
     "      yellowbirdBlockedFetchOccurrences.add(occurrenceId);",
@@ -460,7 +512,8 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     "    return { occurrenceId, policyRejected };",
     "  });",
-    "  await page.context().addInitScript(({ authorizedOrigin, controlName, controlToken, fetchBindingName, fetchBindingToken, fetchFailurePrefix, fetchOccurrenceHeader, fetchOccurrencePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
+    "  await page.context().addInitScript(({ authorizedOrigin, authorizedNavigationRoutes, controlName, controlToken, fetchBindingName, fetchBindingToken, fetchFailurePrefix, fetchOccurrenceHeader, fetchOccurrencePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
+    "    const navigationRoutes = new Set(authorizedNavigationRoutes);",
     "    const prohibited = new RegExp(prohibitedPattern, \"i\");",
     "    const canonicalizeSemanticText = value => String(value ?? \"\")",
     '      .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")',
@@ -490,9 +543,11 @@ function buildRegression(options, explorationSteps = []) {
     "      try {",
     "        const url = new URL(value, globalThis.location.href);",
     "        const decoded = decodeUrlText(url);",
+    '        url.hash = "";',
     '        return ["http:", "https:"].includes(url.protocol) &&',
     "          url.origin === authorizedOrigin && !url.username && !url.password &&",
-    "          decoded !== null && !prohibited.test(canonicalizeSemanticText(decoded));",
+    "          decoded !== null && !prohibited.test(canonicalizeSemanticText(decoded)) &&",
+    "          navigationRoutes.has(url.href);",
     "      } catch { return false; }",
     "    };",
     "    const active = Boolean(startActive);",
@@ -586,7 +641,7 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     '    globalThis.addEventListener("hashchange", observeCurrentUrl);',
     '    globalThis.addEventListener("popstate", observeCurrentUrl);',
-    `  }, { authorizedOrigin: yellowbirdTarget.origin, controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, fetchBindingName: yellowbirdFetchBindingName, fetchBindingToken: yellowbirdFetchBindingToken, fetchFailurePrefix: yellowbirdFetchFailurePrefix, fetchOccurrenceHeader: yellowbirdFetchOccurrenceHeader, fetchOccurrencePrefix: yellowbirdFetchOccurrencePrefix, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
+    `  }, { authorizedOrigin: yellowbirdTarget.origin, authorizedNavigationRoutes: [...yellowbirdAgentNavigationRoutes], controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, fetchBindingName: yellowbirdFetchBindingName, fetchBindingToken: yellowbirdFetchBindingToken, fetchFailurePrefix: yellowbirdFetchFailurePrefix, fetchOccurrenceHeader: yellowbirdFetchOccurrenceHeader, fetchOccurrencePrefix: yellowbirdFetchOccurrencePrefix, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
     "  const yellowbirdRecordBlockedRequest = (request, ...additionalUrls) => {",
     "    const redirectChain = [];",
     "    for (let current = request; current; current = current.redirectedFrom())",
@@ -624,7 +679,9 @@ function buildRegression(options, explorationSteps = []) {
     "              yellowbirdAgentAction?.action === \"visit\" &&",
     "              yellowbirdAgentAction.navigationWindowOpen &&",
     '              ["GET", "HEAD"].includes(event.request.method) &&',
-    "              yellowbirdAgentUrlAllowed(redirectUrl);",
+    "              yellowbirdAgentUrlAllowed(redirectUrl) &&",
+    '              yellowbirdAgentRouteAllowed(redirectUrl, event.resourceType === "Document"',
+    "                ? yellowbirdAgentNavigationRoutes : yellowbirdAgentLoadRoutes);",
           "          } catch {}",
           "          if (!redirectAllowed) {",
           "            for (const url of [...(requestState?.urls || [event.request.url]), redirectUrl])",
@@ -687,6 +744,8 @@ function buildRegression(options, explorationSteps = []) {
     "    try {",
     "      const parsedRequestUrl = new URL(requestUrl);",
     "      const safeAgentUrl = yellowbirdAgentUrlAllowed(requestUrl);",
+    '      const safeAgentRoute = yellowbirdAgentRouteAllowed(requestUrl, request.resourceType() === "document"',
+    "        ? yellowbirdAgentNavigationRoutes : yellowbirdAgentLoadRoutes);",
     "      let safeAgentAction = false;",
     "      if (yellowbirdAgentAction) {",
     '        if (yellowbirdAgentAction.action !== "visit") {',
@@ -706,7 +765,8 @@ function buildRegression(options, explorationSteps = []) {
     "        } else safeAgentAction = yellowbirdAgentAction.navigationWindowOpen;",
     "      }",
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
-    '        (!yellowbirdAgentMode || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl && safeAgentAction));',
+    '        (!yellowbirdAgentMode || (["GET", "HEAD"].includes(requestMethod) &&',
+    "          safeAgentUrl && safeAgentRoute && safeAgentAction));",
     "    } catch {}",
     "    if (allowed) return route.continue(typeof occurrence === \"string\" ? { headers: forwardedHeaders } : undefined);",
     "    yellowbirdRecordBlockedRequest(request);",
@@ -775,6 +835,7 @@ function buildRegression(options, explorationSteps = []) {
     "  };",
     "  const yellowbirdAssertAgentGuard = async () => {",
     "    expect(yellowbirdAgentUrlAllowed(page.url())).toBe(true);",
+    "    expect(yellowbirdAgentRouteAllowed(page.url(), yellowbirdAgentNavigationRoutes)).toBe(true);",
     "    expect(yellowbirdAgentViolation).toBeNull();",
     "  };",
     "",
@@ -980,8 +1041,7 @@ async function finalizeRun(state) {
   );
   if (
     options.exploreIntent &&
-    blockedAgentEffects.length > 0 &&
-    state.exploration.issue?.id !== "agent-model-transition"
+    blockedAgentEffects.length > 0
   ) {
     state.exploration.status = "inconclusive";
     state.exploration.coverage = state.exploration.steps.some(
@@ -989,13 +1049,18 @@ async function finalizeRun(state) {
     )
       ? "partial"
       : "blocked";
-    state.exploration.issue = {
+    const policyIssue = {
       id: "agent-effect-blocked",
       classification: "test-mechanics",
       title: "An agent interaction attempted an unauthorized effect.",
       evidence: `${blockedAgentEffects.length} unauthorized request, navigation, submission, or message(s) blocked`,
       remediation: "Use an owner-declared scenario if this effect must be exercised."
     };
+    if (!state.exploration.issue) {
+      state.exploration.issue = policyIssue;
+    } else if (state.exploration.issue.id !== policyIssue.id) {
+      state.explorationIssues.push(policyIssue);
+    }
   }
   if (options.exploreIntent && state.operationalIssues.length) {
     const networkGuardIssue = state.operationalIssues.find(
@@ -1064,6 +1129,7 @@ async function finalizeRun(state) {
   if (state.exploration.issue) {
     setupIssues.push(state.exploration.issue);
   }
+  setupIssues.push(...state.explorationIssues);
   setupIssues.push(
     ...state.operationalIssues.filter(
       (issue) => issue !== state.exploration.issue
@@ -1467,6 +1533,30 @@ export function createScoutRunner({
     method: authorization.authorization.method,
     scope: authorization.authorization.scope
   });
+  const agentPrimaryRoutes = normalizeAgentRoutes(
+    input.agentPrimaryRoutes,
+    authorization.target,
+    authorization.origin,
+    "agent primary routes"
+  );
+  const declaredAgentNavigationRoutes = normalizeAgentRoutes(
+    input.agentNavigationRoutes,
+    authorization.target,
+    authorization.origin,
+    "agent navigation routes"
+  );
+  const agentNavigationRoutes = [
+    ...new Set([...declaredAgentNavigationRoutes, ...agentPrimaryRoutes])
+  ];
+  const agentLoadRoutes = normalizeAgentRoutes(
+    input.agentLoadRoutes,
+    authorization.target,
+    authorization.origin,
+    "agent load routes",
+    true
+  );
+  const targetDocumentUrl = new URL(authorization.target);
+  targetDocumentUrl.hash = "";
   const options = {
     target: authorization.target,
     intent: hasExplicitIntent
@@ -1481,6 +1571,11 @@ export function createScoutRunner({
     maxAgentSteps,
     engineBaseUrl: input.engineBaseUrl,
     engineModel: input.engineModel,
+    agentPrimaryRoutes,
+    agentNavigationRoutes: [
+      ...new Set([targetDocumentUrl.href, ...agentNavigationRoutes])
+    ],
+    agentLoadRoutes,
     ignoreConsoleErrors: Boolean(input.ignoreConsoleErrors),
     headed: Boolean(input.headed),
     timeoutMs
@@ -1510,6 +1605,7 @@ export function createScoutRunner({
     workflowFindings: [],
     invalidWorkflowSteps: [],
     operationalIssues: [],
+    explorationIssues: [],
     exploration: {
       requested: exploreIntent,
       mode: exploreIntent ? "agent-safe-interaction" : "not-requested",
@@ -1720,6 +1816,9 @@ export function createScoutRunner({
     const targetUrl = new URL(options.target);
     const targetRequestUrl = new URL(targetUrl);
     targetRequestUrl.hash = "";
+    const agentNavigationRoutes = new Set(options.agentNavigationRoutes);
+    const agentPrimaryRoutes = new Set(options.agentPrimaryRoutes);
+    const agentLoadRoutes = new Set(options.agentLoadRoutes);
     let agentNetworkPolicyActive = options.exploreIntent;
     let agentActionContext = options.exploreIntent
       ? {
@@ -1816,15 +1915,18 @@ export function createScoutRunner({
               const readAllowed = ["GET", "HEAD"].includes(occurrence.method);
               if (requestOrigin !== authorization.origin) {
                 policyReason = "agent-cross-origin";
-              } else if (
-                readAllowed &&
-                !isAgentUrlAllowed(occurrence.url, authorization.origin)
-              ) {
-                policyReason = "agent-prohibited-url";
               } else if (!readAllowed) {
                 policyReason = "agent-non-read-method";
               } else if (agentActionContext?.action !== "visit") {
                 policyReason = "agent-non-visit-request";
+              } else if (
+                !isAgentUrlAllowed(occurrence.url, authorization.origin)
+              ) {
+                policyReason = "agent-prohibited-url";
+              } else if (
+                !isAgentRouteAuthorized(occurrence.url, agentLoadRoutes)
+              ) {
+                policyReason = "agent-route-not-authorized";
               }
             }
             if (policyReason) {
@@ -1996,6 +2098,12 @@ export function createScoutRunner({
         requestUrl,
         authorization.origin
       );
+      const agentRouteAllowed = isAgentRouteAuthorized(
+        requestUrl,
+        route.request().resourceType() === "document"
+          ? agentNavigationRoutes
+          : agentLoadRoutes
+      );
       let agentActionAllowed = false;
       if (agentNetworkPolicyActive && agentActionContext && !localResource) {
         if (agentActionContext.action !== "visit") {
@@ -2023,7 +2131,10 @@ export function createScoutRunner({
             route.request().resourceType() !== "document")) ||
         (sameOrigin &&
           (!agentNetworkPolicyActive ||
-            (agentReadAllowed && agentUrlAllowed && agentActionAllowed)))
+            (agentReadAllowed &&
+              agentUrlAllowed &&
+              agentRouteAllowed &&
+              agentActionAllowed)))
       ) {
         await route.continue(
           fetchOccurrence ? { headers: forwardedHeaders } : undefined
@@ -2036,15 +2147,19 @@ export function createScoutRunner({
         reason = agentNetworkPolicyActive
           ? "agent-cross-origin"
           : "cross-origin";
+      } else if (!agentReadAllowed) {
+        reason = "agent-non-read-method";
+      } else if (agentActionContext?.action !== "visit") {
+        reason = "agent-non-visit-request";
       } else if (agentReadAllowed && !agentUrlAllowed) {
         reason = "agent-prohibited-url";
+      } else if (agentReadAllowed && !agentRouteAllowed) {
+        reason = "agent-route-not-authorized";
       } else if (agentReadAllowed && agentActionContext?.action === "visit") {
         reason =
           route.request().resourceType() === "document"
             ? "agent-navigation-outside-visit"
             : "agent-active-request";
-      } else if (agentReadAllowed) {
-        reason = "agent-non-visit-request";
       }
       addBlockedRequest(
         {
@@ -2076,6 +2191,7 @@ export function createScoutRunner({
       "page-policy",
       () => context.addInitScript(({
       authorizedOrigin,
+      authorizedNavigationRoutes,
       controlName,
       controlToken,
       fetchBindingName,
@@ -2087,6 +2203,7 @@ export function createScoutRunner({
       prohibitedPattern,
       startActive
     }) => {
+      const navigationRoutes = new Set(authorizedNavigationRoutes);
       const prohibited = new RegExp(prohibitedPattern, "i");
       const canonicalizeSemanticText = (value) =>
         String(value ?? "")
@@ -2123,13 +2240,15 @@ export function createScoutRunner({
         try {
           const url = new URL(value, globalThis.location.href);
           const decoded = decodeUrlText(url);
+          url.hash = "";
           return (
             ["http:", "https:"].includes(url.protocol) &&
             url.origin === authorizedOrigin &&
             !url.username &&
             !url.password &&
             decoded !== null &&
-            !prohibited.test(canonicalizeSemanticText(decoded))
+            !prohibited.test(canonicalizeSemanticText(decoded)) &&
+            navigationRoutes.has(url.href)
           );
         } catch {
           return false;
@@ -2256,6 +2375,7 @@ export function createScoutRunner({
       globalThis.addEventListener("popstate", observeCurrentUrl);
     }, {
       authorizedOrigin: authorization.origin,
+      authorizedNavigationRoutes: options.agentNavigationRoutes,
       controlName: agentGuardControlName,
       controlToken: agentGuardControlToken,
       fetchBindingName: agentFetchBindingName,
@@ -2359,7 +2479,13 @@ export function createScoutRunner({
                 agentActionContext?.action === "visit" &&
                 agentActionContext.navigationWindowOpen &&
                 ["GET", "HEAD"].includes(event.request.method) &&
-                isAgentUrlAllowed(redirectUrl, authorization.origin);
+                isAgentUrlAllowed(redirectUrl, authorization.origin) &&
+                isAgentRouteAuthorized(
+                  redirectUrl,
+                  event.resourceType === "Document"
+                    ? agentNavigationRoutes
+                    : agentLoadRoutes
+                );
             } catch {}
             if (!redirectAllowed) {
               let redirectOrigin = "";
@@ -2369,7 +2495,9 @@ export function createScoutRunner({
               const reason =
                 redirectOrigin && redirectOrigin !== authorization.origin
                   ? "agent-cross-origin"
-                  : "agent-prohibited-url";
+                  : isAgentUrlAllowed(redirectUrl, authorization.origin)
+                    ? "agent-route-not-authorized"
+                    : "agent-prohibited-url";
               if (requestState?.occurrence) {
                 blockedAgentFetchOccurrences.add(requestState.occurrence);
                 const playwrightRequest = agentFetchRequests.get(
@@ -2565,7 +2693,8 @@ export function createScoutRunner({
       if (
         agentNetworkPolicyActive &&
         currentUrl !== "about:blank" &&
-        !isAgentUrlAllowed(currentUrl, authorization.origin)
+        (!isAgentUrlAllowed(currentUrl, authorization.origin) ||
+          !isAgentRouteAuthorized(currentUrl, agentNavigationRoutes))
       ) {
         enqueueAgentGuardAttempt({
           kind: "prohibited-navigation",
@@ -2831,6 +2960,8 @@ export function createScoutRunner({
               page,
               intent: options.intent,
               authorizedOrigin: authorization.origin,
+              authorizedNavigationRoutes: agentNavigationRoutes,
+              authorizedPrimaryRoutes: agentPrimaryRoutes,
               engine: resolvedEngine.engine,
               maxSteps: options.maxAgentSteps,
               timeoutMs: options.timeoutMs,
