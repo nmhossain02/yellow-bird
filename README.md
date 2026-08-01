@@ -185,7 +185,9 @@ requires the initial page, a passed visit to a distinct authorized route, safe
 controls observed on that destination, and no failed agent action. Intents that
 do not match an owned profile, need server-side mutation, or require another
 action outside the safe interaction authority produce an `inconclusive` result
-instead of an unverified pass.
+instead of an unverified pass. After at least one authorized step passes, a
+later planner, action, cleanup, policy, or browser-operation failure preserves
+the earlier steps and page observations as `partial` coverage.
 
 Before authorizing controls or requests, YellowBird repeatedly percent-decodes
 URL and control semantics, normalizes case and letter-digit boundaries so names
@@ -195,7 +197,8 @@ label cannot be resolved. Browser guards are installed before destination script
 run, keep their enforcement state outside page-accessible objects, and report
 blocked browser operations through a per-run channel. Agent document visits
 intercept every redirect response so an unsafe destination is blocked before the
-browser follows it. During the initial target load and each authorized visit,
+browser follows it. Policy-rejected `fetch` calls are recorded and rejected
+before dispatch. During the initial target load and each authorized visit,
 exact-origin `GET` and `HEAD` non-document requests, including `EventSource`, are
 allowed only through a 150 ms settlement interval after `DOMContentLoaded`.
 Allowed response bodies continue streaming without YellowBird buffering them.
