@@ -130,7 +130,10 @@ yellowbird scout \
 
 The equivalent environment variables are `YELLOWBIRD_ENGINE_BASE_URL`,
 `YELLOWBIRD_ENGINE_MODEL`, and `YELLOWBIRD_ENGINE_API_KEY`. The API key is sent
-only as a bearer token and is never written to the evidence bundle.
+only as a bearer token and is never written to the evidence bundle. Configured
+and provider-reported model identifiers must be nonempty printable text, at most
+200 UTF-16 code units, with no surrounding whitespace. Invalid identifiers are
+rejected before they enter terminal, Markdown, diagnostic, or evidence output.
 
 An existing directory whose name ends in `.md` is diagnosed as legacy output;
 rename or remove it, choose a new Markdown filename, or pass a directory path
@@ -180,11 +183,11 @@ including submission and outbound WebSocket blocking, without calling the model.
 Recorded non-navigation actions also replay through verified locators and assert
 their match counts before using the recorded ordinal.
 
-The current page URL, title, text, and bounded control inventory, including
-supplied link URLs and select options, are sent to the configured model endpoint.
-URLs are sent exactly and can include query values. The default endpoint is
-loopback. Operators choosing a remote endpoint are responsible for that data
-boundary. Query values and console contents remain out of operational
+A bounded snapshot of the current page URL, title, text, and control inventory,
+including supplied link URLs and select options, is sent to the configured model
+endpoint. URLs are sent exactly and can include query values. The default
+endpoint is loopback. Operators choosing a remote endpoint are responsible for
+that data boundary. Query values and console contents remain out of operational
 diagnostics.
 
 Owner-declared scenarios retain their explicit permission model for exact
