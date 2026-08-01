@@ -27,6 +27,7 @@ const server = createServer((request, response) => {
         <head><title>Intent flow fixture watch</title></head>
         <body>
           <main>
+            <pre>${" ".repeat(9_000)}</pre>
             <h1>Preview a watch</h1>
             <p>Enter public item details for a read-only preview.</p>
             <label>Item URL <input name="item-url" type="url"></label>

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -241,28 +241,76 @@ async function main() {
     classifyAgentEngineEndpoint(engineConfig.baseUrl) === "loopback",
     `The real Price Scout gate requires a loopback planning engine, received ${engineConfig.baseUrl}`
   );
-  const priceScoutDirectory = await realpath(requestedPriceScoutDirectory);
+  const sourcePriceScoutDirectory = await realpath(
+    requestedPriceScoutDirectory
+  );
   const authorizedCommit = await trustedPriceScoutCommit();
 
-  const origin = await checked(
-    ["git", "remote", "get-url", "origin"],
-    priceScoutDirectory,
-    "Price Scout origin verification",
-    gitEnvironment
-  );
+  const [origin, sourceWorktreeRoot] = await Promise.all([
+    checked(
+      ["git", "remote", "get-url", "origin"],
+      sourcePriceScoutDirectory,
+      "Price Scout origin verification",
+      gitEnvironment
+    ),
+    checked(
+      ["git", "rev-parse", "--show-toplevel"],
+      sourcePriceScoutDirectory,
+      "Price Scout source worktree verification",
+      gitEnvironment
+    )
+  ]);
   requireCondition(
     canonicalRepository(origin) === expectedRepository,
-    `Expected the real Price Scout repository at ${priceScoutDirectory}, received ${origin}`
+    `Expected the real Price Scout repository at ${sourcePriceScoutDirectory}, received ${origin}`
   );
-  const priceScoutCommit = await verifyPriceScoutCheckout(
-    priceScoutDirectory,
-    "before the end-to-end gate starts it",
-    authorizedCommit
+  requireCondition(
+    (await realpath(sourceWorktreeRoot)) === sourcePriceScoutDirectory,
+    "The configured Price Scout path must resolve to its Git worktree root"
+  );
+  await checked(
+    ["git", "cat-file", "-e", `${authorizedCommit}^{commit}`],
+    sourcePriceScoutDirectory,
+    "Authorized Price Scout commit verification",
+    gitEnvironment
   );
 
-  const outputDirectory = await mkdtemp(
-    join(tmpdir(), "yellowbird-real-price-scout-")
+  const validationRoot = await mkdtemp(
+    join(tmpdir(), "yellowbird-price-scout-checkout-")
   );
+  const priceScoutDirectory = join(validationRoot, "checkout");
+  try {
+    await checked(
+      [
+        "git",
+        "-c",
+        "credential.helper=",
+        "clone",
+        "--shared",
+        "--no-checkout",
+        "--",
+        sourcePriceScoutDirectory,
+        priceScoutDirectory
+      ],
+      validationRoot,
+      "Isolated Price Scout checkout materialization",
+      gitEnvironment
+    );
+    await checked(
+      ["git", "checkout", "--detach", authorizedCommit],
+      priceScoutDirectory,
+      "Authorized Price Scout checkout materialization",
+      gitEnvironment
+    );
+    const priceScoutCommit = await verifyPriceScoutCheckout(
+      priceScoutDirectory,
+      "before the end-to-end gate starts it",
+      authorizedCommit
+    );
+
+    const outputDirectory = await mkdtemp(
+      join(tmpdir(), "yellowbird-real-price-scout-")
+    );
   const targetPort = await availableLoopbackPort();
   const fixturePort = await availableLoopbackPort(new Set([targetPort]));
   const target = `https://localhost:${targetPort}`;
@@ -604,7 +652,10 @@ async function main() {
     }
   }
 
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } finally {
+    await rm(validationRoot, { force: true, recursive: true });
+  }
 }
 
 await main();

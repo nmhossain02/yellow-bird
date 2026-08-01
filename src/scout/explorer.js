@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { cleanDiagnosticText, diagnosticUrl } from "./diagnostics.js";
 
 const SAFE_FILL_TYPES = new Set([
@@ -176,7 +177,7 @@ export function browserRenderedTextSnapshot({
       return false;
     }
   };
-  const renderedTextNode = (textNode) => {
+  const renderedTextNode = (textNode, maximumCharacters) => {
     const parent = textNode?.parentElement;
     if (
       !parent ||
@@ -196,7 +197,11 @@ export function browserRenderedTextSnapshot({
         return false;
       }
       const range = document.createRange();
-      range.selectNodeContents(textNode);
+      range.setStart(textNode, 0);
+      range.setEnd(
+        textNode,
+        Math.min(textNode.length, Math.max(1, maximumCharacters))
+      );
       const rect = range.getBoundingClientRect();
       range.detach();
       return (
@@ -223,12 +228,12 @@ export function browserRenderedTextSnapshot({
       hiddenInTree(node);
       continue;
     }
-    if (!renderedTextNode(node)) continue;
     const text = node.nodeValue || "";
     if (!text) continue;
     const separatorLength = chunks.length ? 1 : 0;
     const available = maximum - characters - separatorLength;
     if (available <= 0) break;
+    if (!renderedTextNode(node, available)) continue;
     chunks.push(text.slice(0, available));
     characters += separatorLength + Math.min(text.length, available);
   }
@@ -431,11 +436,12 @@ async function snapshotPage(
   authorizedNavigationRoutes,
   expectedDestinationControls
 ) {
+  const snapshotRefToken = randomUUID();
   const bodyText = await page.evaluate(browserRenderedTextSnapshot, {
     maximum: SNAPSHOT_LIMITS.bodyText,
     traversalNodeCount: SNAPSHOT_LIMITS.traversalNodeCount
   });
-  const raw = await page.evaluate(({ bodyTextCharacters, limits, prohibitedPattern }) => {
+  const raw = await page.evaluate(({ bodyTextCharacters, limits, prohibitedPattern, refToken }) => {
     let remainingCharacters = limits.totalCharacters - bodyTextCharacters;
     const prohibited = new RegExp(prohibitedPattern, "i");
     const canonicalizeSemanticText = (value) =>
@@ -632,7 +638,7 @@ async function snapshotPage(
         return false;
       }
     };
-    const isRenderedTextNode = (textNode) => {
+    const isRenderedTextNode = (textNode, maximumCharacters) => {
       const parent = textNode?.parentElement;
       if (
         !parent ||
@@ -652,7 +658,11 @@ async function snapshotPage(
           return false;
         }
         const range = document.createRange();
-        range.selectNodeContents(textNode);
+        range.setStart(textNode, 0);
+        range.setEnd(
+          textNode,
+          Math.min(textNode.length, Math.max(1, maximumCharacters))
+        );
         const rect = range.getBoundingClientRect();
         range.detach();
         return positiveArea(rect) && remainsVisibleThroughClipping(rect, parent);
@@ -680,12 +690,12 @@ async function snapshotPage(
           isHiddenInTree(textNode);
           continue;
         }
-        if (!isRenderedTextNode(textNode)) continue;
         const text = String(textNode.nodeValue || "");
         if (!text) continue;
         const separatorLength = chunks.length ? 1 : 0;
         const available = maximum - characters - separatorLength;
         if (available <= 0) break;
+        if (!isRenderedTextNode(textNode, available)) continue;
         chunks.push(text.slice(0, available));
         characters += separatorLength + Math.min(text.length, available);
       }
@@ -790,6 +800,7 @@ async function snapshotPage(
       }
       return structuralReplayLocator(element);
     };
+    const observedElements = [];
     const elements = candidateElements
       .flatMap((element, index) => {
         if (!element.isConnected || !isRenderedElement(element)) return [];
@@ -882,6 +893,21 @@ async function snapshotPage(
             [option.value, limits.optionValue]
           ])
         ].filter(([value]) => value !== null && value !== undefined);
+        const ref = `element-${index + 1}`;
+        const runtimeRef = `${refToken}:${ref}`;
+        const observedCandidate = {
+          ref,
+          runtimeRef,
+          tag,
+          role,
+          label: String(label),
+          type: String(element.type || "")
+        };
+        const observedCharacters = JSON.stringify(observedCandidate).length;
+        if (observedCharacters > remainingCharacters) return [];
+        remainingCharacters -= observedCharacters;
+        observedElements.push(observedCandidate);
+        element.setAttribute("data-yellowbird-agent-ref", runtimeRef);
         if (
           formHasPassword ||
           safetyFields.some(
@@ -893,9 +919,9 @@ async function snapshotPage(
         }
         const locator = replayLocator(element);
         if (!locator) return [];
-        const ref = `element-${index + 1}`;
         const candidate = {
           ref,
+          runtimeRef,
           tag,
           role,
           label: String(label),
@@ -916,65 +942,107 @@ async function snapshotPage(
         const candidateCharacters = JSON.stringify(candidate).length;
         if (candidateCharacters > remainingCharacters) return [];
         remainingCharacters -= candidateCharacters;
-        element.setAttribute("data-yellowbird-agent-ref", ref);
         return [candidate];
       });
-    return { url, title, candidateTraversalComplete, elements };
+    return {
+      url,
+      title,
+      candidateTraversalComplete,
+      observedElements,
+      elements
+    };
   }, {
     bodyTextCharacters: bodyText.length,
     limits: SNAPSHOT_LIMITS,
-    prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN
+    prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN,
+    refToken: snapshotRefToken
   });
-  const semanticElements = await Promise.all(
-    raw.elements.map(async (rawElement) => {
+  const semanticElements = [];
+  let accessibilitySession = null;
+  try {
+    accessibilitySession = await page.context().newCDPSession(page);
+    for (const rawElement of raw.observedElements) {
+      let objectId = null;
       try {
-        const semanticLocator = page
-          .getByRole(rawElement.role, {
-            name: normalizeText(rawElement.label, SNAPSHOT_LIMITS.fieldText),
-            exact: true
-          })
-          .and(
-            page.locator(
-              `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`
-            )
-          );
-        return (await semanticLocator.count()) === 1 &&
-          (await semanticLocator.isVisible())
-          ? rawElement
-          : null;
+        const selector =
+          `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.runtimeRef)}]`;
+        const evaluated = await accessibilitySession.send(
+          "Runtime.evaluate",
+          {
+            expression: `document.querySelector(${JSON.stringify(selector)})`,
+            returnByValue: false,
+            silent: true
+          }
+        );
+        objectId = evaluated.result?.objectId || null;
+        if (!objectId) {
+          semanticElements.push(null);
+          continue;
+        }
+        const described = await accessibilitySession.send(
+          "DOM.describeNode",
+          { objectId, depth: 0 }
+        );
+        const backendNodeId = described.node?.backendNodeId;
+        const accessibility = await accessibilitySession.send(
+          "Accessibility.getPartialAXTree",
+          { backendNodeId, fetchRelatives: false }
+        );
+        const semanticNode = accessibility.nodes.find(
+          (node) =>
+            node.backendDOMNodeId === backendNodeId && node.ignored !== true
+        );
+        const semanticRole = String(semanticNode?.role?.value || "");
+        const semanticName = normalizeText(
+          semanticNode?.name?.value || "",
+          SNAPSHOT_LIMITS.fieldText
+        );
+        semanticElements.push(
+          semanticRole === rawElement.role &&
+            semanticName ===
+              normalizeText(rawElement.label, SNAPSHOT_LIMITS.fieldText)
+            ? rawElement
+            : null
+        );
       } catch {
-        return null;
+        semanticElements.push(null);
+      } finally {
+        if (objectId) {
+          await accessibilitySession
+            .send("Runtime.releaseObject", { objectId })
+            .catch(() => {});
+        }
       }
-    })
+    }
+  } catch {
+    while (semanticElements.length < raw.observedElements.length) {
+      semanticElements.push(null);
+    }
+  } finally {
+    await accessibilitySession?.detach().catch(() => {});
+  }
+  const verifiedSemanticElements = semanticElements.filter(
+    (element) => element !== null
   );
-  const controlAssertions = await Promise.all(
-    expectedDestinationControls.map(async (expected) => {
-      if (!raw.candidateTraversalComplete) {
-        return { ...expected, matchCount: 0, satisfied: false };
-      }
-      try {
-        const locator = page.getByRole(expected.role, {
-          name: expected.name,
-          exact: true
-        });
-        const matchCount = await locator.count();
-        const satisfied =
-          matchCount === 1 &&
-          (await locator.isVisible()) &&
-          (await locator.evaluate(
-            (element, expectedType) =>
-              String(element.type || "").toLowerCase() === expectedType,
-            expected.type
-          ));
-        return { ...expected, matchCount, satisfied };
-      } catch {
-        return { ...expected, matchCount: 0, satisfied: false };
-      }
-    })
+  const verifiedSemanticRefs = new Set(
+    verifiedSemanticElements.map((element) => element.runtimeRef)
   );
+  const controlAssertions = expectedDestinationControls.map((expected) => {
+    if (!raw.candidateTraversalComplete) {
+      return { ...expected, matchCount: 0, satisfied: false };
+    }
+    const matchCount = verifiedSemanticElements.filter(
+      (element) =>
+        element.role === expected.role &&
+        String(element.type || "").toLowerCase() === expected.type &&
+        normalizeText(element.label, SNAPSHOT_LIMITS.fieldText) ===
+          expected.name
+    ).length;
+    return { ...expected, matchCount, satisfied: matchCount === 1 };
+  });
   const elements = [];
-  for (const rawElement of semanticElements) {
-    if (rawElement === null) continue;
+  for (const rawElement of raw.elements) {
+    if (!verifiedSemanticRefs.has(rawElement.runtimeRef)) continue;
     const action = elementAction(
       { ...rawElement, pageUrl: raw.url },
       authorizedOrigin,
@@ -986,6 +1054,17 @@ async function snapshotPage(
       const url = new URL(href);
       url.hash = "";
       href = url.href;
+    }
+    const runtimeHandle = await page.evaluateHandle(
+      (runtimeRef) =>
+        document.querySelector(
+          `[data-yellowbird-agent-ref=${JSON.stringify(runtimeRef)}]`
+        ),
+      rawElement.runtimeRef
+    );
+    if (!runtimeHandle.asElement()) {
+      await runtimeHandle.dispose();
+      continue;
     }
     const element = {
       ref: rawElement.ref,
@@ -999,7 +1078,7 @@ async function snapshotPage(
         label: normalizeText(option.label, 120),
         value: String(option.value).slice(0, 200)
       })),
-      runtimeSelector: `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`,
+      runtimeHandle,
       locator: rawElement.locator
     };
     if (!element.locator) continue;
@@ -1044,7 +1123,7 @@ function availableElements(snapshot, usedActionKeys, visited) {
   return snapshot.elements
     .filter((element) => !usedActionKeys.has(element.key))
     .filter((element) => element.action !== "visit" || !visited.has(element.href))
-    .map(({ runtimeSelector, locator, key, action, ...element }) => ({
+    .map(({ runtimeHandle, locator, key, action, ...element }) => ({
       ...element,
       allowedAction: action
     }));
@@ -1529,7 +1608,6 @@ export async function exploreIntentWithEngine({
         action,
         requestedUrl: selected.href || null
       });
-      const locator = page.locator(selected.runtimeSelector);
       if (action === "visit") {
         navigationAttempted = true;
         response = await page.goto(selected.href, {
@@ -1538,11 +1616,11 @@ export async function exploreIntentWithEngine({
         });
         visited.add(selected.href);
       } else if (action === "fill") {
-        await locator.fill(actionValue);
+        await selected.runtimeHandle.fill(actionValue);
       } else if (action === "select") {
-        await locator.selectOption(actionValue);
+        await selected.runtimeHandle.selectOption(actionValue);
       } else if (action === "click") {
-        await locator.click();
+        await selected.runtimeHandle.click();
       }
       await page.waitForTimeout(actionPolicy?.navigationSettlementMs ?? 150);
       if (action === "visit") await actionPolicy?.resume?.(action);

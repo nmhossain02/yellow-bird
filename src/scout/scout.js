@@ -470,12 +470,13 @@ function buildRegression(options, explorationSteps = []) {
     "  const failedRequests = [];",
     "  const serverErrors = [];",
     `  const yellowbirdRenderedTextSnapshot = ${browserRenderedTextSnapshot.toString()};`,
-    "  const yellowbirdReadRenderedBodyText = async maximum =>",
+    "  const yellowbirdReadRenderedBodyText = async (maximum, normalizedMaximum = maximum) =>",
     `    (await page.evaluate(yellowbirdRenderedTextSnapshot, { maximum, traversalNodeCount: ${RENDERED_TEXT_LIMITS.traversalNodeCount} }))`,
-    '      .replaceAll(/\\s+/g, " ").trim().slice(0, maximum);',
+    '      .replaceAll(/\\s+/g, " ").trim().slice(0, normalizedMaximum);',
     "  const yellowbirdGuardControlName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
     "  const yellowbirdGuardControlToken = randomUUID();",
     "  const yellowbirdGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;",
+    "  const yellowbirdGuardFailurePrefix = `__yellowbird_guard_failure__${randomUUID()}:`;",
     "  const yellowbirdFetchBindingName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
     "  const yellowbirdFetchBindingToken = randomUUID();",
     "  const yellowbirdFetchOccurrencePrefix = `${randomUUID()}:`;",
@@ -536,6 +537,7 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     "  });",
     '  page.on("pageerror", error => {',
+    "    if (String(error.message || error).includes(yellowbirdGuardFailurePrefix)) return;",
     "    const fetchFailure = yellowbirdParseFetchFailure(error.message);",
     "    pageErrors.push({",
     "      message: fetchFailure?.message || error.message,",
@@ -635,7 +637,7 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     "    return { occurrenceId, policyRejected };",
     "  });",
-    "  await page.context().addInitScript(({ authorizedOrigin, authorizedNavigationRoutes, controlName, controlToken, fetchBindingName, fetchBindingToken, fetchFailurePrefix, fetchOccurrenceHeader, fetchOccurrencePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
+    "  await page.context().addInitScript(({ authorizedOrigin, authorizedNavigationRoutes, controlName, controlToken, fetchBindingName, fetchBindingToken, fetchFailurePrefix, fetchOccurrenceHeader, fetchOccurrencePrefix, guardFailurePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
     "    const navigationRoutes = new Set(authorizedNavigationRoutes);",
     "    const prohibited = new RegExp(prohibitedPattern, \"i\");",
     "    const canonicalizeSemanticText = value => String(value ?? \"\")",
@@ -691,17 +693,17 @@ function buildRegression(options, explorationSteps = []) {
     "      emit(`${guardPrefix}${JSON.stringify({ kind, url })}`);",
     "      return true;",
     "    };",
-    "    const disabledPeerConstructors = new Map();",
-    '    for (const constructorName of ["RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection", "WebTransport"]) {',
+    "    const disabledTransportConstructors = new Map();",
+    '    if (active) for (const [constructorName, kind] of [["RTCPeerConnection", "peer-transport"], ["webkitRTCPeerConnection", "peer-transport"], ["mozRTCPeerConnection", "peer-transport"], ["WebTransport", "peer-transport"], ["Worker", "worker-realm"], ["SharedWorker", "worker-realm"]]) {',
     "      const original = globalThis[constructorName];",
     '      if (typeof original !== "function") continue;',
-    "      let blockedConstructor = disabledPeerConstructors.get(original);",
+    "      let blockedConstructor = disabledTransportConstructors.get(original);",
     "      if (!blockedConstructor) {",
     "        blockedConstructor = function () {",
-    '          blocked("peer-transport");',
-    '          throw new DOMException("Blocked by YellowBird exact-origin policy", "SecurityError");',
+    "          blocked(kind);",
+    '          throw new DOMException(`${guardFailurePrefix}${kind}`, "SecurityError");',
     "        };",
-    "        disabledPeerConstructors.set(original, blockedConstructor);",
+    "        disabledTransportConstructors.set(original, blockedConstructor);",
     "        if (original.prototype) {",
     "          try {",
     "            Object.defineProperty(original.prototype, \"constructor\", {",
@@ -789,7 +791,7 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     '    globalThis.addEventListener("hashchange", observeCurrentUrl);',
     '    globalThis.addEventListener("popstate", observeCurrentUrl);',
-    `  }, { authorizedOrigin: yellowbirdTarget.origin, authorizedNavigationRoutes: [...yellowbirdAgentNavigationRoutes], controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, fetchBindingName: yellowbirdFetchBindingName, fetchBindingToken: yellowbirdFetchBindingToken, fetchFailurePrefix: yellowbirdFetchFailurePrefix, fetchOccurrenceHeader: yellowbirdFetchOccurrenceHeader, fetchOccurrencePrefix: yellowbirdFetchOccurrencePrefix, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
+    `  }, { authorizedOrigin: yellowbirdTarget.origin, authorizedNavigationRoutes: [...yellowbirdAgentNavigationRoutes], controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, fetchBindingName: yellowbirdFetchBindingName, fetchBindingToken: yellowbirdFetchBindingToken, fetchFailurePrefix: yellowbirdFetchFailurePrefix, fetchOccurrenceHeader: yellowbirdFetchOccurrenceHeader, fetchOccurrencePrefix: yellowbirdFetchOccurrencePrefix, guardFailurePrefix: yellowbirdGuardFailurePrefix, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
     "  const yellowbirdRecordBlockedRequest = (request, ...additionalUrls) => {",
     "    const redirectChain = [];",
     "    for (let current = request; current; current = current.redirectedFrom())",
@@ -1070,7 +1072,7 @@ function buildRegression(options, explorationSteps = []) {
       }
       if ((step.destinationAssertions || []).length > 0) {
         lines.push(
-          `  const yellowbirdDestinationText${index + 1} = await yellowbirdReadRenderedBodyText(${RENDERED_TEXT_LIMITS.plannerBodyText});`
+          `  const yellowbirdDestinationText${index + 1} = await yellowbirdReadRenderedBodyText(${RENDERED_TEXT_LIMITS.bodyText}, ${RENDERED_TEXT_LIMITS.plannerBodyText});`
         );
       }
       for (const assertion of step.destinationAssertions || []) {
@@ -2026,6 +2028,8 @@ export function createScoutRunner({
     const agentGuardControlName = `__yellowbird_${randomUUID().replaceAll("-", "")}`;
     const agentGuardControlToken = randomUUID();
     const agentGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;
+    const agentGuardFailurePrefix =
+      `__yellowbird_guard_failure__${randomUUID()}:`;
     const agentFetchBindingName = `__yellowbird_${randomUUID().replaceAll("-", "")}`;
     const agentFetchBindingToken = randomUUID();
     const agentFetchOccurrencePrefix = `${randomUUID()}:`;
@@ -2393,6 +2397,7 @@ export function createScoutRunner({
       fetchFailurePrefix,
       fetchOccurrenceHeader,
       fetchOccurrencePrefix,
+      guardFailurePrefix,
       guardPrefix,
       prohibitedPattern,
       startActive
@@ -2468,25 +2473,27 @@ export function createScoutRunner({
         emit(`${guardPrefix}${JSON.stringify({ kind, url })}`);
         return true;
       };
-      const disabledPeerConstructors = new Map();
-      for (const constructorName of [
-        "RTCPeerConnection",
-        "webkitRTCPeerConnection",
-        "mozRTCPeerConnection",
-        "WebTransport"
+      const disabledTransportConstructors = new Map();
+      if (active) for (const [constructorName, kind] of [
+        ["RTCPeerConnection", "peer-transport"],
+        ["webkitRTCPeerConnection", "peer-transport"],
+        ["mozRTCPeerConnection", "peer-transport"],
+        ["WebTransport", "peer-transport"],
+        ["Worker", "worker-realm"],
+        ["SharedWorker", "worker-realm"]
       ]) {
         const original = globalThis[constructorName];
         if (typeof original !== "function") continue;
-        let blockedConstructor = disabledPeerConstructors.get(original);
+        let blockedConstructor = disabledTransportConstructors.get(original);
         if (!blockedConstructor) {
           blockedConstructor = function () {
-            blocked("peer-transport");
+            blocked(kind);
             throw new DOMException(
-              "Blocked by YellowBird exact-origin policy",
+              `${guardFailurePrefix}${kind}`,
               "SecurityError"
             );
           };
-          disabledPeerConstructors.set(original, blockedConstructor);
+          disabledTransportConstructors.set(original, blockedConstructor);
           if (original.prototype) {
             try {
               Object.defineProperty(original.prototype, "constructor", {
@@ -2618,6 +2625,7 @@ export function createScoutRunner({
       fetchFailurePrefix: agentFetchFailurePrefix,
       fetchOccurrenceHeader: agentFetchOccurrenceHeader,
       fetchOccurrencePrefix: agentFetchOccurrencePrefix,
+      guardFailurePrefix: agentGuardFailurePrefix,
       guardPrefix: agentGuardPrefix,
       prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN,
       startActive: options.exploreIntent
@@ -2885,6 +2893,16 @@ export function createScoutRunner({
       }
     });
     page.on("pageerror", (error) => {
+      if (
+        String(error.message || error).includes(agentGuardFailurePrefix)
+      ) {
+        record(
+          "debug",
+          "browser.page.error.policy-blocked",
+          "Correlated a page exception with a blocked browser capability"
+        );
+        return;
+      }
       const fetchFailure = parseAgentFetchFailure(error.message);
       if (
         fetchFailure &&

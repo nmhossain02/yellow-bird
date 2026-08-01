@@ -15,6 +15,7 @@ import {
   resolveLoopbackScheme
 } from "../src/scout/diagnostics.js";
 import {
+  browserRenderedTextSnapshot,
   exploreIntentWithEngine,
   isAgentUrlAllowed,
   PROHIBITED_AGENT_ACTION_PATTERN
@@ -481,6 +482,7 @@ beforeAll(async () => {
           <body>
             <h1>Track any public product page</h1>
             <input role="button" type="url" name="Product URL">
+            <button type="submit">Compile monitor</button>
           </body>
         </html>`);
       return;
@@ -498,6 +500,14 @@ beforeAll(async () => {
                     iceServers: [{ urls: "stun:stun.example.test:3478" }]
                   });
                   peer.createDataChannel("yellowbird");
+                } catch {}
+                try {
+                  const workerSource =
+                    'try { new WebTransport("https://transport.example.test/"); } catch {}';
+                  new Worker(URL.createObjectURL(new Blob(
+                    [workerSource],
+                    { type: "text/javascript" }
+                  )));
                 } catch {}
               });
             </script>
@@ -1005,7 +1015,9 @@ beforeAll(async () => {
                 Promise.reject(new Error("Related target product failure"));
                 const effectUrl = location.origin + "/agent-related-target-effect";
                 const source = "fetch(" + JSON.stringify(effectUrl) + ", { method: 'POST' })";
-                new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
+                try {
+                  new Worker(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
+                } catch {}
                 window.open("/agent-related-target-effect", "yellowbird-related-target");
               });
             </script>
@@ -2443,7 +2455,10 @@ test("owned coverage uses browser accessibility semantics for controls", async (
     exploreIntent: true,
     agentPrimaryRoutes: ["/agent-semantic-spoof-destination"],
     agentExpectedTexts: ["Track any public product page"],
-    agentExpectedControls: ["textbox:url:Product URL"],
+    agentExpectedControls: [
+      "textbox:url:Product URL",
+      "button:submit:Compile monitor"
+    ],
     outputDirectory
   });
 
@@ -2457,6 +2472,13 @@ test("owned coverage uses browser accessibility semantics for controls", async (
         name: "Product URL",
         matchCount: 0,
         satisfied: false
+      },
+      {
+        role: "button",
+        type: "submit",
+        name: "Compile monitor",
+        matchCount: 1,
+        satisfied: true
       }
     ]
   );
@@ -3636,6 +3658,36 @@ test("visit authority allows bounded load requests and blocks delayed effects in
   assert.equal(visitWebSocketUpgradeCount, 0);
 }, 30_000);
 
+test("rendered text bounds each range before browser geometry", async () => {
+  const page = await sharedBrowser.newPage();
+  try {
+    await page.setContent(`<main>${"x".repeat(100_000)}</main>`);
+    await page.evaluate(() => {
+      const original = Range.prototype.getBoundingClientRect;
+      globalThis.maximumMeasuredRange = 0;
+      Range.prototype.getBoundingClientRect = function () {
+        globalThis.maximumMeasuredRange = Math.max(
+          globalThis.maximumMeasuredRange,
+          this.toString().length
+        );
+        return original.call(this);
+      };
+    });
+    const text = await page.evaluate(browserRenderedTextSnapshot, {
+      maximum: 8_000,
+      traversalNodeCount: 5_000
+    });
+
+    assert.equal(text.length, 8_000);
+    assert.equal(
+      await page.evaluate(() => globalThis.maximumMeasuredRange),
+      8_000
+    );
+  } finally {
+    await page.close();
+  }
+});
+
 test("agent snapshots bound page fields, select options, and total prompt size", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-snapshot-boundary-")
@@ -3931,6 +3983,11 @@ test("peer transports are blocked and recorded during exploration", async () => 
   assert.ok(
     report.observations.blockedRequests.some(
       (request) => request.reason === "agent-peer-transport"
+    )
+  );
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-worker-realm"
     )
   );
   assert.deepEqual(report.observations.pageErrors, []);
@@ -4673,6 +4730,8 @@ test("standalone intent fixture runs end to end including replay", async () => {
         "Intent flow fixture",
         "--agent-primary-route",
         "/watch",
+        "--agent-expect-text",
+        "Preview a watch",
         "--agent-expect-control",
         "textbox:url:Item URL",
         "--engine-base-url",
@@ -4706,6 +4765,10 @@ test("standalone intent fixture runs end to end including replay", async () => {
     assert.equal(
       evidence.observations.exploration.steps[0].url,
       `${intentFlow.url}/watch`
+    );
+    assert.deepEqual(
+      evidence.observations.exploration.steps[0].destinationAssertions,
+      [{ text: "Preview a watch", satisfied: true }]
     );
     assert.deepEqual(
       evidence.observations.exploration.steps[0].destinationControlAssertions,
@@ -4801,7 +4864,10 @@ test("scout writes portable evidence and a deterministic regression", async () =
   await Promise.all(Object.values(report.artifacts).map((path) => stat(path)));
   const regression = await readFile(report.artifacts.regression, "utf8");
   assert.match(regression, /toHaveTitle\("Feather Shop"\)/);
-  assert.match(regression, /toContainText\("Checkout ready"\)/);
+  assert.match(
+    regression,
+    /yellowbirdReadRenderedBodyText\(20000\)\)\.toContain\("Checkout ready"\)/
+  );
 
   const evidence = JSON.parse(await readFile(report.artifacts.evidence, "utf8"));
   const schema = JSON.parse(

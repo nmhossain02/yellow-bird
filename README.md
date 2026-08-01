@@ -200,7 +200,9 @@ begin with `collapse`, `detail`, `details`, `expand`, `hide`, `inspect`,
 `preview`, `reveal`, `show`, `toggle`, or `view`. YellowBird applies the same
 semantic denial to every control type and blocks non-read HTTP methods,
 destructive request URLs, and WebSocket, WebTransport, and WebRTC connections
-throughout agent exploration. Form submission,
+throughout agent exploration. Dedicated and shared worker creation is also
+policy-blocked because a worker can open WebTransport before a page-level
+observer can constrain it. Form submission,
 authentication, credential use, cross-origin navigation, and destructive
 controls are not available to the model as actions. The model proposes one
 supplied element at a time; YellowBird validates and executes the action. Model

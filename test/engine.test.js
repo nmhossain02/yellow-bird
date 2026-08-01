@@ -112,10 +112,12 @@ test("Price Scout gate isolates child environments and Git verification", async 
     "https://github.com/nmhossain02/price-scout.git"
   );
   const commit = await runGit("rev-parse", "HEAD");
+  await writeFile(join(checkout, "README.md"), "spoofed fixture\n", "utf8");
+  await runGit("update-index", "--assume-unchanged", "README.md");
   const fakeDocker = join(fakeBin, "docker");
   await writeFile(
     fakeDocker,
-    `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(capturedEnvironment)}, JSON.stringify(process.env));\nprocess.exit(23);\n`,
+    `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(capturedEnvironment)}, JSON.stringify({ environment: process.env, readme: await Bun.file("README.md").text() }));\nprocess.exit(23);\n`,
     "utf8"
   );
   await chmod(fakeDocker, 0o755);
@@ -144,16 +146,18 @@ test("Price Scout gate isolates child environments and Git verification", async 
 
   assert.notEqual(exitCode, 0, stdout);
   assert.match(stderr, /Compose configuration failed with exit 23/);
-  const environment = JSON.parse(
+  const captured = JSON.parse(
     await readFile(capturedEnvironment, "utf8")
   );
+  const environment = captured.environment;
+  assert.equal(captured.readme, "fixture\n");
   assert.equal(environment.UNLISTED_GATE_SECRET, undefined);
   assert.equal(environment.YELLOWBIRD_ENGINE_API_KEY, undefined);
   assert.equal(environment.GIT_DIR, undefined);
   assert.equal(environment.COMPOSE_DISABLE_ENV_FILE, "1");
   assert.ok(environment.COMPOSE_ENV_FILES);
   assert.equal(await readFile(environment.COMPOSE_ENV_FILES, "utf8"), "");
-});
+}, 30_000);
 
 test("compatible engine proves JSON Schema output and normalizes provenance", async () => {
   const requests = [];
