@@ -297,10 +297,14 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["url", "title"],
+                "required": ["url", "title", "authorizedControlCount"],
                 "properties": {
                   "url": { "type": "string" },
-                  "title": { "type": "string" }
+                  "title": { "type": "string" },
+                  "authorizedControlCount": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
                 }
               }
             },
@@ -312,8 +316,11 @@
                   "id",
                   "action",
                   "status",
+                  "sourceUrl",
+                  "requestedUrl",
                   "url",
                   "title",
+                  "destinationControlCount",
                   "httpStatus",
                   "evidence",
                   "rationale",
@@ -329,8 +336,14 @@
                   "status": {
                     "enum": ["passed", "failed", "invalid"]
                   },
+                  "sourceUrl": { "type": "string" },
+                  "requestedUrl": { "type": ["string", "null"] },
                   "url": { "type": "string" },
                   "title": { "type": "string" },
+                  "destinationControlCount": {
+                    "type": ["integer", "null"],
+                    "minimum": 0
+                  },
                   "httpStatus": { "type": ["integer", "null"] },
                   "evidence": { "type": "string" },
                   "rationale": { "type": "string" },

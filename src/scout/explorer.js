@@ -12,6 +12,8 @@ const PROHIBITED_ACTION_TEXT =
   /\b(?:accept|activate|add|apply|approve|authenticate|authorize|buy|check[ -]?(?:now|out)|compile|confirm|create|delete|log[ -]?(?:in|out)|order|pay|pause|purchase|register|reject|remove|resume|run|save|sign[ -]?(?:in|out|up)|submit|subscribe|update|upload)\b/i;
 const AUTHENTICATION_CONTEXT =
   /\b(?:auth(?:enticate|orize)?|log[ -]?(?:in|out)|register|sign[ -]?(?:in|out|up))\b/i;
+const READ_ONLY_BUTTON_TEXT =
+  /^\s*(?:collapse|details?|expand|hide|inspect|preview|reveal|show|toggle|view)\b/i;
 const ACTION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -108,7 +110,10 @@ function elementAction(element, authorizedOrigin) {
   if (element.tag === "select") return "select";
   if (
     element.tag === "button" &&
-    element.type === "button"
+    element.type === "button" &&
+    READ_ONLY_BUTTON_TEXT.test(
+      element.label || element.ariaLabel || element.name || ""
+    )
   ) {
     return "click";
   }
@@ -381,7 +386,17 @@ function completedExploration({
   };
 }
 
-function verifyOwnedCoverageProfile(intent, steps, pages, snapshot) {
+function normalizedObservedUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function verifyOwnedCoverageProfile(intent, steps, pages) {
   const initialInterfaceFlow =
     /^\s*(?:assess|evaluate|inspect|review)(?:\s+the)?\s+initial\s+interface\s+and(?:\s+the)?\s+basic\s+user\s+flow\s*[.!]?\s*$/i.test(
       intent
@@ -389,6 +404,22 @@ function verifyOwnedCoverageProfile(intent, steps, pages, snapshot) {
   if (!initialInterfaceFlow || hasProhibitedSemantics({ label: intent })) {
     return null;
   }
+  const passedVisits = steps.filter(
+    (step) => step.action === "visit" && step.status === "passed"
+  );
+  const passedVisit =
+    passedVisits.find((step) => {
+      const source = normalizedObservedUrl(step.sourceUrl);
+      const destination = normalizedObservedUrl(step.url);
+      return (
+        source &&
+        destination &&
+        source !== destination &&
+        step.destinationControlCount > 0
+      );
+    }) || passedVisits[0];
+  const visitSource = normalizedObservedUrl(passedVisit?.sourceUrl);
+  const visitDestination = normalizedObservedUrl(passedVisit?.url);
   const criteria = [
     {
       id: "initial-page-observed",
@@ -396,17 +427,20 @@ function verifyOwnedCoverageProfile(intent, steps, pages, snapshot) {
     },
     {
       id: "primary-route-visited",
-      satisfied: steps.some(
-        (step) => step.action === "visit" && step.status === "passed"
-      )
+      satisfied: Boolean(passedVisit)
     },
     {
       id: "distinct-destination-observed",
-      satisfied: new Set(pages.map((page) => page.url)).size >= 2
+      satisfied:
+        Boolean(passedVisit) &&
+        Boolean(visitSource) &&
+        Boolean(visitDestination) &&
+        visitSource !== visitDestination
     },
     {
       id: "destination-controls-observed",
-      satisfied: snapshot.elements.length > 0
+      satisfied:
+        Boolean(passedVisit) && passedVisit.destinationControlCount > 0
     },
     {
       id: "authorized-actions-passed",
@@ -446,7 +480,8 @@ export async function exploreIntentWithEngine({
   engine,
   maxSteps,
   timeoutMs,
-  record
+  record,
+  actionPolicy = null
 }) {
   const steps = [];
   const pages = [];
@@ -458,7 +493,11 @@ export async function exploreIntentWithEngine({
   try {
     snapshot = await snapshotPage(page, authorizedOrigin);
     visited.add(new URL(snapshot.url).href);
-    pages.push({ url: snapshot.url, title: snapshot.title });
+    pages.push({
+      url: snapshot.url,
+      title: snapshot.title,
+      authorizedControlCount: snapshot.elements.length
+    });
   } catch (error) {
     return completedExploration({
       coverage: "blocked",
@@ -582,8 +621,7 @@ export async function exploreIntentWithEngine({
       const verification = verifyOwnedCoverageProfile(
         intent,
         steps,
-        pages,
-        snapshot
+        pages
       );
       const coverage = verification?.satisfied
         ? "covered"
@@ -672,12 +710,20 @@ export async function exploreIntentWithEngine({
         : action === "select"
           ? proposed.value
           : null;
+    const sourceUrl = page.url();
     record("info", "agent.action.started", "Executing an authorized safe interaction", {
       id,
       action,
       ...(selected.href ? diagnosticUrl(selected.href) : {})
     });
+    let actionPolicyStarted = false;
     try {
+      await actionPolicy?.begin({
+        id,
+        action,
+        requestedUrl: selected.href || null
+      });
+      actionPolicyStarted = Boolean(actionPolicy);
       let response = null;
       const locator = page.locator(selected.runtimeSelector);
       if (action === "visit") {
@@ -697,15 +743,22 @@ export async function exploreIntentWithEngine({
       const actionPageUrl = page.url();
       snapshot = await snapshotPage(page, authorizedOrigin);
       if (!pages.some((entry) => entry.url === snapshot.url)) {
-        pages.push({ url: snapshot.url, title: snapshot.title });
+        pages.push({
+          url: snapshot.url,
+          title: snapshot.title,
+          authorizedControlCount: snapshot.elements.length
+        });
       }
       usedActionKeys.add(selected.key);
       const step = {
         id,
         action,
         status: response && response.status() >= 400 ? "failed" : "passed",
+        sourceUrl,
+        requestedUrl: selected.href || null,
         url: actionPageUrl,
         title: snapshot.title,
+        destinationControlCount: snapshot.elements.length,
         httpStatus: response?.status() ?? null,
         evidence:
           response && response.status() >= 400
@@ -742,8 +795,11 @@ export async function exploreIntentWithEngine({
         id,
         action,
         status: "invalid",
+        sourceUrl,
+        requestedUrl: selected.href || null,
         url: page.url(),
         title: "",
+        destinationControlCount: null,
         httpStatus: null,
         evidence: detail,
         rationale: normalizeText(proposed.rationale, 500),
@@ -763,6 +819,8 @@ export async function exploreIntentWithEngine({
           "Review the selected control and diagnostics or provide a deterministic scenario."
         )
       });
+    } finally {
+      if (actionPolicyStarted) await actionPolicy.end();
     }
   }
 

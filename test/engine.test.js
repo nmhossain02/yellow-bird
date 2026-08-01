@@ -124,6 +124,32 @@ test("capability probe rejects JSON that violates the strict schema", async () =
   assert.match(resolved.diagnostic.evidence, /violated JSON Schema/);
 });
 
+test("capability probe rejects responses without reported model provenance", async () => {
+  const resolved = await resolveAgentEngine({
+    baseUrl: "http://127.0.0.1:9999/v1",
+    model: "probe-model",
+    fetchImpl: async (url) => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "probe-model" }] });
+      }
+      return jsonResponse({
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({ status: "ready", nextAction: "inspect" })
+            }
+          }
+        ]
+      });
+    }
+  });
+
+  assert.equal(resolved.engine, null);
+  assert.equal(resolved.diagnostic.id, "agent-engine-invalid");
+  assert.match(resolved.diagnostic.evidence, /omitted the reported model/);
+});
+
 test("engine validates every structured response against its JSON Schema", async () => {
   let completion = 0;
   const engine = createCompatibleEngine({

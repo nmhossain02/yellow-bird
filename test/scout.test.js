@@ -20,6 +20,9 @@ import { resolveOutputOption } from "../src/scout/output.js";
 let server;
 let target;
 let mutationRequestCount = 0;
+let readMutationRequestCount = 0;
+let submissionRequestCount = 0;
+let crossOriginRequestCount = 0;
 
 async function runCommand(command, cwd, env) {
   const captureDirectory = await mkdtemp(
@@ -110,12 +113,51 @@ beforeAll(async () => {
       response.end();
       return;
     }
+    if (request.method === "GET" && request.url === "/agent-read-mutation") {
+      readMutationRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (request.method === "GET" && request.url === "/agent-submission") {
+      submissionRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (request.method === "GET" && request.url === "/agent-cross-origin-read") {
+      crossOriginRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (request.url === "/agent-redirect") {
+      response.writeHead(302, { location: "/agent-flow" });
+      response.end();
+      return;
+    }
+    if (request.url === "/history-return") {
+      response.writeHead(302, { location: "/history-surface" });
+      response.end();
+      return;
+    }
     const failing = request.url === "/failing";
     const agentFlow = request.url?.startsWith("/agent-flow");
     const staticPage = request.url?.startsWith("/static");
     const policyBoundary = request.url?.startsWith("/agent-policy-boundary");
     const safetySurface = request.url?.startsWith("/agent-safety-surface");
     const duplicateFields = request.url?.startsWith("/duplicate-fields");
+    const readMutationSurface = request.url?.startsWith(
+      "/agent-read-mutation-surface"
+    );
+    const submissionSurface = request.url?.startsWith(
+      "/agent-submission-surface"
+    );
+    const crossOriginSurface = request.url?.startsWith(
+      "/agent-cross-origin-surface"
+    );
+    const redirectSurface = request.url?.startsWith("/agent-redirect-surface");
+    const historySurface = request.url?.startsWith("/history-surface");
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     if (policyBoundary) {
       response.end(`<!doctype html>
@@ -158,6 +200,79 @@ beforeAll(async () => {
           <body>
             <input name="query" aria-label="Query">
             <input name="query" aria-label="Query">
+          </body>
+        </html>`);
+      return;
+    }
+    if (readMutationSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Read mutation boundary</title></head>
+          <body>
+            <button type="button">Erase all</button>
+            <button type="button">Continue</button>
+            <button id="preview" type="button">View preview</button>
+            <script>
+              document.querySelector("#preview").addEventListener("click", () => {
+                fetch("/agent-read-mutation").catch(() => {});
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (submissionSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Submission boundary</title></head>
+          <body>
+            <form action="/agent-submission" method="get">
+              <button id="preview" type="button">View preview</button>
+            </form>
+            <script>
+              document.querySelector("#preview").addEventListener("click", () => {
+                document.querySelector("form").requestSubmit();
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (crossOriginSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Cross-origin boundary</title></head>
+          <body>
+            <button id="preview" type="button">View preview</button>
+            <script>
+              document.querySelector("#preview").addEventListener("click", () => {
+                fetch("http://localhost:${server.address().port}/agent-cross-origin-read").catch(() => {});
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (redirectSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Redirect surface</title></head>
+          <body><a href="/agent-redirect">Setup monitor</a></body>
+        </html>`);
+      return;
+    }
+    if (historySurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>History surface</title></head>
+          <body>
+            <a href="/history-return">Setup route</a>
+            <input name="query" aria-label="Query">
+            <script>
+              document.querySelector("[name=query]").addEventListener("input", () => {
+                history.pushState({}, "", "/other");
+              });
+            </script>
           </body>
         </html>`);
       return;
@@ -397,11 +512,11 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
   const report = await runWithAgent({
     target,
     intent: "Assess the initial interface and basic user flow",
-    exploreIntent: true,
     outputDirectory
   });
 
   assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.exploration.requested, true);
   assert.equal(report.observations.exploration.status, "completed");
   assert.equal(report.observations.exploration.coverage, "covered");
   assert.equal(report.observations.exploration.steps.length, 2);
@@ -428,6 +543,26 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
   assert.match(diagnostics, /"event":"agent.engine.ready"/);
   assert.match(diagnostics, /"event":"agent.action.completed"/);
   assert.match(diagnostics, /"event":"agent.completed"/);
+});
+
+test("explicit intent exploration retains an API opt-out", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-opt-out-")
+  );
+  let planningCalls = 0;
+  const report = await createAgentRunner(() => {
+    planningCalls += 1;
+    return null;
+  })({
+    target,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: false,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.exploration.requested, false);
+  assert.equal(planningCalls, 0);
 });
 
 test("partial planner coverage is never promoted to covered", async () => {
@@ -510,6 +645,99 @@ test("planner finish loops fall back to one unambiguous safe setup visit", async
     await readFile(report.artifacts.diagnostics, "utf8"),
     /"event":"agent.planning.corrected"/
   );
+});
+
+test("owned coverage profile links a distinct destination to its visit", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-linked-coverage-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the setup route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "act",
+      elementRef: "element-2",
+      value: null,
+      rationale: "Inspect the query field.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The route returned to the initial page.",
+      coverage: "partial",
+      summary: "No distinct setup destination was observed."
+    }
+  ];
+  const report = await createAgentRunner(() => decisions.shift())({
+    target: `${target}/history-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.verification.satisfied, false);
+  assert.equal(
+    report.observations.exploration.verification.criteria.find(
+      (criterion) => criterion.id === "distinct-destination-observed"
+    ).satisfied,
+    false
+  );
+  assert.equal(report.observations.exploration.steps[0].sourceUrl, `${target}/history-surface`);
+  assert.equal(report.observations.exploration.steps[0].url, `${target}/history-surface`);
+});
+
+test("agent replay preserves selected and observed redirect URLs", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-redirect-replay-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Open the setup route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The redirected setup route was observed.",
+      coverage: "covered",
+      summary: "The setup route was observed."
+    }
+  ];
+  const report = await createAgentRunner(() => decisions.shift())({
+    target: `${target}/agent-redirect-surface`,
+    intent: "Assess the setup flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(
+    report.observations.exploration.steps[0].requestedUrl,
+    `${target}/agent-redirect`
+  );
+  assert.equal(
+    report.observations.exploration.steps[0].url,
+    `${target}/agent-flow`
+  );
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(regression, /agent-redirect/);
+  assert.match(regression, /toHaveURL/);
+  assert.match(regression, /agent-flow/);
 });
 
 test("mutation-oriented intent remains inconclusive at the safe boundary", async () => {
@@ -698,6 +926,142 @@ test("agent policy omits destructive controls and blocks write requests", async 
       (request) =>
         request.method === "POST" &&
         request.reason === "agent-non-read-method"
+    )
+  );
+});
+
+test("agent action broker blocks read-method mutation behind safe-looking controls", async () => {
+  readMutationRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-read-mutation-")
+  );
+  const exposedLabels = [];
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const plannerInput = JSON.parse(request.messages.at(-1).content);
+    const availableElements = plannerInput.page.availableElements;
+    exposedLabels.push(...availableElements.map((element) => element.label));
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "View the supplied preview control.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The preview control was inspected.",
+          coverage: "covered",
+          summary: "The preview control was inspected."
+        };
+  })({
+    target: `${target}/agent-read-mutation-surface`,
+    intent: "Assess the preview interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.deepEqual([...new Set(exposedLabels)], ["View preview"]);
+  assert.equal(readMutationRequestCount, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.invalidTestMechanics[0].id, "agent-effect-blocked");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-non-visit-request"
+    )
+  );
+});
+
+test("agent action broker blocks GET form submission", async () => {
+  submissionRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-submission-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "View the supplied preview control.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The preview control was inspected.",
+          coverage: "covered",
+          summary: "The preview control was inspected."
+        };
+  })({
+    target: `${target}/agent-submission-surface`,
+    intent: "Assess the preview interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(submissionRequestCount, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-form-submission"
+    )
+  );
+});
+
+test("cross-origin effects attempted during exploration are inconclusive", async () => {
+  crossOriginRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-cross-origin-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "View the supplied preview control.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The preview control was inspected.",
+          coverage: "covered",
+          summary: "The preview control was inspected."
+        };
+  })({
+    target: `${target}/agent-cross-origin-surface`,
+    intent: "Assess the preview interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(crossOriginRequestCount, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.exploration.coverage, "partial");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-cross-origin"
     )
   );
 });

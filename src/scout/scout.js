@@ -365,7 +365,8 @@ function buildRegression(options, explorationSteps = []) {
       if (step.action === "visit") {
         const response = `yellowbirdAgentResponse${index + 1}`;
         lines.push(
-          `  const ${response} = await page.goto(${quoteForJavaScript(step.url)}, { waitUntil: "domcontentloaded" });`
+          `  const ${response} = await page.goto(${quoteForJavaScript(step.requestedUrl)}, { waitUntil: "domcontentloaded" });`,
+          `  await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`
         );
         if (step.httpStatus) {
           lines.push(
@@ -466,12 +467,12 @@ async function finalizeRun(state) {
     workflowFindings,
     workflowSteps
   } = state;
-  const blockedAgentWrites = blockedRequests.filter((request) =>
+  const blockedAgentEffects = blockedRequests.filter((request) =>
     request.reason?.startsWith("agent-")
   );
   if (
     options.exploreIntent &&
-    blockedAgentWrites.length > 0 &&
+    blockedAgentEffects.length > 0 &&
     state.exploration.issue?.id !== "agent-model-transition"
   ) {
     state.exploration.status = "inconclusive";
@@ -484,7 +485,7 @@ async function finalizeRun(state) {
       id: "agent-effect-blocked",
       classification: "test-mechanics",
       title: "An agent interaction attempted an unauthorized effect.",
-      evidence: `${blockedAgentWrites.length} write-capable request or message(s) blocked`,
+      evidence: `${blockedAgentEffects.length} unauthorized request, navigation, submission, or message(s) blocked`,
       remediation: "Use an owner-declared scenario if this effect must be exercised."
     };
   }
@@ -638,16 +639,16 @@ async function finalizeRun(state) {
     );
   }
   const blockedCrossOrigin = blockedRequests.filter(
-    (request) => !request.reason?.startsWith("agent-")
+    (request) => request.reason === "cross-origin"
   );
   if (blockedCrossOrigin.length) {
     coverageGaps.push(
       `${blockedCrossOrigin.length} cross-origin request(s) were blocked by the exact-origin network policy.`
     );
   }
-  if (blockedAgentWrites.length) {
+  if (blockedAgentEffects.length) {
     coverageGaps.push(
-      `${blockedAgentWrites.length} write-capable request or message(s) were blocked during agent exploration.`
+      `${blockedAgentEffects.length} unauthorized effect(s) were blocked during agent exploration.`
     );
   }
 
@@ -803,7 +804,17 @@ export function createScoutRunner({
       permissions: input.permissions,
       steps: input.steps
     });
-  const exploreIntent = Boolean(input.exploreIntent);
+  if (
+    input.intent !== undefined &&
+    (typeof input.intent !== "string" || !input.intent.trim())
+  ) {
+    throw new Error("scout intent must be a non-empty string");
+  }
+  const hasExplicitIntent = typeof input.intent === "string";
+  const exploreIntent =
+    input.exploreIntent === undefined
+      ? hasExplicitIntent && workflow.steps.length === 0
+      : Boolean(input.exploreIntent);
   if (exploreIntent && workflow.steps.length) {
     throw new Error(
       "intent exploration cannot be combined with declared workflow steps"
@@ -854,7 +865,9 @@ export function createScoutRunner({
   });
   const options = {
     target: authorization.target,
-    intent: input.intent || "Verify that the initial page is healthy",
+    intent: hasExplicitIntent
+      ? input.intent.trim()
+      : "Verify that the initial page is healthy",
     expectedStatus,
     expectedTitle: input.expectedTitle || null,
     expectedTexts: input.expectedTexts || [],
@@ -970,6 +983,7 @@ export function createScoutRunner({
       viewport: { width: 1440, height: 900 }
     });
     let agentNetworkPolicyActive = false;
+    let agentActionContext = null;
     const targetUrl = new URL(options.target);
     await context.routeWebSocket("**/*", async (socket) => {
       const socketUrl = new URL(socket.url());
@@ -983,14 +997,18 @@ export function createScoutRunner({
         socketUrl.hostname === targetUrl.hostname &&
         socketPort === expectedPort;
       if (!sameOrigin) {
+        const reason = agentNetworkPolicyActive
+          ? "agent-cross-origin"
+          : "cross-origin";
         blockedRequests.push({
           method: "WEBSOCKET",
           resourceType: "websocket",
           url: socket.url(),
-          reason: "cross-origin"
+          reason
         });
         record("warn", "network.websocket.blocked", "Blocked a cross-origin WebSocket", {
-          ...diagnosticUrl(socket.url())
+          ...diagnosticUrl(socket.url()),
+          reason
         });
         await socket.close({
           code: 1008,
@@ -1044,19 +1062,45 @@ export function createScoutRunner({
           decodeURIComponent(parsedRequestUrl.pathname + parsedRequestUrl.search)
         );
       } catch {}
+      let agentActionAllowed = true;
+      if (agentNetworkPolicyActive && agentActionContext && !localResource) {
+        if (agentActionContext.action !== "visit") {
+          agentActionAllowed = false;
+        } else if (route.request().resourceType() === "document") {
+          const redirectedFrom = route.request().redirectedFrom();
+          if (!agentActionContext.navigationStarted) {
+            agentActionAllowed = requestUrl === agentActionContext.requestedUrl;
+          } else {
+            agentActionAllowed =
+              Boolean(redirectedFrom) &&
+              agentActionContext.navigationRequests.has(redirectedFrom);
+          }
+          if (agentActionAllowed) {
+            agentActionContext.navigationStarted = true;
+            agentActionContext.navigationRequests.add(route.request());
+          }
+        }
+      }
       if (
         localResource ||
         (sameOrigin &&
-          (!agentNetworkPolicyActive || (agentReadAllowed && agentUrlAllowed)))
+          (!agentNetworkPolicyActive ||
+            (agentReadAllowed && agentUrlAllowed && agentActionAllowed)))
       ) {
         await route.continue();
         return;
       }
 
       const reason = !sameOrigin
-        ? "cross-origin"
+        ? agentNetworkPolicyActive
+          ? "agent-cross-origin"
+          : "cross-origin"
         : agentReadAllowed
-          ? "agent-prohibited-url"
+          ? !agentUrlAllowed
+            ? "agent-prohibited-url"
+            : agentActionContext?.action === "visit"
+              ? "agent-navigation-outside-visit"
+              : "agent-non-visit-request"
           : "agent-non-read-method";
       blockedRequests.push({
         method: requestMethod,
@@ -1071,6 +1115,46 @@ export function createScoutRunner({
         ...diagnosticUrl(requestUrl)
       });
       await route.abort("blockedbyclient");
+    });
+
+    await context.addInitScript(() => {
+      const state = { active: false, action: null, attempts: [] };
+      Object.defineProperty(globalThis, "__yellowbirdAgentActionGuard", {
+        value: state,
+        configurable: false
+      });
+      const blocked = (kind) => {
+        if (!state.active) return false;
+        state.attempts.push({ kind, url: globalThis.location.href });
+        return true;
+      };
+      globalThis.addEventListener(
+        "submit",
+        (event) => {
+          if (!blocked("form-submission")) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        },
+        true
+      );
+      for (const method of ["submit", "requestSubmit"]) {
+        const original = HTMLFormElement.prototype[method];
+        if (typeof original !== "function") continue;
+        HTMLFormElement.prototype[method] = function (...args) {
+          if (blocked("form-submission")) return undefined;
+          return original.apply(this, args);
+        };
+      }
+      for (const method of ["pushState", "replaceState"]) {
+        const original = history[method];
+        history[method] = function (...args) {
+          if (state.active && state.action !== "visit") {
+            blocked("non-visit-navigation");
+            return undefined;
+          }
+          return original.apply(this, args);
+        };
+      }
     });
 
     const page = await context.newPage();
@@ -1311,15 +1395,62 @@ export function createScoutRunner({
           });
           let exploration;
           agentNetworkPolicyActive = true;
-          exploration = await exploreIntentWithEngine({
-            page,
-            intent: options.intent,
-            authorizedOrigin: authorization.origin,
-            engine: resolvedEngine.engine,
-            maxSteps: options.maxAgentSteps,
-            timeoutMs: options.timeoutMs,
-            record
-          });
+          try {
+            exploration = await exploreIntentWithEngine({
+              page,
+              intent: options.intent,
+              authorizedOrigin: authorization.origin,
+              engine: resolvedEngine.engine,
+              maxSteps: options.maxAgentSteps,
+              timeoutMs: options.timeoutMs,
+              record,
+              actionPolicy: {
+                async begin(action) {
+                  agentActionContext = {
+                    ...action,
+                    navigationStarted: false,
+                    navigationRequests: new Set()
+                  };
+                  await page.evaluate((activeAction) => {
+                    const guard = globalThis.__yellowbirdAgentActionGuard;
+                    guard.active = true;
+                    guard.action = activeAction;
+                    guard.attempts = [];
+                  }, action.action);
+                },
+                async end() {
+                  const attempts = await page
+                    .evaluate(() => {
+                      const guard = globalThis.__yellowbirdAgentActionGuard;
+                      const observed = guard.attempts;
+                      guard.active = false;
+                      guard.action = null;
+                      guard.attempts = [];
+                      return observed;
+                    })
+                    .catch(() => []);
+                  for (const attempt of attempts) {
+                    blockedRequests.push({
+                      method: "BROWSER",
+                      resourceType: "document",
+                      url: attempt.url,
+                      reason: `agent-${attempt.kind}`
+                    });
+                    record(
+                      "warn",
+                      "browser.action.blocked",
+                      "Blocked an effect outside agent exploration authority",
+                      { reason: `agent-${attempt.kind}`, ...diagnosticUrl(attempt.url) }
+                    );
+                  }
+                  agentActionContext = null;
+                }
+              }
+            });
+          } finally {
+            agentActionContext = null;
+            agentNetworkPolicyActive = false;
+          }
           const finalProvenance = resolvedEngine.engine.provenance();
           const finalEngineName = `${finalProvenance.adapter}:${finalProvenance.modelReported}`;
           if (

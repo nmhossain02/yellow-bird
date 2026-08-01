@@ -278,12 +278,15 @@ export function createCompatibleEngine({
     );
     const responseModel =
       typeof payload?.model === "string" && payload.model ? payload.model : null;
-    if (responseModel && reportedModel && responseModel !== reportedModel) {
+    if (!responseModel) {
+      throw new Error("endpoint completion omitted the reported model");
+    }
+    if (reportedModel && responseModel !== reportedModel) {
       throw new Error(
         `endpoint changed the reported model from ${reportedModel} to ${responseModel}`
       );
     }
-    reportedModel = responseModel || reportedModel;
+    reportedModel = responseModel;
     const output = parseStructuredContent(payload);
     try {
       validateSchemaValue(schema, output);
@@ -295,7 +298,7 @@ export function createCompatibleEngine({
     return {
       output,
       usage: payload?.usage || null,
-      modelReported: reportedModel || selectedModel
+      modelReported: reportedModel
     };
   }
 
@@ -335,7 +338,7 @@ export function createCompatibleEngine({
         adapter: "openai-compatible-chat",
         endpointClass: endpointClass(normalizedBaseUrl),
         modelRequested: selectedModel,
-        modelReported: reportedModel || selectedModel,
+        modelReported: reportedModel,
         capabilityManifestVersion: "yellowbird.engine-capabilities.v1"
       };
     }
