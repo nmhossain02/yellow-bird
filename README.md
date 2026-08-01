@@ -166,14 +166,19 @@ authentication, credential use, cross-origin navigation, and destructive
 controls are not available to the model as actions. The model proposes one
 supplied element at a time; YellowBird validates and executes the action. Model
 text is coverage guidance, never product-failure evidence. An intent-exploration
-run can be `clear` only after an explicit planner completion with `covered`
-coverage and at least one passed action, or when a named YellowBird-owned profile
-satisfies every machine-readable observed criterion. The initial-interface
+run can be `clear` only after the planner explicitly completes and either reports
+`covered` coverage with at least one passed action or a named YellowBird-owned
+profile satisfies every machine-readable observed criterion. The initial-interface
 basic-flow profile, for example, requires the initial page, a passed visit to a
 distinct authorized route, safe controls observed on that destination, and no
 failed agent action. An intent needing server-side mutation or another action
 outside the safe interaction authority produces an `inconclusive` result instead
 of a false pass.
+
+The generated regression re-enforces exact-origin and read-only agent guards,
+including submission and outbound WebSocket blocking, without calling the model.
+Recorded non-navigation actions also replay through verified locators and assert
+their match counts before using the recorded ordinal.
 
 The current page URL, title, text, and bounded control inventory, including
 supplied link URLs and select options, are sent to the configured model endpoint.
@@ -201,7 +206,9 @@ steps are marked skipped with reason `browser-unavailable`, and the report says
 the product was not evaluated. Since no page existed, `artifacts.screenshot` is
 `null` and no screenshot file is claimed. Applications embedding the scout can
 inject a browser launcher with `createScoutRunner({ launchBrowser })`;
-`runScout(input)` uses the real Playwright Chromium launcher.
+`runScout(input)` uses the real Playwright Chromium launcher. The runner's
+`timeoutMs` input defaults to 15 seconds and is passed to Playwright when Chromium
+launches.
 
 ## Run the dashboard
 
