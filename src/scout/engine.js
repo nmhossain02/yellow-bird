@@ -2,7 +2,7 @@ import { cleanDiagnosticText, diagnosticUrl } from "./diagnostics.js";
 
 const DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
 const DEFAULT_ENGINE_TIMEOUT_MS = 120_000;
-const NON_PRINTABLE_MODEL_IDENTIFIER = /[\p{Cc}\p{Cf}]/u;
+const NON_PRINTABLE_MODEL_IDENTIFIER = /[\p{C}\p{Zl}\p{Zp}]/u;
 const PROBE_SCHEMA = {
   type: "object",
   additionalProperties: false,

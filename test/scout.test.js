@@ -15,6 +15,7 @@ import {
   diagnoseNavigationError,
   resolveLoopbackScheme
 } from "../src/scout/diagnostics.js";
+import { PROHIBITED_AGENT_ACTION_PATTERN } from "../src/scout/explorer.js";
 import { resolveOutputOption } from "../src/scout/output.js";
 
 let server;
@@ -22,8 +23,10 @@ let target;
 let sharedBrowser;
 let mutationRequestCount = 0;
 let readMutationRequestCount = 0;
+let delayedReadMutationRequestCount = 0;
 let submissionRequestCount = 0;
 let crossOriginRequestCount = 0;
+let prohibitedRedirectRequestCount = 0;
 
 async function runCommand(command, cwd, env) {
   const captureDirectory = await mkdtemp(
@@ -122,6 +125,15 @@ beforeAll(async () => {
       response.end();
       return;
     }
+    if (
+      request.method === "GET" &&
+      request.url === "/agent-delayed-read-mutation"
+    ) {
+      delayedReadMutationRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
     if (request.method === "GET" && request.url === "/agent-submission") {
       submissionRequestCount += 1;
       response.writeHead(204);
@@ -139,6 +151,17 @@ beforeAll(async () => {
       response.end();
       return;
     }
+    if (request.url === "/agent-prohibited-redirect") {
+      response.writeHead(302, { location: "/create-account" });
+      response.end();
+      return;
+    }
+    if (request.url === "/create-account") {
+      prohibitedRedirectRequestCount += 1;
+      response.writeHead(204);
+      response.end();
+      return;
+    }
     if (request.url === "/history-return") {
       response.writeHead(302, { location: "/history-surface" });
       response.end();
@@ -153,6 +176,9 @@ beforeAll(async () => {
     const readMutationSurface = request.url?.startsWith(
       "/agent-read-mutation-surface"
     );
+    const delayedMutationSurface = request.url?.startsWith(
+      "/agent-delayed-mutation-surface"
+    );
     const submissionSurface = request.url?.startsWith(
       "/agent-submission-surface"
     );
@@ -160,7 +186,13 @@ beforeAll(async () => {
       "/agent-cross-origin-surface"
     );
     const redirectSurface = request.url?.startsWith("/agent-redirect-surface");
+    const prohibitedRedirectSurface = request.url?.startsWith(
+      "/agent-prohibited-redirect-surface"
+    );
     const historySurface = request.url?.startsWith("/history-surface");
+    const snapshotBoundary = request.url?.startsWith(
+      "/agent-snapshot-boundary"
+    );
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     if (policyBoundary) {
       response.end(`<!doctype html>
@@ -224,6 +256,23 @@ beforeAll(async () => {
         </html>`);
       return;
     }
+    if (delayedMutationSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Delayed mutation boundary</title></head>
+          <body>
+            <button id="preview" type="button">View preview</button>
+            <script>
+              document.querySelector("#preview").addEventListener("click", () => {
+                setTimeout(() => {
+                  fetch("/agent-delayed-read-mutation").catch(() => {});
+                }, 200);
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
     if (submissionSurface) {
       response.end(`<!doctype html>
         <html>
@@ -264,6 +313,14 @@ beforeAll(async () => {
         </html>`);
       return;
     }
+    if (prohibitedRedirectSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Prohibited redirect surface</title></head>
+          <body><a href="/agent-prohibited-redirect">Setup monitor</a></body>
+        </html>`);
+      return;
+    }
     if (historySurface) {
       response.end(`<!doctype html>
         <html>
@@ -276,6 +333,23 @@ beforeAll(async () => {
                 history.pushState({}, "", "/other");
               });
             </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (snapshotBoundary) {
+      const options = Array.from(
+        { length: 200 },
+        (_, index) =>
+          `<option value="value-${index}">${"Oversized option ".repeat(100)}${index}</option>`
+      ).join("");
+      response.end(`<!doctype html>
+        <html>
+          <head><title>${"Oversized title ".repeat(100)}</title></head>
+          <body>
+            <p>${"Oversized body content ".repeat(10_000)}</p>
+            <select aria-label="Inspect choices">${options}</select>
+            <a href="/agent-flow">Setup route</a>
           </body>
         </html>`);
       return;
@@ -810,6 +884,45 @@ test("agent replay preserves selected and observed redirect URLs", async () => {
   assert.match(regression, /agent-flow/);
 });
 
+test("agent redirect chains use the canonical prohibited-action policy", async () => {
+  prohibitedRedirectRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-prohibited-redirect-")
+  );
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    return {
+      action: "act",
+      elementRef: availableElements[0].ref,
+      value: null,
+      rationale: "Open the supplied setup route.",
+      coverage: "continue",
+      summary: ""
+    };
+  })({
+    target: `${target}/agent-prohibited-redirect-surface`,
+    intent: "Assess the setup route",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(prohibitedRedirectRequestCount, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) =>
+        request.url === `${target}/create-account` &&
+        request.reason === "agent-prohibited-url"
+    )
+  );
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.ok(
+    regression.includes(JSON.stringify(PROHIBITED_AGENT_ACTION_PATTERN))
+  );
+});
+
 test("mutation-oriented intent remains inconclusive at the safe boundary", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-mutation-")
@@ -1056,6 +1169,101 @@ test("agent action broker and replay block read-method mutation behind safe-look
   assert.equal(readMutationRequestCount, 0);
 }, 30_000);
 
+test("agent action guards block effects delayed between planning rounds", async () => {
+  delayedReadMutationRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-delayed-mutation-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner(async (request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    if (planningCall === 1) {
+      return {
+        action: "act",
+        elementRef: availableElements[0].ref,
+        value: null,
+        rationale: "View the supplied preview control.",
+        coverage: "continue",
+        summary: ""
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The preview control was inspected.",
+      coverage: "covered",
+      summary: "The preview control was inspected."
+    };
+  })({
+    target: `${target}/agent-delayed-mutation-surface`,
+    intent: "Assess the preview interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(delayedReadMutationRequestCount, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-non-visit-request"
+    )
+  );
+});
+
+test("agent snapshots bound page fields, select options, and total prompt size", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-snapshot-boundary-")
+  );
+  let firstPlannerInput;
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const plannerInput = JSON.parse(request.messages.at(-1).content);
+    planningCall += 1;
+    if (planningCall === 1) {
+      firstPlannerInput = plannerInput;
+      const visit = plannerInput.page.availableElements.find(
+        (element) => element.allowedAction === "visit"
+      );
+      return {
+        action: "act",
+        elementRef: visit.ref,
+        value: null,
+        rationale: "Open the supplied setup route.",
+        coverage: "continue",
+        summary: ""
+      };
+    }
+    return {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "The bounded snapshot was inspected.",
+      coverage: "partial",
+      summary: "The bounded snapshot was inspected."
+    };
+  })({
+    target: `${target}/agent-snapshot-boundary`,
+    intent: "Assess the available setup choices",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  const select = firstPlannerInput.page.availableElements.find(
+    (element) => element.allowedAction === "select"
+  );
+  assert.equal(firstPlannerInput.page.text.length, 8_000);
+  assert.equal(select.options.length, 40);
+  assert.ok(select.options.every((option) => option.label.length <= 120));
+  assert.ok(select.options.every((option) => option.value.length <= 200));
+  assert.ok(JSON.stringify(firstPlannerInput.page).length < 50_000);
+  assert.equal(report.observations.exploration.steps.length, 1);
+});
+
 test("agent action broker blocks GET form submission", async () => {
   submissionRequestCount = 0;
   const outputDirectory = await mkdtemp(
@@ -1289,6 +1497,48 @@ test("scout refreshes provenance and rejects planner model transitions", async (
   assert.equal(
     report.provenance.agenticEngine,
     "test-compatible-engine:planner-model"
+  );
+});
+
+test("report markdown escapes provider-controlled model names", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-model-markdown-")
+  );
+  const modelReported = "[planner](https://example.test) | <script>";
+  const report = await createAgentRunner(
+    () => null,
+    async () => ({
+      capabilities: {
+        jsonSchema: "verified",
+        toolCalls: "unverified",
+        imageInput: "unverified"
+      },
+      diagnostic: null,
+      engine: {
+        provenance: () => ({
+          adapter: "test-compatible-engine",
+          endpointClass: "loopback",
+          modelRequested: modelReported,
+          modelReported,
+          capabilityManifestVersion: "yellowbird.engine-capabilities.v1"
+        }),
+        completeStructured: async () => {
+          throw new Error("the static page must not invoke the planner");
+        }
+      }
+    })
+  )({
+    target: `${target}/static`,
+    intent: "Assess the static interface",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.ok(
+    markdown.includes(
+      String.raw`- Engine: test-compatible-engine:\[planner\](https://example.test) \| \<script\>`
+    )
   );
 });
 

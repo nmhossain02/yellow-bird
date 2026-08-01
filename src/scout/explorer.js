@@ -8,12 +8,25 @@ const SAFE_FILL_TYPES = new Set([
   "text",
   "url"
 ]);
-const PROHIBITED_ACTION_TEXT =
-  /\b(?:accept|activate|add|apply|approve|authenticate|authorize|buy|check[ -]?(?:now|out)|compile|confirm|create|delete|log[ -]?(?:in|out)|order|pay|pause|purchase|register|reject|remove|resume|run|save|sign[ -]?(?:in|out|up)|submit|subscribe|update|upload)\b/i;
+export const PROHIBITED_AGENT_ACTION_PATTERN = String.raw`\b(?:accept|activate|add|apply|approve|authenticate|authorize|buy|check[ -]?(?:now|out)|compile|confirm|create|delete|log[ -]?(?:in|out)|order|pay|pause|purchase|register|reject|remove|resume|run|save|sign[ -]?(?:in|out|up)|submit|subscribe|update|upload)\b`;
+const PROHIBITED_ACTION_TEXT = new RegExp(
+  PROHIBITED_AGENT_ACTION_PATTERN,
+  "i"
+);
 const AUTHENTICATION_CONTEXT =
   /\b(?:auth(?:enticate|orize)?|log[ -]?(?:in|out)|register|sign[ -]?(?:in|out|up))\b/i;
 const READ_ONLY_BUTTON_TEXT =
   /^\s*(?:collapse|details?|expand|hide|inspect|preview|reveal|show|toggle|view)\b/i;
+const SNAPSHOT_LIMITS = Object.freeze({
+  totalCharacters: 50_000,
+  bodyText: 12_000,
+  elementCount: 120,
+  fieldText: 400,
+  url: 4_096,
+  optionCount: 40,
+  optionLabel: 240,
+  optionValue: 200
+});
 const ACTION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -178,14 +191,31 @@ function syntheticValue(element) {
 }
 
 async function snapshotPage(page, authorizedOrigin) {
-  const raw = await page.evaluate(() => ({
-    url: window.location.href,
-    title: document.title,
-    bodyText: document.body?.innerText || "",
-    elements: [
+  const raw = await page.evaluate((limits) => {
+    let remainingCharacters = limits.totalCharacters;
+    const takeText = (value, maximum) => {
+      const text = String(value ?? "");
+      const length = Math.min(text.length, maximum, remainingCharacters);
+      remainingCharacters -= length;
+      return text.slice(0, length);
+    };
+    const takeExactText = (value, maximum) => {
+      if (value === null || value === undefined) return null;
+      const text = String(value);
+      if (text.length > maximum || text.length > remainingCharacters) {
+        return null;
+      }
+      remainingCharacters -= text.length;
+      return text;
+    };
+    const url = takeExactText(window.location.href, limits.url);
+    if (url === null) throw new Error("page URL exceeded the snapshot limit");
+    const title = takeText(document.title, limits.fieldText);
+    const bodyText = takeText(document.body?.innerText || "", limits.bodyText);
+    const elements = [
       ...document.querySelectorAll("a[href], button, input, textarea, select")
     ]
-      .slice(0, 120)
+      .slice(0, limits.elementCount)
       .map((element, index) => {
         const ref = `element-${index + 1}`;
         element.setAttribute("data-yellowbird-agent-ref", ref);
@@ -209,29 +239,53 @@ async function snapshotPage(page, authorizedOrigin) {
                   ? "spinbutton"
                   : "textbox";
         const form = element.form || element.closest("form");
+        const options =
+          tag === "select"
+            ? [...element.options]
+                .slice(0, limits.optionCount)
+                .flatMap((option) => {
+                  const value = takeExactText(
+                    option.value,
+                    limits.optionValue
+                  );
+                  return value === null
+                    ? []
+                    : [
+                        {
+                          label: takeText(
+                            option.textContent || option.value,
+                            limits.optionLabel
+                          ),
+                          value
+                        }
+                      ];
+                })
+            : [];
         return {
           ref,
           tag,
           role,
-          label,
-          href: element.href || null,
-          type: element.type || null,
-          id: element.getAttribute("id"),
-          name: element.getAttribute("name"),
-          ariaLabel: element.getAttribute("aria-label"),
+          label: takeText(label, limits.fieldText),
+          href: element.href
+            ? takeExactText(element.href, limits.url)
+            : null,
+          type: takeText(element.type || "", limits.fieldText),
+          id: takeExactText(element.getAttribute("id"), limits.fieldText),
+          name: takeExactText(element.getAttribute("name"), limits.fieldText),
+          ariaLabel: takeText(
+            element.getAttribute("aria-label") || "",
+            limits.fieldText
+          ),
           disabled: Boolean(element.disabled),
-          formAction: form?.action || null,
+          formAction: form?.action
+            ? takeExactText(form.action, limits.url)
+            : null,
           formHasPassword: Boolean(form?.querySelector('input[type="password"]')),
-          options:
-            tag === "select"
-              ? [...element.options].map((option) => ({
-                  label: option.textContent || option.value,
-                  value: option.value
-                }))
-              : []
+          options
         };
-      })
-  }));
+      });
+    return { url, title, bodyText, elements };
+  }, SNAPSHOT_LIMITS);
   const elements = [];
   for (const rawElement of raw.elements) {
     const action = elementAction(

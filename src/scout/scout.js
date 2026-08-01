@@ -12,7 +12,10 @@ import {
   resolveLoopbackScheme
 } from "./diagnostics.js";
 import { resolveAgentEngine } from "./engine.js";
-import { exploreIntentWithEngine } from "./explorer.js";
+import {
+  exploreIntentWithEngine,
+  PROHIBITED_AGENT_ACTION_PATTERN
+} from "./explorer.js";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const STEP_CAPABILITIES = {
@@ -22,8 +25,10 @@ const STEP_CAPABILITIES = {
   expectVisible: "browser.read"
 };
 const SUPPORTED_STEP_ACTIONS = new Set(Object.keys(STEP_CAPABILITIES));
-const PROHIBITED_AGENT_REQUEST_URL =
-  /\b(?:activate|approve|buy|check[ -]?out|confirm|delete|log[ -]?out|order|pay|purchase|remove|save|submit|subscribe|update)\b/i;
+const PROHIBITED_AGENT_REQUEST_URL = new RegExp(
+  PROHIBITED_AGENT_ACTION_PATTERN,
+  "i"
+);
 const require = createRequire(import.meta.url);
 const PLAYWRIGHT_VERSION = require("@playwright/test/package.json").version;
 
@@ -239,7 +244,7 @@ ${workflowRows}
 - Status: ${exploration.status}
 - Coverage: ${exploration.coverage}
 - Coverage authority: ${exploration.verification ? `${exploration.verification.authority} (${exploration.verification.profile}, ${exploration.verification.satisfied ? "satisfied" : "unsatisfied"})` : "unverified model advisory (cannot authorize covered coverage)"}
-- Engine: ${exploration.engine || "not used"}
+- Engine: ${markdownEscape(exploration.engine || "not used")}
 - Coverage summary: ${markdownEscape(exploration.summary || "none")}
 
 Coverage summaries and model proposals are not product-failure evidence. A named
@@ -297,7 +302,7 @@ function buildRegression(options, explorationSteps = []) {
     `  const yellowbirdTarget = new URL(${quoteForJavaScript(options.target)});`,
     "  const yellowbirdBlockedUrls = new Set();",
     "  let yellowbirdAgentAction = null;",
-    "  const yellowbirdUnsafeRequest = /\\b(?:activate|approve|buy|check[ -]?out|confirm|delete|log[ -]?out|order|pay|purchase|remove|save|submit|subscribe|update)\\b/i;",
+    `  const yellowbirdUnsafeRequest = new RegExp(${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, "i");`,
     "  await page.context().addInitScript(() => {",
     "    const state = { active: false, action: null };",
     '    Object.defineProperty(globalThis, "__yellowbirdAgentReplayGuard", {',
@@ -357,6 +362,26 @@ function buildRegression(options, explorationSteps = []) {
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
     '        (!yellowbirdAgentAction || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl && safeAgentAction));',
     "    } catch {}",
+    '    if (allowed && yellowbirdAgentAction?.action === "visit" && request.resourceType() === "document") {',
+    "      const response = await route.fetch({ maxRedirects: 0 });",
+    '      const location = response.headers()["location"];',
+    "      if ([301, 302, 303, 307, 308].includes(response.status()) && location) {",
+    "        let redirectUrl = location;",
+    "        let safeRedirect = false;",
+    "        try {",
+    "          const parsedRedirect = new URL(location, requestUrl);",
+    "          redirectUrl = parsedRedirect.href;",
+    "          safeRedirect = parsedRedirect.origin === yellowbirdTarget.origin &&",
+    "            !yellowbirdUnsafeRequest.test(decodeURIComponent(parsedRedirect.pathname + parsedRedirect.search));",
+    "        } catch {}",
+    "        if (!safeRedirect) {",
+    "          yellowbirdBlockedUrls.add(requestUrl);",
+    "          yellowbirdBlockedUrls.add(redirectUrl);",
+    '          return route.abort("blockedbyclient");',
+    "        }",
+    "      }",
+    "      return route.fulfill({ response });",
+    "    }",
     "    if (allowed) return route.continue();",
     "    yellowbirdBlockedUrls.add(requestUrl);",
     '    return route.abort("blockedbyclient");',
@@ -617,7 +642,9 @@ async function finalizeRun(state) {
     }
   }
   const policyBlockedUrls = new Set(
-    blockedRequests.map((request) => request.url)
+    blockedRequests.flatMap((request) =>
+      [request.url, request.requestUrl].filter(Boolean)
+    )
   );
   const productConsoleErrors = consoleErrors.filter(
     (entry) =>
@@ -1164,6 +1191,63 @@ export function createScoutRunner({
           (!agentNetworkPolicyActive ||
             (agentReadAllowed && agentUrlAllowed && agentActionAllowed)))
       ) {
+        if (
+          agentNetworkPolicyActive &&
+          agentActionContext?.action === "visit" &&
+          route.request().resourceType() === "document"
+        ) {
+          const response = await route.fetch({ maxRedirects: 0 });
+          const location = response.headers().location;
+          if (
+            [301, 302, 303, 307, 308].includes(response.status()) &&
+            location
+          ) {
+            let redirectUrl = location;
+            let redirectOrigin = "";
+            let redirectAllowed = false;
+            try {
+              const parsedRedirect = new URL(location, requestUrl);
+              redirectUrl = parsedRedirect.href;
+              redirectOrigin = parsedRedirect.origin;
+              redirectAllowed = !PROHIBITED_AGENT_REQUEST_URL.test(
+                decodeURIComponent(
+                  parsedRedirect.pathname + parsedRedirect.search
+                )
+              );
+            } catch {}
+            if (
+              redirectOrigin !== authorization.origin ||
+              !redirectAllowed
+            ) {
+              const reason =
+                redirectOrigin && redirectOrigin !== authorization.origin
+                  ? "agent-cross-origin"
+                  : "agent-prohibited-url";
+              blockedRequests.push({
+                method: requestMethod,
+                resourceType: route.request().resourceType(),
+                requestUrl,
+                url: redirectUrl,
+                reason
+              });
+              record(
+                "warn",
+                "network.request.blocked",
+                "Blocked a redirect outside policy",
+                {
+                  method: requestMethod,
+                  resourceType: route.request().resourceType(),
+                  reason,
+                  ...diagnosticUrl(redirectUrl)
+                }
+              );
+              await route.abort("blockedbyclient");
+              return;
+            }
+          }
+          await route.fulfill({ response });
+          return;
+        }
         await route.continue();
         return;
       }
@@ -1256,7 +1340,10 @@ export function createScoutRunner({
       const requestUrl = request.url();
       if (
         requestUrl.startsWith(authorization.origin) &&
-        !blockedRequests.some((blocked) => blocked.url === requestUrl)
+        !blockedRequests.some(
+          (blocked) =>
+            blocked.url === requestUrl || blocked.requestUrl === requestUrl
+        )
       ) {
         failedRequests.push({
           method: request.method(),
@@ -1270,6 +1357,31 @@ export function createScoutRunner({
         });
       }
     });
+    async function collectAgentGuardAttempts() {
+      const attempts = await page
+        .evaluate(() => {
+          const guard = globalThis.__yellowbirdAgentActionGuard;
+          if (!guard) return [];
+          const observed = guard.attempts;
+          guard.attempts = [];
+          return observed;
+        })
+        .catch(() => []);
+      for (const attempt of attempts) {
+        blockedRequests.push({
+          method: "BROWSER",
+          resourceType: "document",
+          url: attempt.url,
+          reason: `agent-${attempt.kind}`
+        });
+        record(
+          "warn",
+          "browser.action.blocked",
+          "Blocked an effect outside agent exploration authority",
+          { reason: `agent-${attempt.kind}`, ...diagnosticUrl(attempt.url) }
+        );
+      }
+    }
     page.on("response", (response) => {
       if (
         response.url().startsWith(authorization.origin) &&
@@ -1483,6 +1595,7 @@ export function createScoutRunner({
               record,
               actionPolicy: {
                 async begin(action) {
+                  await collectAgentGuardAttempts();
                   agentActionContext = {
                     ...action,
                     navigationStarted: false,
@@ -1492,41 +1605,15 @@ export function createScoutRunner({
                     const guard = globalThis.__yellowbirdAgentActionGuard;
                     guard.active = true;
                     guard.action = activeAction;
-                    guard.attempts = [];
                   }, action.action);
                 },
                 async end() {
-                  const attempts = await page
-                    .evaluate(() => {
-                      const guard = globalThis.__yellowbirdAgentActionGuard;
-                      const observed = guard.attempts;
-                      guard.active = false;
-                      guard.action = null;
-                      guard.attempts = [];
-                      return observed;
-                    })
-                    .catch(() => []);
-                  for (const attempt of attempts) {
-                    blockedRequests.push({
-                      method: "BROWSER",
-                      resourceType: "document",
-                      url: attempt.url,
-                      reason: `agent-${attempt.kind}`
-                    });
-                    record(
-                      "warn",
-                      "browser.action.blocked",
-                      "Blocked an effect outside agent exploration authority",
-                      { reason: `agent-${attempt.kind}`, ...diagnosticUrl(attempt.url) }
-                    );
-                  }
-                  agentActionContext = null;
+                  await collectAgentGuardAttempts();
                 }
               }
             });
           } finally {
-            agentActionContext = null;
-            agentNetworkPolicyActive = false;
+            await collectAgentGuardAttempts();
           }
           const finalProvenance = resolvedEngine.engine.provenance();
           const finalEngineName = `${finalProvenance.adapter}:${finalProvenance.modelReported}`;
@@ -1601,6 +1688,7 @@ export function createScoutRunner({
       timeout: Math.max(options.timeoutMs, 5_000)
     });
     state.screenshotCaptured = true;
+    await collectAgentGuardAttempts();
   } finally {
     await browser.close();
     record("debug", "browser.closed", "Playwright Chromium closed");
