@@ -19,6 +19,8 @@ public issue.
 Until the project publishes a stable release, only the latest revision of the
 default branch receives security fixes.
 
-The current local scout authorizes only loopback targets. The dashboard's remote
-target verification, authentication, sandboxing, and model-provider integrations
-are still product stubs and must not be treated as production security controls.
+The current local scout authorizes only loopback browser targets. Its separate
+model-endpoint and agent-action boundaries are documented in the
+[scout safety boundary](./README.md#scout-safety-boundary). The dashboard's
+remote target verification, authentication, and sandboxing are still product
+stubs and must not be treated as production security controls.

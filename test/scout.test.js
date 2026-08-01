@@ -99,6 +99,7 @@ beforeAll(async () => {
     const agentFlow = request.url?.startsWith("/agent-flow");
     const staticPage = request.url?.startsWith("/static");
     const policyBoundary = request.url?.startsWith("/agent-policy-boundary");
+    const safetySurface = request.url?.startsWith("/agent-safety-surface");
     const duplicateFields = request.url?.startsWith("/duplicate-fields");
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     if (policyBoundary) {
@@ -114,6 +115,23 @@ beforeAll(async () => {
                 fetch("/agent-write", { method: "POST" }).catch(() => {});
               });
             </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (safetySurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Agent safety surface</title></head>
+          <body>
+            <a href="http://localhost:${server.address().port}/agent-flow">External setup</a>
+            <a href="/login">Sign in</a>
+            <form action="/create-monitor">
+              <label>Name <input name="name"></label>
+              <label>Password <input name="password" type="password"></label>
+              <button type="button">Inspect account</button>
+            </form>
+            <a href="/agent-flow">Inspect setup</a>
           </body>
         </html>`);
       return;
@@ -620,6 +638,47 @@ test("agent policy omits destructive controls and blocks write requests", async 
         request.reason === "agent-non-read-method"
     )
   );
+});
+
+test("agent policy omits cross-origin and authentication controls", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-safety-surface-")
+  );
+  const exposedLabels = [];
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const plannerInput = JSON.parse(request.messages.at(-1).content);
+    const availableElements = plannerInput.page.availableElements;
+    exposedLabels.push(availableElements.map((element) => element.label));
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Inspect the supplied same-origin setup route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The safe setup route was inspected.",
+          coverage: "covered",
+          summary: "The safe same-origin setup route was inspected."
+        };
+  })({
+    target: `${target}/agent-safety-surface`,
+    intent: "Assess the setup flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.deepEqual(exposedLabels[0], ["Inspect setup"]);
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.exploration.steps[0].action, "visit");
+  assert.equal(report.observations.exploration.steps[0].url, `${target}/agent-flow`);
 });
 
 test("agent replay persists and verifies duplicate locator ordinals", async () => {

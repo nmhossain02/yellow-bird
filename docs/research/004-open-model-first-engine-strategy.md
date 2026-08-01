@@ -50,7 +50,7 @@ The local scout now implements the first usable slice of this decision:
 - a Yellow Bird-owned bounded planning and execution loop;
 - a generic OpenAI-compatible Chat Completions adapter;
 - a harmless strict JSON Schema conformance probe;
-- model/runtime provenance and capability state in portable scout evidence;
+- model and adapter provenance plus capability state in portable scout evidence;
 - exact-origin link visits, deterministic synthetic field values, supplied select
   options, and narrowly filtered non-submit button actions;
 - deterministic replay that does not call the planning model;

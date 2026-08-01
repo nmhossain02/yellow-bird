@@ -30,9 +30,10 @@ bun run doctor
 ```
 
 `doctor` reports the selected model and whether strict JSON Schema output passed
-the harmless conformance probe. A scout with explicit `--intent` is
-`inconclusive` with exit code `3` if no compatible engine is available. It never
-falls back to an initial-page `clear` result that did not cover the intent.
+the harmless conformance probe. Unless `--no-agent` disables exploration, a scout
+with explicit `--intent` is `inconclusive` with exit code `3` if no compatible
+engine is available. It never falls back to an initial-page `clear` result that
+did not cover the intent.
 
 Start the deliberately broken demo product:
 
@@ -108,9 +109,11 @@ yellowbird scout \
   --verbose
 ```
 
-An explicit `--intent` enables bounded agent exploration. Use `--no-agent` for
-an initial-page smoke check, or a versioned `--scenario` when the owner needs an
-exact workflow with mutation-capable actions and explicit assertions.
+Outside a versioned scenario, an explicit `--intent` enables bounded agent
+exploration. The interaction budget defaults to four steps; `--max-agent-steps`
+accepts values from `1` through `20`. Use `--no-agent` for an initial-page smoke
+check, or a versioned `--scenario` when the owner needs an exact workflow with
+mutation-capable actions and explicit assertions.
 
 The compatible endpoint can be selected per command:
 
@@ -155,13 +158,14 @@ eligible fields with YellowBird-owned synthetic values, select supplied options,
 and use non-submit buttons whose labels do not indicate a destructive or
 mutation-oriented action. YellowBird applies the same semantic denial to every
 control type and blocks non-read HTTP methods, destructive request URLs, and
-WebSocket messages throughout agent exploration. Form submission,
-authentication, credentials, cross-origin navigation, and destructive controls
-are not exposed to the model. The model
-proposes one supplied element at a time; YellowBird validates and executes the
-action. Model text is coverage guidance, never product-failure evidence. Partial
-planner coverage remains partial, and an intent needing an action outside this
-profile produces an `inconclusive` result instead of a false pass.
+outbound WebSocket messages throughout agent exploration. Form submission,
+authentication, credential use, cross-origin navigation, and destructive
+controls are not available to the model as actions. The model proposes one
+supplied element at a time; YellowBird validates and executes the action. Model
+text is coverage guidance, never product-failure evidence. Partial planner
+coverage remains partial, and an intent needing server-side mutation or another
+action outside this profile produces an `inconclusive` result instead of a false
+pass.
 
 Page text and the bounded control inventory are sent to the configured model
 endpoint. The default endpoint is loopback. Operators choosing a remote endpoint
