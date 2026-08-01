@@ -326,6 +326,7 @@
                   "rationale",
                   "value",
                   "locator",
+                  "navigationAttempted",
                   "durationMs"
                 ],
                 "properties": {
@@ -348,6 +349,7 @@
                   "evidence": { "type": "string" },
                   "rationale": { "type": "string" },
                   "value": { "type": ["string", "null"] },
+                  "navigationAttempted": { "type": "boolean" },
                   "locator": {
                     "oneOf": [
                       {

@@ -13,7 +13,7 @@ const PROBE_SCHEMA = {
   }
 };
 
-function endpointClass(baseUrl) {
+export function classifyAgentEngineEndpoint(baseUrl) {
   const hostname = new URL(baseUrl).hostname;
   return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(hostname)
     ? "loopback"
@@ -419,7 +419,7 @@ export function createCompatibleEngine({
     provenance() {
       return {
         adapter: "openai-compatible-chat",
-        endpointClass: endpointClass(normalizedBaseUrl),
+        endpointClass: classifyAgentEngineEndpoint(normalizedBaseUrl),
         modelRequested: selectedModel,
         modelReported: reportedModel,
         capabilityManifestVersion: "yellowbird.engine-capabilities.v1"

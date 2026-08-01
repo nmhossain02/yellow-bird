@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import { test } from "bun:test";
 import {
+  classifyAgentEngineEndpoint,
   createCompatibleEngine,
   resolveAgentEngine
 } from "../src/scout/engine.js";
@@ -12,6 +14,45 @@ function jsonResponse(value, init = {}) {
     ...init
   });
 }
+
+test("engine endpoint classification recognizes only exact loopback hosts", () => {
+  assert.equal(
+    classifyAgentEngineEndpoint("http://127.0.0.1:11434/v1"),
+    "loopback"
+  );
+  assert.equal(
+    classifyAgentEngineEndpoint("https://[::1]:11434/v1"),
+    "loopback"
+  );
+  assert.equal(
+    classifyAgentEngineEndpoint("https://localhost.example/v1"),
+    "remote"
+  );
+});
+
+test("Price Scout gate rejects a remote planning engine before validation", async () => {
+  const child = Bun.spawn({
+    cmd: [
+      process.execPath,
+      resolve("scripts/validate-price-scout-e2e.js")
+    ],
+    cwd: resolve("."),
+    env: {
+      ...process.env,
+      YELLOWBIRD_ENGINE_BASE_URL: "https://planner.example.test/v1"
+    },
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited
+  ]);
+
+  assert.notEqual(exitCode, 0, stdout);
+  assert.match(stderr, /requires a loopback planning engine/);
+});
 
 test("compatible engine proves JSON Schema output and normalizes provenance", async () => {
   const requests = [];

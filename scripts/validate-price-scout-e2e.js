@@ -2,6 +2,10 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  classifyAgentEngineEndpoint,
+  validateAgentEngineConfig
+} from "../src/scout/engine.js";
 
 const expectedRepository = "https://github.com/nmhossain02/price-scout";
 const yellowBirdDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -52,6 +56,12 @@ function canonicalRepository(value) {
     .replace(/\/$/, "");
 }
 
+const engineConfig = validateAgentEngineConfig();
+requireCondition(
+  classifyAgentEngineEndpoint(engineConfig.baseUrl) === "loopback",
+  `The real Price Scout gate requires a loopback planning engine, received ${engineConfig.baseUrl}`
+);
+
 const origin = await checked(
   ["git", "remote", "get-url", "origin"],
   priceScoutDirectory,
@@ -96,6 +106,8 @@ const scout = await run(
     target,
     "--intent",
     "Assess initial interface and basic user flow",
+    "--engine-base-url",
+    engineConfig.baseUrl,
     "--output",
     outputDirectory,
     "--verbose"
@@ -117,6 +129,10 @@ requireCondition(
   evidence.observations.exploration.status === "completed" &&
     evidence.observations.exploration.coverage === "covered",
   "Intent exploration did not complete with covered evidence"
+);
+requireCondition(
+  evidence.observations.exploration.provenance?.endpointClass === "loopback",
+  "The real Price Scout gate did not use a loopback planning engine"
 );
 requireCondition(
   evidence.observations.exploration.verification?.profile ===

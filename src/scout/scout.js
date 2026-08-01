@@ -300,7 +300,9 @@ function evidenceUrl(value) {
 
 function buildRegression(options, explorationSteps = []) {
   const replaySteps = explorationSteps.filter(
-    (candidate) => candidate.status !== "invalid"
+    (candidate) =>
+      candidate.status !== "invalid" ||
+      (candidate.action === "visit" && candidate.navigationAttempted)
   );
   const lines = [
     'import { randomUUID } from "node:crypto";',
@@ -819,12 +821,18 @@ function buildRegression(options, explorationSteps = []) {
         `    const actionResponse = await page.goto(${quoteForJavaScript(step.requestedUrl)}, { waitUntil: "domcontentloaded" });`,
         `    await page.waitForTimeout(${AGENT_NAVIGATION_SETTLEMENT_MS});`,
         "    return actionResponse;",
-        "  });",
-        `  await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`,
+        "  });"
+      );
+      if (step.status !== "invalid") {
+        lines.push(
+          `  await expect(page).toHaveURL(${quoteForJavaScript(step.url)});`
+        );
+      }
+      lines.push(
         "  await page.waitForTimeout(100);",
         "  await yellowbirdAssertAgentGuard();"
       );
-      if (step.httpStatus) {
+      if (Number.isInteger(step.httpStatus)) {
         lines.push(
           `  expect(${response}?.status()).toBeLessThan(400);`
         );
@@ -974,6 +982,9 @@ async function finalizeRun(state) {
     const relatedTargetIssue = state.operationalIssues.find(
       (issue) => issue.id === "browser-related-target-created"
     );
+    const screenshotCaptureIssue = state.operationalIssues.find(
+      (issue) => issue.id === "browser-screenshot-capture-failed"
+    );
     state.exploration.status = "inconclusive";
     state.exploration.coverage = state.exploration.steps.some(
       (step) => step.status === "passed"
@@ -984,6 +995,8 @@ async function finalizeRun(state) {
       ? "Intent coverage could not be trusted because a browser safety guard failed."
       : relatedTargetIssue
         ? "Intent coverage could not be trusted because a related browser target was created."
+        : screenshotCaptureIssue
+          ? "Intent coverage was inconclusive because visual evidence capture failed."
         : "Intent coverage could not begin because browser setup did not complete.";
     state.exploration.issue ||= state.operationalIssues[0];
   }
@@ -1131,6 +1144,15 @@ async function finalizeRun(state) {
   if (invalidWorkflowSteps.length) {
     coverageGaps.push(
       `${invalidWorkflowSteps.length} workflow action(s) were invalid. YellowBird did not attempt selector healing.`
+    );
+  }
+  if (
+    state.operationalIssues.some(
+      (issue) => issue.id === "browser-screenshot-capture-failed"
+    )
+  ) {
+    coverageGaps.push(
+      "Visual evidence was unavailable because browser screenshot capture failed."
     );
   }
   if (!productEvaluated) {
@@ -1506,6 +1528,23 @@ export function createScoutRunner({
       noteNetworkGuardFailure(error, stage);
       return { successful: false, value: null };
     }
+  };
+  const noteScreenshotCaptureFailure = (error) => {
+    const detail = sanitizeDiagnosticText(error?.message || error);
+    state.operationalIssues.push({
+      id: "browser-screenshot-capture-failed",
+      classification: "test-mechanics",
+      title: "YellowBird could not capture visual evidence.",
+      evidence: detail,
+      remediation:
+        "Rerun the scout. If screenshot capture fails again, inspect the browser diagnostics."
+    });
+    record(
+      "error",
+      "browser.screenshot.failed",
+      "Browser screenshot capture failed",
+      { detail }
+    );
   };
 
   record("debug", "browser.launch.started", "Launching Playwright Chromium", {
@@ -2749,12 +2788,21 @@ export function createScoutRunner({
       ...element,
       href: element.href ? evidenceUrl(element.href) : null
     }));
-    await page.screenshot({
-      path: join(outputDirectory, "page.png"),
-      fullPage: true,
-      timeout: Math.max(options.timeoutMs, 5_000)
-    });
-    state.screenshotCaptured = true;
+    let screenshot = null;
+    try {
+      screenshot = await page.screenshot({
+        fullPage: true,
+        timeout: Math.max(options.timeoutMs, 5_000)
+      });
+    } catch (error) {
+      noteScreenshotCaptureFailure(error);
+    }
+    if (screenshot) {
+      await writeFile(join(outputDirectory, "page.png"), screenshot, {
+        mode: 0o600
+      });
+      state.screenshotCaptured = true;
+    }
     await collectAgentGuardAttempts();
   } finally {
     await browser.close();

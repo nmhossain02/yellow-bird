@@ -31,8 +31,10 @@ bun run test:price-scout
 ```
 
 The validator refuses a checkout whose `origin` remote is not
-`https://github.com/nmhossain02/price-scout`. It then runs the same intent scout
-from the Price Scout working directory, requires the observed
+`https://github.com/nmhossain02/price-scout`. It also refuses a non-loopback
+planning-engine endpoint and verifies loopback engine provenance in the resulting
+evidence. It then runs the same intent scout from the Price Scout working
+directory, requires the observed
 `initial-interface-basic-flow.v1` profile, requires a passed visit to
 `/monitors/new`, installs the generated replay bundle, and runs that replay from
 its independent temporary artifact directory. The external checkout remains

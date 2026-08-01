@@ -1017,6 +1017,27 @@ async function launchBrowserWithDelayedScreenshot() {
   };
 }
 
+async function launchBrowserWithFailingScreenshot() {
+  let context;
+  return {
+    async newContext(options) {
+      context = await sharedBrowser.newContext(options);
+      const newPage = context.newPage.bind(context);
+      context.newPage = async () => {
+        const page = await newPage();
+        page.screenshot = async () => {
+          throw new Error("injected browser screenshot timeout");
+        };
+        return page;
+      };
+      return context;
+    },
+    async close() {
+      await context?.close();
+    }
+  };
+}
+
 async function launchBrowserWithFailingNetworkGuard() {
   let context;
   return {
@@ -1457,6 +1478,37 @@ test("browser context creation failure finalizes an inconclusive run", async () 
     ["browser.context.failed", "run.completed"]
   );
   assert.doesNotMatch(diagnostics, /hidden-value/);
+});
+
+test("browser screenshot capture failure finalizes without a screenshot claim", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-screenshot-capture-")
+  );
+  const report = await createScoutRunner({
+    launchBrowser: launchBrowserWithFailingScreenshot
+  })({
+    target,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.observations.navigation.completed, true);
+  assert.equal(report.artifacts.screenshot, null);
+  assert.ok(
+    report.invalidTestMechanics.some(
+      (issue) => issue.id === "browser-screenshot-capture-failed"
+    )
+  );
+  await assert.rejects(stat(join(outputDirectory, "page.png")));
+  await Promise.all(
+    Object.entries(report.artifacts)
+      .filter(([name]) => name !== "screenshot")
+      .map(([, path]) => stat(path))
+  );
+  assert.match(
+    await readFile(report.artifacts.diagnostics, "utf8"),
+    /browser\.screenshot\.failed/
+  );
 });
 
 test("a browser network guard failure cannot produce a clear report", async () => {
@@ -2708,6 +2760,10 @@ test("failed visits close authority before delayed requests", async () => {
       report.observations.exploration.steps[0].evidence,
       /ERR_FAILED|ERR_CONNECTION_RESET|ERR_EMPTY_RESPONSE/
     );
+    assert.equal(
+      report.observations.exploration.steps[0].navigationAttempted,
+      true
+    );
     assert.ok(
       report.observations.blockedRequests.some(
         (request) =>
@@ -2718,10 +2774,25 @@ test("failed visits close authority before delayed requests", async () => {
     const regression = await readFile(report.artifacts.regression, "utf8");
     assert.match(regression, /yellowbirdRunAgentAction/);
     assert.match(regression, /finally \{/);
+    assert.match(regression, /agent-failed-visit-destination/);
+    const install = await runCommand(
+      [process.execPath, "install"],
+      outputDirectory
+    );
+    assert.equal(install.exitCode, 0, install.stderr);
+    const replay = await runCommand(
+      [process.execPath, "run", "test"],
+      outputDirectory
+    );
+    assert.notEqual(
+      replay.exitCode,
+      0,
+      "Replay must retain the authorized visit request failure"
+    );
   } finally {
     failVisitNavigation = false;
   }
-});
+}, 30_000);
 
 test("visit authority allows bounded load requests and blocks delayed effects in live and replay", async () => {
   initialVisitReadRequestCount = 0;

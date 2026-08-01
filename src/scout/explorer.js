@@ -897,6 +897,8 @@ export async function exploreIntentWithEngine({
     });
     let actionPolicyAttempted = false;
     let actionFailed = false;
+    let navigationAttempted = false;
+    let response = null;
     try {
       actionPolicyAttempted = Boolean(actionPolicy);
       await actionPolicy?.begin({
@@ -904,9 +906,9 @@ export async function exploreIntentWithEngine({
         action,
         requestedUrl: selected.href || null
       });
-      let response = null;
       const locator = page.locator(selected.runtimeSelector);
       if (action === "visit") {
+        navigationAttempted = true;
         response = await page.goto(selected.href, {
           waitUntil: "domcontentloaded",
           timeout: timeoutMs
@@ -951,6 +953,7 @@ export async function exploreIntentWithEngine({
         rationale: normalizeText(proposed.rationale, 500),
         value: actionValue,
         locator: selected.locator,
+        navigationAttempted,
         durationMs: Date.now() - startedAt
       };
       steps.push(step);
@@ -985,11 +988,12 @@ export async function exploreIntentWithEngine({
         url: diagnosticUrl(page.url()).url,
         title: "",
         destinationControlCount: null,
-        httpStatus: null,
+        httpStatus: response?.status() ?? null,
         evidence: detail,
         rationale: normalizeText(proposed.rationale, 500),
         value: actionValue,
         locator: selected.locator,
+        navigationAttempted,
         durationMs: Date.now() - startedAt
       });
       return completedExploration({
