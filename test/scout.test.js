@@ -27,6 +27,7 @@ let mutationRequestCount = 0;
 let readMutationRequestCount = 0;
 let delayedReadMutationRequestCount = 0;
 let delayedVisitMutationRequestCount = 0;
+let visitEventSourceRequestCount = 0;
 let submissionRequestCount = 0;
 let crossOriginRequestCount = 0;
 let prohibitedRedirectRequestCount = 0;
@@ -146,6 +147,15 @@ beforeAll(async () => {
       response.end();
       return;
     }
+    if (request.method === "GET" && request.url === "/agent-visit-events") {
+      visitEventSourceRequestCount += 1;
+      response.writeHead(200, {
+        "cache-control": "no-cache",
+        "content-type": "text/event-stream"
+      });
+      response.end("data: ready\n\n");
+      return;
+    }
     if (request.method === "GET" && request.url === "/agent-submission") {
       submissionRequestCount += 1;
       response.writeHead(204);
@@ -246,6 +256,8 @@ beforeAll(async () => {
             <a href="/user_auth">Account support</a>
             <a href="/auth_callback">Account callback</a>
             <a href="http://user:secret@127.0.0.1:${server.address().port}/agent-flow">Credentialed setup</a>
+            <span id="dangerous-name">Delete account</span>
+            <a aria-labelledby="dangerous-name" href="/agent-flow">Setup</a>
             <form action="/create-monitor">
               <label>Name <input name="name"></label>
               <label>Password <input name="password" type="password"></label>
@@ -324,8 +336,11 @@ beforeAll(async () => {
           <body>
             <input name="query" aria-label="Query">
             <script>
+              const events = new EventSource("/agent-visit-events");
+              events.onmessage = () => events.close();
               setTimeout(() => {
-                fetch("/agent-delayed-visit-mutation").catch(() => {});
+                const beacon = new Image();
+                beacon.src = "/agent-delayed-visit-mutation";
               }, 200);
             </script>
           </body>
@@ -411,9 +426,8 @@ beforeAll(async () => {
           <body>
             <input name="query" aria-label="Query">
             <script>
-              setTimeout(() => {
-                location.hash = "auth_callback";
-              }, 25);
+              history.pushState({}, "", "/auth_callback");
+              history.replaceState({}, "", "/agent-same-document-destination");
             </script>
           </body>
         </html>`);
@@ -533,6 +547,8 @@ test("agent URL policy rejects credentials, auth shorthand, and fragments", () =
   assert.equal(isAgentUrlAllowed(`${target}/user_auth`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/auth_callback`, target), false);
   assert.equal(isAgentUrlAllowed(`${target}/setup#auth_callback`, target), false);
+  assert.equal(isAgentUrlAllowed(`${target}/%25252561uth`, target), false);
+  assert.equal(isAgentUrlAllowed(`${target}/%ZZauth`, target), false);
   assert.equal(
     isAgentUrlAllowed(
       `http://user:secret@127.0.0.1:${server.address().port}/setup`,
@@ -1371,6 +1387,7 @@ test("agent action guards block effects delayed between planning rounds", async 
 
 test("visit authority blocks delayed active requests in live and replay", async () => {
   delayedVisitMutationRequestCount = 0;
+  visitEventSourceRequestCount = 0;
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-delayed-visit-mutation-")
   );
@@ -1407,6 +1424,7 @@ test("visit authority blocks delayed active requests in live and replay", async 
   });
 
   assert.equal(delayedVisitMutationRequestCount, 0);
+  assert.equal(visitEventSourceRequestCount, 1);
   assert.equal(report.outcome, "inconclusive");
   assert.ok(
     report.observations.blockedRequests.some(
@@ -1421,6 +1439,7 @@ test("visit authority blocks delayed active requests in live and replay", async 
   );
   assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
   assert.equal(delayedVisitMutationRequestCount, 0);
+  assert.equal(visitEventSourceRequestCount, 2);
 }, 30_000);
 
 test("agent snapshots bound page fields, select options, and total prompt size", async () => {

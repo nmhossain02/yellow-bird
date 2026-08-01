@@ -78,28 +78,30 @@ function normalizeText(value, limit) {
 
 function decodeAgentText(value) {
   let decoded = String(value ?? "");
-  for (let count = 0; count < 3; count += 1) {
+  const maximumPasses = decoded.length + 1;
+  for (let count = 0; count < maximumPasses; count += 1) {
+    let next;
     try {
-      const next = decodeURIComponent(decoded);
-      if (next === decoded) break;
-      decoded = next;
+      next = decodeURIComponent(decoded);
     } catch {
-      break;
+      return null;
     }
+    if (next === decoded) return decoded;
+    decoded = next;
   }
-  return decoded;
+  return null;
 }
 
 export function isAgentUrlAllowed(value, authorizedOrigin) {
   try {
     const url = new URL(value);
+    const decoded = decodeAgentText(url.pathname + url.search + url.hash);
     return (
       url.origin === authorizedOrigin &&
       !url.username &&
       !url.password &&
-      !PROHIBITED_ACTION_TEXT.test(
-        decodeAgentText(url.pathname + url.search + url.hash)
-      )
+      decoded !== null &&
+      !PROHIBITED_ACTION_TEXT.test(decoded)
     );
   } catch {
     return false;
@@ -123,7 +125,8 @@ function hasProhibitedSemantics(element) {
     element.formHasPassword ||
     values.some((value) => {
       if (!value) return false;
-      return PROHIBITED_ACTION_TEXT.test(decodeAgentText(value));
+      const decoded = decodeAgentText(value);
+      return decoded === null || PROHIBITED_ACTION_TEXT.test(decoded);
     })
   );
 }
@@ -216,20 +219,23 @@ async function snapshotPage(page, authorizedOrigin) {
     const prohibited = new RegExp(prohibitedPattern, "i");
     const decodeText = (value) => {
       let decoded = String(value ?? "");
-      for (let count = 0; count < 3; count += 1) {
+      const maximumPasses = decoded.length + 1;
+      for (let count = 0; count < maximumPasses; count += 1) {
+        let next;
         try {
-          const next = decodeURIComponent(decoded);
-          if (next === decoded) break;
-          decoded = next;
+          next = decodeURIComponent(decoded);
         } catch {
-          break;
+          return null;
         }
+        if (next === decoded) return decoded;
+        decoded = next;
       }
-      return decoded;
+      return null;
     };
     const hasProhibitedText = (value) => {
       if (!value) return false;
-      return prohibited.test(decodeText(value));
+      const decoded = decodeText(value);
+      return decoded === null || prohibited.test(decoded);
     };
     const takeText = (value, maximum) => {
       const text = String(value ?? "");
@@ -254,9 +260,21 @@ async function snapshotPage(page, authorizedOrigin) {
           String(labelElement.innerText || labelElement.textContent || "")
         );
         const ariaLabel = element.getAttribute("aria-label") || "";
+        const ariaLabelledBy = element.getAttribute("aria-labelledby") || "";
+        const ariaLabelledByIds = ariaLabelledBy.trim()
+          ? ariaLabelledBy.trim().split(/\s+/)
+          : [];
+        const ariaLabelledByElements = ariaLabelledByIds.map((id) =>
+          document.getElementById(id)
+        );
+        if (ariaLabelledByElements.some((candidate) => !candidate)) return [];
+        const ariaLabelledByTexts = ariaLabelledByElements.map((candidate) =>
+          String(candidate.innerText || candidate.textContent || "")
+        );
         const placeholder = element.getAttribute("placeholder") || "";
         const label =
           ariaLabel ||
+          ariaLabelledByTexts.join(" ") ||
           labelTexts.join(" ") ||
           placeholder ||
           element.textContent ||
@@ -287,6 +305,8 @@ async function snapshotPage(page, authorizedOrigin) {
           [element.getAttribute("name"), limits.fieldText],
           [element.getAttribute("id"), limits.fieldText],
           [ariaLabel, limits.fieldText],
+          [ariaLabelledBy, limits.fieldText],
+          ...ariaLabelledByTexts.map((value) => [value, limits.fieldText]),
           [placeholder, limits.fieldText],
           [element.textContent, limits.fieldText],
           [element.href, limits.url],
@@ -319,6 +339,7 @@ async function snapshotPage(page, authorizedOrigin) {
           id: element.getAttribute("id"),
           name: element.getAttribute("name"),
           ariaLabel,
+          ariaLabelledBy,
           disabled: Boolean(element.disabled),
           formAction: form?.action ? String(form.action) : null,
           formHasPassword: Boolean(form?.querySelector('input[type="password"]')),
@@ -830,7 +851,6 @@ export async function exploreIntentWithEngine({
           waitUntil: "domcontentloaded",
           timeout: timeoutMs
         });
-        await actionPolicy?.resume?.(action);
         visited.add(selected.href);
       } else if (action === "fill") {
         await locator.fill(actionValue);
@@ -840,6 +860,7 @@ export async function exploreIntentWithEngine({
         await locator.click();
       }
       await page.waitForTimeout(150);
+      if (action === "visit") await actionPolicy?.resume?.(action);
       const actionPageUrl = page.url();
       if (!isAgentUrlAllowed(actionPageUrl, authorizedOrigin)) {
         throw new Error("The interaction reached a URL outside agent policy.");
