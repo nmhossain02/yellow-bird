@@ -174,8 +174,7 @@ async function scout() {
     steps: scenario.steps,
     exploreIntent:
       !scenarioPath &&
-      !flag("no-agent") &&
-      (flag("agent") || Boolean(explicitIntent)),
+      (Boolean(explicitIntent) || (flag("agent") && !flag("no-agent"))),
     maxAgentSteps: argument("max-agent-steps", "4"),
     engineBaseUrl: argument("engine-base-url"),
     engineModel: argument("engine-model"),

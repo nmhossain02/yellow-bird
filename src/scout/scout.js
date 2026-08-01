@@ -299,13 +299,23 @@ function buildRegression(options, explorationSteps = []) {
     (candidate) => candidate.status !== "invalid"
   );
   const lines = [
+    'import { randomUUID } from "node:crypto";',
     'import { test, expect } from "@playwright/test";',
     "",
     `test(${quoteForJavaScript(`YellowBird scout: ${options.intent}`)}, async ({ page }) => {`,
     "  const consoleErrors = [];",
+    "  const yellowbirdGuardControlName = `__yellowbird_${randomUUID().replaceAll(\"-\", \"\")}`;",
+    "  const yellowbirdGuardControlToken = randomUUID();",
+    "  const yellowbirdGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;",
+    "  let yellowbirdAgentViolation = null;",
     '  page.on("console", (message) => {',
+    "    const text = message.text();",
+    "    if (text.startsWith(yellowbirdGuardPrefix)) {",
+    "      try { yellowbirdAgentViolation ||= JSON.parse(text.slice(yellowbirdGuardPrefix.length)); } catch {}",
+    "      return;",
+    "    }",
     '    if (message.type() === "error")',
-    "      consoleErrors.push({ text: message.text(), location: message.location() });",
+    "      consoleErrors.push({ text, location: message.location() });",
     "  });",
     "",
     `  const yellowbirdTarget = new URL(${quoteForJavaScript(options.target)});`,
@@ -313,7 +323,6 @@ function buildRegression(options, explorationSteps = []) {
     '  yellowbirdTargetRequestUrl.hash = "";',
     `  const yellowbirdAgentMode = ${options.exploreIntent};`,
     "  const yellowbirdBlockedUrls = new Set();",
-    "  const yellowbirdBlockedEffectPages = new Set();",
     "  let yellowbirdAgentAction = yellowbirdAgentMode ? {",
     '    action: "visit",',
     "    requestedUrl: yellowbirdTargetRequestUrl.href,",
@@ -350,7 +359,7 @@ function buildRegression(options, explorationSteps = []) {
     "        decoded !== null && !yellowbirdUnsafeRequest.test(decoded);",
     "    } catch { return false; }",
     "  };",
-    "  await page.context().addInitScript(({ authorizedOrigin, prohibitedPattern, startActive }) => {",
+    "  await page.context().addInitScript(({ authorizedOrigin, controlName, controlToken, guardPrefix, prohibitedPattern, startActive }) => {",
     "    const prohibited = new RegExp(prohibitedPattern, \"i\");",
     "    const decodeText = value => {",
     "      let decoded = String(value ?? \"\");",
@@ -380,18 +389,26 @@ function buildRegression(options, explorationSteps = []) {
     "          decoded !== null && !prohibited.test(decoded);",
     "      } catch { return false; }",
     "    };",
-    '    const state = { active: startActive, action: startActive ? "visit" : null, violation: null };',
-    '    Object.defineProperty(globalThis, "__yellowbirdAgentReplayGuard", {',
-    "      value: state,",
-    "      configurable: false",
+    "    const active = Boolean(startActive);",
+    '    let action = startActive ? "visit" : null;',
+    "    const emit = globalThis.console.debug.bind(globalThis.console);",
+    "    Object.defineProperty(globalThis, controlName, {",
+    "      configurable: false,",
+    "      writable: false,",
+    "      value: (candidateToken, nextAction) => {",
+    "        if (candidateToken !== controlToken) return false;",
+    '        if (!["visit", "fill", "select", "click"].includes(nextAction)) return false;',
+    "        action = nextAction;",
+    "        return true;",
+    "      }",
     "    });",
     "    const blocked = (kind, url = globalThis.location.href) => {",
-    "      if (!state.active) return false;",
-    "      state.violation ||= { kind, url };",
+    "      if (!active) return false;",
+    "      emit(`${guardPrefix}${JSON.stringify({ kind, url })}`);",
     "      return true;",
     "    };",
-    "    state.observeCurrentUrl = () => {",
-    '      if (state.active && !urlAllowed(globalThis.location.href)) blocked("prohibited-navigation");',
+    "    const observeCurrentUrl = () => {",
+    '      if (active && !urlAllowed(globalThis.location.href)) blocked("prohibited-navigation");',
     "    };",
     '    globalThis.addEventListener("submit", event => {',
     '      if (!blocked("form-submission")) return;',
@@ -401,23 +418,31 @@ function buildRegression(options, explorationSteps = []) {
     '    for (const method of ["submit", "requestSubmit"]) {',
     "      const original = HTMLFormElement.prototype[method];",
     '      if (typeof original !== "function") continue;',
-    "      HTMLFormElement.prototype[method] = function (...args) {",
-    '        if (blocked("form-submission")) return undefined;',
-    "        return original.apply(this, args);",
-    "      };",
+    "      Object.defineProperty(HTMLFormElement.prototype, method, {",
+    "        configurable: false,",
+    "        writable: false,",
+    "        value: function (...args) {",
+    '          if (blocked("form-submission")) return undefined;',
+    "          return original.apply(this, args);",
+    "        }",
+    "      });",
     "    }",
     '    for (const method of ["pushState", "replaceState"]) {',
-    "      const original = history[method];",
-    "      history[method] = function (...args) {",
-    '        if (state.active && state.action !== "visit") { blocked("non-visit-navigation"); return undefined; }',
-    "        const nextUrl = args[2] === undefined ? globalThis.location.href : new URL(args[2], globalThis.location.href).href;",
-    '        if (state.active && !urlAllowed(nextUrl)) { blocked("prohibited-navigation", nextUrl); return undefined; }',
-    "        return original.apply(this, args);",
-    "      };",
+    "      const original = History.prototype[method];",
+    "      Object.defineProperty(History.prototype, method, {",
+    "        configurable: false,",
+    "        writable: false,",
+    "        value: function (...args) {",
+    '          if (active && action !== "visit") { blocked("non-visit-navigation"); return undefined; }',
+    "          const nextUrl = args[2] === undefined ? globalThis.location.href : new URL(args[2], globalThis.location.href).href;",
+    '          if (active && !urlAllowed(nextUrl)) { blocked("prohibited-navigation", nextUrl); return undefined; }',
+    "          return original.apply(this, args);",
+    "        }",
+    "      });",
     "    }",
-    '    globalThis.addEventListener("hashchange", state.observeCurrentUrl);',
-    '    globalThis.addEventListener("popstate", state.observeCurrentUrl);',
-    `  }, { authorizedOrigin: yellowbirdTarget.origin, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
+    '    globalThis.addEventListener("hashchange", observeCurrentUrl);',
+    '    globalThis.addEventListener("popstate", observeCurrentUrl);',
+    `  }, { authorizedOrigin: yellowbirdTarget.origin, controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken, guardPrefix: yellowbirdGuardPrefix, prohibitedPattern: ${quoteForJavaScript(PROHIBITED_AGENT_ACTION_PATTERN)}, startActive: ${options.exploreIntent} });`,
     '  await page.context().route("**/*", async (route) => {',
     "    const request = route.request();",
     "    const requestUrl = request.url();",
@@ -464,7 +489,6 @@ function buildRegression(options, explorationSteps = []) {
     "        if (!safeRedirect) {",
     "          yellowbirdBlockedUrls.add(requestUrl);",
     "          yellowbirdBlockedUrls.add(redirectUrl);",
-    "          yellowbirdBlockedEffectPages.add(page.url());",
     '          return route.abort("blockedbyclient");',
     "        }",
     "      }",
@@ -472,7 +496,6 @@ function buildRegression(options, explorationSteps = []) {
     "    }",
     "    if (allowed) return route.continue();",
     "    yellowbirdBlockedUrls.add(requestUrl);",
-    "    yellowbirdBlockedEffectPages.add(page.url());",
     '    return route.abort("blockedbyclient");',
     "  });",
     "  const yellowbirdSocketProtocol = yellowbirdTarget.protocol === \"https:\" ? \"wss:\" : \"ws:\";",
@@ -484,7 +507,6 @@ function buildRegression(options, explorationSteps = []) {
     "      url.hostname === yellowbirdTarget.hostname && socketPort === yellowbirdSocketPort;",
     "    if (!sameOrigin || yellowbirdAgentAction) {",
     "      yellowbirdBlockedUrls.add(socket.url());",
-    "      yellowbirdBlockedEffectPages.add(page.url());",
     "      return socket.close({ code: 1008, reason: \"Blocked by YellowBird exact-origin policy\" });",
     "    }",
     "    const server = socket.connectToServer();",
@@ -495,11 +517,11 @@ function buildRegression(options, explorationSteps = []) {
     "    });",
     "  });",
     "  const yellowbirdActivateAgentGuard = async action => {",
-    "    await page.evaluate(activeAction => {",
-    "      const guard = globalThis.__yellowbirdAgentReplayGuard;",
-    "      guard.active = true;",
-    "      guard.action = activeAction;",
-    "    }, action);",
+    "    const accepted = await page.evaluate(({ action, controlName, controlToken }) =>",
+    "      globalThis[controlName]?.(controlToken, action),",
+    "      { action, controlName: yellowbirdGuardControlName, controlToken: yellowbirdGuardControlToken }",
+    "    );",
+    '    if (!accepted) throw new Error("YellowBird replay guard rejected an authenticated transition");',
     "  };",
     "  const yellowbirdBeginAgentAction = async (action, requestedUrl = null) => {",
     "    yellowbirdAgentAction = {",
@@ -516,12 +538,8 @@ function buildRegression(options, explorationSteps = []) {
     '    await yellowbirdActivateAgentGuard("visit");',
     "  };",
     "  const yellowbirdAssertAgentGuard = async () => {",
-    "    const violation = await page.evaluate(() => {",
-    "      const guard = globalThis.__yellowbirdAgentReplayGuard;",
-    "      guard.observeCurrentUrl();",
-    "      return guard.violation;",
-    "    });",
-    "    expect(violation).toBeNull();",
+    "    expect(yellowbirdAgentUrlAllowed(page.url())).toBe(true);",
+    "    expect(yellowbirdAgentViolation).toBeNull();",
     "  };",
     "",
     `  const response = await page.goto(yellowbirdTarget.href, { waitUntil: "domcontentloaded" });`,
@@ -626,9 +644,7 @@ function buildRegression(options, explorationSteps = []) {
   if (!options.ignoreConsoleErrors) {
     lines.push(
       "  const yellowbirdProductConsoleErrors = consoleErrors.filter(entry =>",
-      "    !((yellowbirdBlockedUrls.has(entry.location?.url) && /ERR_BLOCKED_BY_CLIENT/i.test(entry.text)) ||",
-      "      (yellowbirdBlockedEffectPages.has(entry.location?.url) &&",
-      "        /(?:failed to fetch|networkerror|err_blocked_by_client|websocket.*failed)/i.test(entry.text)))",
+      "    !(yellowbirdBlockedUrls.has(entry.location?.url) && /ERR_BLOCKED_BY_CLIENT/i.test(entry.text))",
       "  );",
       "  expect(yellowbirdProductConsoleErrors).toEqual([]);"
     );
@@ -1224,19 +1240,50 @@ export function createScoutRunner({
           navigationWindowOpen: true
         }
       : null;
-    let latestAgentEffectBlock = null;
+    const agentGuardControlName = `__yellowbird_${randomUUID().replaceAll("-", "")}`;
+    const agentGuardControlToken = randomUUID();
+    const agentGuardPrefix = `__yellowbird_guard__${randomUUID()}:`;
+    const agentFetchFailurePrefix = `__yellowbird_fetch_failure__${randomUUID()}:`;
+    const agentGuardAttempts = [];
+    const observedAgentGuardAttempts = new Set();
     const addBlockedRequest = (request) => {
       blockedRequests.push(request);
-      if (request.reason?.startsWith("agent-")) {
-        latestAgentEffectBlock = { request, observedAt: Date.now() };
+    };
+    const isBlockedAgentUrl = (url) =>
+      blockedRequests.some(
+        (request) =>
+          request.reason?.startsWith("agent-") &&
+          (request.url === url || request.requestUrl === url)
+      );
+    const parseAgentFetchFailure = (detail) => {
+      const text = String(detail || "");
+      const markerIndex = text.indexOf(agentFetchFailurePrefix);
+      if (markerIndex < 0) return null;
+      const encodedStart = markerIndex + agentFetchFailurePrefix.length;
+      const separator = text.indexOf(":", encodedStart);
+      if (separator < 0) return null;
+      try {
+        return {
+          url: decodeURIComponent(text.slice(encodedStart, separator)),
+          message: text.slice(separator + 1) || "Failed to fetch"
+        };
+      } catch {
+        return null;
       }
     };
-    const isPolicyCausedBrowserError = (detail) =>
-      latestAgentEffectBlock &&
-      Date.now() - latestAgentEffectBlock.observedAt <= 1_000 &&
-      /(?:failed to fetch|fetch failed|load failed|networkerror|err_blocked_by_client|websocket.*failed)/i.test(
-        detail
-      );
+    const enqueueAgentGuardAttempt = (attempt) => {
+      if (
+        !attempt ||
+        typeof attempt.kind !== "string" ||
+        typeof attempt.url !== "string"
+      ) {
+        return;
+      }
+      const key = `${attempt.kind}\n${attempt.url}`;
+      if (observedAgentGuardAttempts.has(key)) return;
+      observedAgentGuardAttempts.add(key);
+      agentGuardAttempts.push(attempt);
+    };
     await context.routeWebSocket("**/*", async (socket) => {
       const socketUrl = new URL(socket.url());
       const expectedProtocol = targetUrl.protocol === "https:" ? "wss:" : "ws:";
@@ -1439,7 +1486,15 @@ export function createScoutRunner({
       await route.abort("blockedbyclient");
     });
 
-    await context.addInitScript(({ authorizedOrigin, prohibitedPattern, startActive }) => {
+    await context.addInitScript(({
+      authorizedOrigin,
+      controlName,
+      controlToken,
+      fetchFailurePrefix,
+      guardPrefix,
+      prohibitedPattern,
+      startActive
+    }) => {
       const prohibited = new RegExp(prohibitedPattern, "i");
       const decodeText = (value) => {
         let decoded = String(value ?? "");
@@ -1482,23 +1537,49 @@ export function createScoutRunner({
           return false;
         }
       };
-      const state = {
-        active: startActive,
-        action: startActive ? "visit" : null,
-        attempts: []
-      };
-      Object.defineProperty(globalThis, "__yellowbirdAgentActionGuard", {
-        value: state,
-        configurable: false
+      const active = Boolean(startActive);
+      let action = startActive ? "visit" : null;
+      const emit = globalThis.console.debug.bind(globalThis.console);
+      Object.defineProperty(globalThis, controlName, {
+        configurable: false,
+        writable: false,
+        value: (candidateToken, nextAction) => {
+          if (candidateToken !== controlToken) return false;
+          if (!["visit", "fill", "select", "click"].includes(nextAction)) {
+            return false;
+          }
+          action = nextAction;
+          return true;
+        }
       });
       const blocked = (kind, url = globalThis.location.href) => {
-        if (!state.active) return false;
-        state.attempts.push({ kind, url });
+        if (!active) return false;
+        emit(`${guardPrefix}${JSON.stringify({ kind, url })}`);
         return true;
       };
-      state.observeCurrentUrl = () => {
-        if (state.active && !urlAllowed(globalThis.location.href)) {
+      const observeCurrentUrl = () => {
+        if (active && !urlAllowed(globalThis.location.href)) {
           blocked("prohibited-navigation");
+        }
+      };
+      const originalFetch = globalThis.fetch.bind(globalThis);
+      globalThis.fetch = async function (input, init) {
+        let requestUrl = null;
+        try {
+          requestUrl = new URL(
+            input instanceof Request ? input.url : String(input),
+            globalThis.location.href
+          ).href;
+        } catch {}
+        try {
+          return await originalFetch(input, init);
+        } catch (error) {
+          if (!active || !requestUrl) throw error;
+          const message =
+            error instanceof Error ? error.message : String(error || "Failed to fetch");
+          throw new TypeError(
+            `${fetchFailurePrefix}${encodeURIComponent(requestUrl)}:${message}`
+          );
         }
       };
       globalThis.addEventListener(
@@ -1513,33 +1594,45 @@ export function createScoutRunner({
       for (const method of ["submit", "requestSubmit"]) {
         const original = HTMLFormElement.prototype[method];
         if (typeof original !== "function") continue;
-        HTMLFormElement.prototype[method] = function (...args) {
-          if (blocked("form-submission")) return undefined;
-          return original.apply(this, args);
-        };
+        Object.defineProperty(HTMLFormElement.prototype, method, {
+          configurable: false,
+          writable: false,
+          value: function (...args) {
+            if (blocked("form-submission")) return undefined;
+            return original.apply(this, args);
+          }
+        });
       }
       for (const method of ["pushState", "replaceState"]) {
-        const original = history[method];
-        history[method] = function (...args) {
-          if (state.active && state.action !== "visit") {
-            blocked("non-visit-navigation");
-            return undefined;
+        const original = History.prototype[method];
+        Object.defineProperty(History.prototype, method, {
+          configurable: false,
+          writable: false,
+          value: function (...args) {
+            if (active && action !== "visit") {
+              blocked("non-visit-navigation");
+              return undefined;
+            }
+            const nextUrl =
+              args[2] === undefined
+                ? globalThis.location.href
+                : new URL(args[2], globalThis.location.href).href;
+            if (active && !urlAllowed(nextUrl)) {
+              blocked("prohibited-navigation", nextUrl);
+              return undefined;
+            }
+            return original.apply(this, args);
           }
-          const nextUrl =
-            args[2] === undefined
-              ? globalThis.location.href
-              : new URL(args[2], globalThis.location.href).href;
-          if (state.active && !urlAllowed(nextUrl)) {
-            blocked("prohibited-navigation", nextUrl);
-            return undefined;
-          }
-          return original.apply(this, args);
-        };
+        });
       }
-      globalThis.addEventListener("hashchange", state.observeCurrentUrl);
-      globalThis.addEventListener("popstate", state.observeCurrentUrl);
+      globalThis.addEventListener("hashchange", observeCurrentUrl);
+      globalThis.addEventListener("popstate", observeCurrentUrl);
     }, {
       authorizedOrigin: authorization.origin,
+      controlName: agentGuardControlName,
+      controlToken: agentGuardControlToken,
+      fetchFailurePrefix: agentFetchFailurePrefix,
+      guardPrefix: agentGuardPrefix,
       prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN,
       startActive: options.exploreIntent
     });
@@ -1547,17 +1640,30 @@ export function createScoutRunner({
     const page = await context.newPage();
     page.setDefaultTimeout(options.timeoutMs);
     page.on("console", (message) => {
+      const text = message.text();
+      if (text.startsWith(agentGuardPrefix)) {
+        try {
+          enqueueAgentGuardAttempt(
+            JSON.parse(text.slice(agentGuardPrefix.length))
+          );
+        } catch {}
+        return;
+      }
       if (message.type() === "error") {
-        if (isPolicyCausedBrowserError(message.text())) {
+        const fetchFailure = parseAgentFetchFailure(text);
+        if (fetchFailure && isBlockedAgentUrl(fetchFailure.url)) {
           record(
             "debug",
             "browser.console.error.policy-blocked",
             "Correlated a console error with a blocked agent effect",
-            { reason: latestAgentEffectBlock.request.reason }
+            diagnosticUrl(fetchFailure.url)
           );
           return;
         }
-        consoleErrors.push({ text: message.text(), location: message.location() });
+        consoleErrors.push({
+          text: fetchFailure?.message || text,
+          location: message.location()
+        });
         record("warn", "browser.console.error", "The page emitted a console error", {
           location: {
             ...diagnosticUrl(message.location().url || options.target),
@@ -1568,17 +1674,17 @@ export function createScoutRunner({
       }
     });
     page.on("pageerror", (error) => {
-      const detail = `${error.name || ""}: ${error.message || ""}\n${error.stack || ""}`;
-      if (isPolicyCausedBrowserError(detail)) {
+      const fetchFailure = parseAgentFetchFailure(error.message);
+      if (fetchFailure && isBlockedAgentUrl(fetchFailure.url)) {
         record(
           "debug",
           "browser.page.error.policy-blocked",
           "Correlated a page exception with a blocked agent effect",
-          { reason: latestAgentEffectBlock.request.reason }
+          diagnosticUrl(fetchFailure.url)
         );
         return;
       }
-      pageErrors.push({ message: error.message });
+      pageErrors.push({ message: fetchFailure?.message || error.message });
       record("error", "browser.page.error", "The page raised an uncaught exception");
     });
     page.on("requestfailed", (request) => {
@@ -1603,16 +1709,18 @@ export function createScoutRunner({
       }
     });
     async function collectAgentGuardAttempts() {
-      const attempts = await page
-        .evaluate(() => {
-          const guard = globalThis.__yellowbirdAgentActionGuard;
-          if (!guard) return [];
-          guard.observeCurrentUrl();
-          const observed = guard.attempts;
-          guard.attempts = [];
-          return observed;
-        })
-        .catch(() => []);
+      const currentUrl = page.url();
+      if (
+        agentNetworkPolicyActive &&
+        currentUrl !== "about:blank" &&
+        !isAgentUrlAllowed(currentUrl, authorization.origin)
+      ) {
+        enqueueAgentGuardAttempt({
+          kind: "prohibited-navigation",
+          url: currentUrl
+        });
+      }
+      const attempts = agentGuardAttempts.splice(0);
       for (const attempt of attempts) {
         addBlockedRequest({
           method: "BROWSER",
@@ -1628,18 +1736,27 @@ export function createScoutRunner({
         );
       }
     }
-    async function closeAgentNavigationWindow() {
+    async function activateAgentGuard(action) {
+      const accepted = await page.evaluate(
+        ({ action: nextAction, controlName, controlToken }) =>
+          globalThis[controlName]?.(controlToken, nextAction),
+        {
+          action,
+          controlName: agentGuardControlName,
+          controlToken: agentGuardControlToken
+        }
+      );
+      if (!accepted) {
+        throw new Error(
+          "YellowBird browser guard rejected an authenticated transition"
+        );
+      }
+    }
+    async function closeAgentNavigationWindow(requireGuard = true) {
       if (agentActionContext) {
         agentActionContext.navigationWindowOpen = false;
       }
-      await page
-        .evaluate(() => {
-          const guard = globalThis.__yellowbirdAgentActionGuard;
-          if (!guard) return;
-          guard.active = true;
-          guard.action = "visit";
-        })
-        .catch(() => {});
+      if (requireGuard) await activateAgentGuard("visit");
     }
     page.on("response", (response) => {
       if (
@@ -1669,7 +1786,7 @@ export function createScoutRunner({
         ...diagnosticUrl(page.url())
       });
       await page.waitForTimeout(AGENT_NAVIGATION_SETTLEMENT_MS);
-      if (agentNetworkPolicyActive) await closeAgentNavigationWindow();
+      if (agentNetworkPolicyActive) await closeAgentNavigationWindow(false);
       state.assertionTitle = await page.title().catch(() => "");
       state.assertionBodyText = await page
         .locator("body")
@@ -1690,7 +1807,7 @@ export function createScoutRunner({
       );
     } finally {
       if (agentNetworkPolicyActive) {
-        await closeAgentNavigationWindow();
+        await closeAgentNavigationWindow(false);
         await collectAgentGuardAttempts();
       }
     }
@@ -1868,11 +1985,7 @@ export function createScoutRunner({
                     navigationRequests: new Set(),
                     navigationWindowOpen: action.action === "visit"
                   };
-                  await page.evaluate((activeAction) => {
-                    const guard = globalThis.__yellowbirdAgentActionGuard;
-                    guard.active = true;
-                    guard.action = activeAction;
-                  }, action.action);
+                  await activateAgentGuard(action.action);
                 },
                 async resume() {
                   await closeAgentNavigationWindow();

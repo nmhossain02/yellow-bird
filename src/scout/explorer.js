@@ -368,18 +368,23 @@ async function snapshotPage(page, authorizedOrigin) {
     limits: SNAPSHOT_LIMITS,
     prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN
   });
+  const accessibleSnapshots = await Promise.all(
+    raw.elements.map(async (rawElement) => {
+      try {
+        return await page
+          .locator(
+            `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`
+          )
+          .ariaSnapshot({ timeout: 250 });
+      } catch {
+        return null;
+      }
+    })
+  );
   const elements = [];
-  for (const rawElement of raw.elements) {
-    let accessibleSnapshot;
-    try {
-      accessibleSnapshot = await page
-        .locator(
-          `[data-yellowbird-agent-ref=${JSON.stringify(rawElement.ref)}]`
-        )
-        .ariaSnapshot();
-    } catch {
-      continue;
-    }
+  for (const [index, rawElement] of raw.elements.entries()) {
+    const accessibleSnapshot = accessibleSnapshots[index];
+    if (accessibleSnapshot === null) continue;
     const decodedAccessibleSnapshot = decodeAgentText(accessibleSnapshot);
     if (
       decodedAccessibleSnapshot === null ||

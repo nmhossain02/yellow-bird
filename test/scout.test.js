@@ -255,6 +255,18 @@ beforeAll(async () => {
     const sameDocumentDestination = request.url?.startsWith(
       "/agent-same-document-destination"
     );
+    const guardTamperSurface = request.url?.startsWith(
+      "/agent-guard-tamper-surface"
+    );
+    const guardTamperDestination = request.url?.startsWith(
+      "/agent-guard-tamper-destination"
+    );
+    const errorCorrelationSurface = request.url?.startsWith(
+      "/agent-error-correlation-surface"
+    );
+    const detachingSurface = request.url?.startsWith(
+      "/agent-detaching-surface"
+    );
     const snapshotBoundary = request.url?.startsWith(
       "/agent-snapshot-boundary"
     );
@@ -468,6 +480,82 @@ beforeAll(async () => {
             <script>
               history.pushState({}, "", "/auth_callback");
               history.replaceState({}, "", "/agent-same-document-destination");
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (guardTamperSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Guard tamper surface</title></head>
+          <body><a href="/agent-guard-tamper-destination">Setup route</a></body>
+        </html>`);
+      return;
+    }
+    if (guardTamperDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Guard tamper destination</title></head>
+          <body>
+            <input name="query" aria-label="Query">
+            <script>
+              const controlName = Object.getOwnPropertyNames(globalThis)
+                .find((name) => name.startsWith("__yellowbird_"));
+              globalThis[controlName]?.("attacker-token", "fill");
+              try {
+                Object.defineProperty(globalThis, controlName, {
+                  value: () => true
+                });
+              } catch {}
+              globalThis.__yellowbirdAgentActionGuard = {
+                active: false,
+                attempts: [],
+                observeCurrentUrl() {}
+              };
+              history.pushState({}, "", "/auth_callback");
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (errorCorrelationSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Error correlation surface</title></head>
+          <body>
+            <button id="preview" type="button">View preview</button>
+            <script>
+              document.querySelector("#preview").addEventListener("click", () => {
+                fetch("/agent-read-mutation");
+                Promise.reject(new TypeError("Failed to fetch catalog independently"));
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (detachingSurface) {
+      const links = Array.from(
+        { length: 30 },
+        (_, index) => `<a href="/agent-flow?item=${index}">Setup ${index}</a>`
+      ).join("");
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Detaching controls</title></head>
+          <body>
+            ${links}
+            <script>
+              const observer = new MutationObserver((records) => {
+                if (!records.some((record) => record.attributeName === "data-yellowbird-agent-ref")) return;
+                document.querySelectorAll("a").forEach((element) => element.remove());
+                observer.disconnect();
+              });
+              observer.observe(document.body, {
+                attributeFilter: ["data-yellowbird-agent-ref"],
+                attributes: true,
+                subtree: true
+              });
             </script>
           </body>
         </html>`);
@@ -1123,6 +1211,60 @@ test("same-document auth routing invalidates an agent visit", async () => {
   assert.match(regression, /url\.search\.replaceAll\("\+", " "\)/);
 });
 
+test("page code cannot disable the agent navigation guard", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-guard-tamper-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "Open the supplied setup route.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The setup route was observed.",
+          coverage: "covered",
+          summary: "The setup route was observed."
+        };
+  })({
+    target: `${target}/agent-guard-tamper-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-prohibited-navigation"
+    )
+  );
+  assert.equal(
+    report.observations.exploration.steps[0].url,
+    `${target}/agent-guard-tamper-destination`
+  );
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.notEqual(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.match(`${replay.stdout}\n${replay.stderr}`, /prohibited-navigation/);
+}, 30_000);
+
 test("mutation-oriented intent remains inconclusive at the safe boundary", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-mutation-")
@@ -1369,6 +1511,59 @@ test("agent action broker and replay block read-method mutation behind safe-look
   assert.equal(readMutationRequestCount, 0);
 }, 30_000);
 
+test("blocked fetch attribution preserves an independent page error", async () => {
+  readMutationRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-error-correlation-")
+  );
+  let planningCall = 0;
+  const report = await createAgentRunner((request) => {
+    const availableElements = JSON.parse(
+      request.messages.at(-1).content
+    ).page.availableElements;
+    planningCall += 1;
+    return planningCall === 1
+      ? {
+          action: "act",
+          elementRef: availableElements[0].ref,
+          value: null,
+          rationale: "View the supplied preview control.",
+          coverage: "continue",
+          summary: ""
+        }
+      : {
+          action: "finish",
+          elementRef: null,
+          value: null,
+          rationale: "The preview control was inspected.",
+          coverage: "covered",
+          summary: "The preview control was inspected."
+        };
+  })({
+    target: `${target}/agent-error-correlation-surface`,
+    intent: "Assess the preview interaction",
+    exploreIntent: true,
+    outputDirectory
+  });
+
+  assert.equal(readMutationRequestCount, 0);
+  assert.equal(report.outcome, "attention");
+  assert.equal(report.observations.pageErrors.length, 1);
+  assert.match(
+    report.observations.pageErrors[0].message,
+    /Failed to fetch catalog independently/
+  );
+  assert.doesNotMatch(
+    JSON.stringify(report.observations.pageErrors),
+    /__yellowbird_fetch_failure__/
+  );
+  assert.ok(
+    report.observations.blockedRequests.some(
+      (request) => request.reason === "agent-non-visit-request"
+    )
+  );
+});
+
 test("agent action guards block effects delayed between planning rounds", async () => {
   delayedReadMutationRequestCount = 0;
   const outputDirectory = await mkdtemp(
@@ -1541,6 +1736,30 @@ test("agent snapshots bound page fields, select options, and total prompt size",
   assert.ok(JSON.stringify(firstPlannerInput.page).length < 50_000);
   assert.equal(report.observations.exploration.steps.length, 1);
 });
+
+test("detached accessible-name candidates are skipped within a bounded interval", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-detaching-snapshot-")
+  );
+  let planningCalls = 0;
+  const startedAt = Date.now();
+  const report = await createAgentRunner(() => {
+    planningCalls += 1;
+    throw new Error("detached controls must not reach the planner");
+  })({
+    target: `${target}/agent-detaching-surface`,
+    intent: "Assess the basic user flow",
+    exploreIntent: true,
+    outputDirectory,
+    timeoutMs: 500
+  });
+  const durationMs = Date.now() - startedAt;
+
+  assert.equal(planningCalls, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.invalidTestMechanics[0].id, "agent-no-authorized-actions");
+  assert.ok(durationMs < 2_000, `snapshot took ${durationMs} ms`);
+}, 5_000);
 
 test("agent action broker blocks GET form submission", async () => {
   submissionRequestCount = 0;
@@ -2034,6 +2253,7 @@ test("CLI intent runs a real bounded agent loop through a compatible endpoint", 
         target,
         "--intent",
         "Assess the initial interface and basic user flow",
+        "--no-agent",
         "--engine-base-url",
         `http://127.0.0.1:${engineServer.address().port}/v1`,
         "--engine-model",

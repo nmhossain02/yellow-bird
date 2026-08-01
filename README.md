@@ -112,11 +112,12 @@ yellowbird scout \
 Outside a versioned scenario, an explicit `--intent` enables bounded agent
 exploration. `--agent` opts into the same loop with the default initial-page
 intent. The interaction budget defaults to four steps; `--max-agent-steps`
-accepts values from `1` through `20`. `--no-agent` is an explicit opt-out even
-when combined with `--intent`; that combination performs only an initial-page
-smoke check and does not claim intent coverage. Use a versioned `--scenario`
-when the owner needs an exact workflow with mutation-capable actions and
-explicit assertions.
+accepts values from `1` through `20`. An explicit `--intent` takes precedence
+over `--no-agent`; YellowBird never turns a requested intent into an
+initial-page-only clear result. `--no-agent` can suppress a default loop
+requested only through `--agent`. Use a versioned `--scenario` when the owner
+needs an exact deterministic workflow, including an empty initial-page smoke
+check or mutation-capable actions with explicit assertions.
 
 The compatible endpoint can be selected per command:
 
@@ -182,7 +183,9 @@ Before authorizing controls or requests, YellowBird repeatedly percent-decodes
 URL and control semantics, considers computed accessible names including
 `aria-labelledby`, and fails closed when encoded text or a referenced label
 cannot be resolved. Browser guards are installed before destination scripts
-run. Agent document visits are mediated with automatic redirects disabled so
+run, keep their enforcement state outside page-accessible objects, and report
+blocked browser operations through a per-run channel. Agent document visits
+are mediated with automatic redirects disabled so
 each redirect must pass policy before its destination can load. During the
 initial target load and each authorized visit, exact-origin `GET` and `HEAD`
 non-document requests, including `EventSource`, are allowed only through a
