@@ -140,6 +140,10 @@ const scout = await run(
     "/assets/*",
     "--agent-load-route",
     "/static/*",
+    "--agent-load-route",
+    "/api/v1/monitors",
+    "--agent-load-route",
+    "/api/v1/events",
     "--output",
     outputDirectory,
     "--verbose"
