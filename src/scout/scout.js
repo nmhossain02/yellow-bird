@@ -946,7 +946,10 @@ export function createScoutRunner({
   });
   let browser;
   try {
-    browser = await launchBrowser({ headless: !options.headed });
+    browser = await launchBrowser({
+      headless: !options.headed,
+      timeout: options.timeoutMs
+    });
     state.browserLaunch.successful = true;
     record("info", "browser.launch.completed", "Playwright Chromium launched");
   } catch (error) {

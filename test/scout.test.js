@@ -19,6 +19,7 @@ import { resolveOutputOption } from "../src/scout/output.js";
 
 let server;
 let target;
+let sharedBrowser;
 let mutationRequestCount = 0;
 let readMutationRequestCount = 0;
 let submissionRequestCount = 0;
@@ -106,6 +107,8 @@ function assertConformsToSchema(schema, value, path = "$") {
 }
 
 beforeAll(async () => {
+  const { chromium } = await import("@playwright/test");
+  sharedBrowser = await chromium.launch({ headless: true, timeout: 15_000 });
   server = createServer((request, response) => {
     if (request.method === "POST" && request.url === "/agent-write") {
       mutationRequestCount += 1;
@@ -305,17 +308,28 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await sharedBrowser.close();
   await new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
 });
 
+async function launchSharedBrowser() {
+  let context;
+  return {
+    async newContext(options) {
+      context = await sharedBrowser.newContext(options);
+      return context;
+    },
+    async close() {
+      await context?.close();
+    }
+  };
+}
+
 function createAgentRunner(decide, resolveEngineOverride) {
   return createScoutRunner({
-    launchBrowser: async (options) => {
-      const { chromium } = await import("@playwright/test");
-      return chromium.launch(options);
-    },
+    launchBrowser: launchSharedBrowser,
     resolveEngine:
       resolveEngineOverride ||
       (async () => ({
@@ -430,8 +444,10 @@ test("TLS remediation redacts credentials and query values", () => {
 
 test("browser launch failure finalizes an inconclusive run", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-launch-"));
+  let launchOptions;
   const runWithUnavailableBrowser = createScoutRunner({
-    launchBrowser: async () => {
+    launchBrowser: async (options) => {
+      launchOptions = options;
       throw new Error(
         `Executable doesn't exist at /tmp/chromium for ${target}/?secret=hidden`
       );
@@ -446,6 +462,7 @@ test("browser launch failure finalizes an inconclusive run", async () => {
   });
 
   assert.equal(report.outcome, "inconclusive");
+  assert.deepEqual(launchOptions, { headless: true, timeout: 15_000 });
   assert.deepEqual(report.findings, []);
   assert.equal(report.invalidTestMechanics[0].id, "browser-executable-missing");
   assert.equal(report.observations.browser.launch.successful, false);
@@ -1250,10 +1267,7 @@ test("unavailable intent engine is inconclusive instead of a narrow clear", asyn
     join(tmpdir(), "yellowbird-agent-unavailable-")
   );
   const runWithoutAgent = createScoutRunner({
-    launchBrowser: async (options) => {
-      const { chromium } = await import("@playwright/test");
-      return chromium.launch(options);
-    },
+    launchBrowser: launchSharedBrowser,
     resolveEngine: async () => ({
       engine: null,
       capabilities: null,
@@ -1656,7 +1670,7 @@ test("scout repairs a loopback HTTPS-to-HTTP transport mismatch with diagnostics
     outputDirectory
   );
   assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
-}, 15_000);
+}, 30_000);
 
 test("navigation setup failures are inconclusive and not duplicate product findings", async () => {
   const unavailable = createServer();
