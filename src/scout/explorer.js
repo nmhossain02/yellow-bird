@@ -25,7 +25,8 @@ const SNAPSHOT_LIMITS = Object.freeze({
   optionLabel: 240,
   optionValue: 200,
   labelCount: 20,
-  labelledByCount: 20
+  labelledByCount: 20,
+  traversalNodeCount: 5_000
 });
 const ACTION_SCHEMA = {
   type: "object",
@@ -304,21 +305,65 @@ async function snapshotPage(
       remainingCharacters -= length;
       return text.slice(0, length);
     };
+    const boundedNodeText = (root, maximum) => {
+      if (!root || maximum <= 0) return "";
+      const chunks = [];
+      let characters = 0;
+      let visitedNodes = 0;
+      const textWalker = document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT
+      );
+      while (
+        characters < maximum &&
+        visitedNodes < limits.traversalNodeCount
+      ) {
+        const textNode = textWalker.nextNode();
+        if (!textNode) break;
+        visitedNodes += 1;
+        if (textNode.nodeType !== Node.TEXT_NODE) continue;
+        const parent = textNode.parentElement;
+        if (
+          !parent ||
+          parent.hidden ||
+          parent.getAttribute("aria-hidden") === "true" ||
+          ["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(parent.tagName)
+        ) {
+          continue;
+        }
+        const text = String(textNode.nodeValue || "");
+        if (!text) continue;
+        const separatorLength = chunks.length ? 1 : 0;
+        const available = maximum - characters - separatorLength;
+        if (available <= 0) break;
+        chunks.push(text.slice(0, available));
+        characters += separatorLength + Math.min(text.length, available);
+      }
+      return chunks.join(" ");
+    };
     const url = String(window.location.href);
     if (url.length > limits.url || url.length > remainingCharacters) {
       throw new Error("page URL exceeded the snapshot limit");
     }
     remainingCharacters -= url.length;
     const title = takeText(document.title, limits.fieldText);
-    const bodyText = takeText(document.body?.innerText || "", limits.bodyText);
+    const bodyText = takeText(
+      boundedNodeText(document.body, limits.bodyText),
+      limits.bodyText
+    );
     const candidateElements = [];
     const walker = document.createTreeWalker(
       document.documentElement,
       NodeFilter.SHOW_ELEMENT
     );
-    while (candidateElements.length < limits.elementCount) {
+    let visitedElementNodes = 0;
+    while (
+      candidateElements.length < limits.elementCount &&
+      visitedElementNodes < limits.traversalNodeCount
+    ) {
       const candidate = walker.nextNode();
       if (!candidate) break;
+      visitedElementNodes += 1;
       if (candidate.matches("a[href], button, input, textarea, select")) {
         candidateElements.push(candidate);
       }
@@ -328,7 +373,7 @@ async function snapshotPage(
         const tag = element.tagName.toLowerCase();
         if ((element.labels?.length || 0) > limits.labelCount) return [];
         const labelTexts = Array.from(element.labels || [], (labelElement) =>
-          String(labelElement.innerText || labelElement.textContent || "")
+          boundedNodeText(labelElement, limits.fieldText + 1)
         );
         const ariaLabel = element.getAttribute("aria-label") || "";
         const ariaLabelledBy = element.getAttribute("aria-labelledby") || "";
@@ -342,15 +387,16 @@ async function snapshotPage(
         );
         if (ariaLabelledByElements.some((candidate) => !candidate)) return [];
         const ariaLabelledByTexts = ariaLabelledByElements.map((candidate) =>
-          String(candidate.innerText || candidate.textContent || "")
+          boundedNodeText(candidate, limits.fieldText + 1)
         );
         const placeholder = element.getAttribute("placeholder") || "";
+        const elementText = boundedNodeText(element, limits.fieldText + 1);
         const label =
           ariaLabel ||
           ariaLabelledByTexts.join(" ") ||
           labelTexts.join(" ") ||
           placeholder ||
-          element.textContent ||
+          elementText ||
           element.getAttribute("name") ||
           tag;
         const role =
@@ -364,13 +410,33 @@ async function snapshotPage(
                   ? "spinbutton"
                   : "textbox";
         const form = element.form || element.closest("form");
+        let formHasPassword = false;
+        if (form) {
+          const formElements = form.elements || [];
+          if (formElements.length > limits.traversalNodeCount) {
+            formHasPassword = true;
+          } else {
+            for (let formIndex = 0; formIndex < formElements.length; formIndex += 1) {
+              const formElement = formElements.item(formIndex);
+              if (
+                formElement?.tagName === "INPUT" &&
+                String(formElement.type).toLowerCase() === "password"
+              ) {
+                formHasPassword = true;
+                break;
+              }
+            }
+          }
+        }
         if (tag === "select" && element.options.length > limits.optionCount) {
           return [];
         }
         const optionRecords =
           tag === "select"
             ? Array.from(element.options, (option) => ({
-                label: String(option.textContent || option.value),
+                label:
+                  boundedNodeText(option, limits.optionLabel + 1) ||
+                  String(option.value),
                 value: String(option.value)
               }))
             : [];
@@ -383,7 +449,7 @@ async function snapshotPage(
           [ariaLabelledBy, limits.fieldText],
           ...ariaLabelledByTexts.map((value) => [value, limits.fieldText]),
           [placeholder, limits.fieldText],
-          [element.textContent, limits.fieldText],
+          [elementText, limits.fieldText],
           [element.href, limits.url],
           [form?.action, limits.url],
           [window.location.href, limits.url],
@@ -393,7 +459,7 @@ async function snapshotPage(
           ])
         ].filter(([value]) => value !== null && value !== undefined);
         if (
-          form?.querySelector('input[type="password"]') ||
+          formHasPassword ||
           safetyFields.some(
             ([value, maximum]) =>
               String(value).length > maximum || hasProhibitedText(value)
@@ -417,7 +483,7 @@ async function snapshotPage(
           ariaLabelledBy,
           disabled: Boolean(element.disabled),
           formAction: form?.action ? String(form.action) : null,
-          formHasPassword: Boolean(form?.querySelector('input[type="password"]')),
+          formHasPassword,
           options: optionRecords
         };
         const candidateCharacters = JSON.stringify(candidate).length;

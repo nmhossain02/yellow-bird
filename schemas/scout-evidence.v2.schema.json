@@ -259,6 +259,33 @@
               ]
             },
             "issue": { "type": ["object", "null"] },
+            "routePolicy": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "required": [
+                    "primaryRoutes",
+                    "navigationRoutes",
+                    "loadRoutes"
+                  ],
+                  "properties": {
+                    "primaryRoutes": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    },
+                    "navigationRoutes": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    },
+                    "loadRoutes": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    }
+                  }
+                }
+              ]
+            },
             "verification": {
               "oneOf": [
                 { "type": "null" },

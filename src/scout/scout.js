@@ -247,6 +247,9 @@ ${workflowRows}
 - Status: ${exploration.status}
 - Coverage: ${exploration.coverage}
 - Coverage authority: ${exploration.verification ? `${exploration.verification.authority} (${exploration.verification.profile}, ${exploration.verification.satisfied ? "satisfied" : "unsatisfied"})` : "unverified model advisory (cannot authorize covered coverage)"}
+- Primary route authority: ${exploration.routePolicy?.primaryRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
+- Navigation route authority: ${exploration.routePolicy?.navigationRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
+- Load route authority: ${exploration.routePolicy?.loadRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
 - Engine: ${markdownEscape(exploration.engine || "not used")}
 - Coverage summary: ${markdownEscape(exploration.summary || "none")}
 
@@ -1614,6 +1617,13 @@ export function createScoutRunner({
       summary: "",
       steps: [],
       pages: [],
+      routePolicy: exploreIntent
+        ? {
+            primaryRoutes: [...options.agentPrimaryRoutes],
+            navigationRoutes: [...options.agentNavigationRoutes],
+            loadRoutes: [...options.agentLoadRoutes]
+          }
+        : null,
       verification: null,
       engine: null,
       capabilities: null,

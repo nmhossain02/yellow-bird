@@ -218,6 +218,9 @@ owner-declared exact-origin `GET` and `HEAD` non-document request URLs, includin
 Allowed response bodies continue streaming without YellowBird buffering them.
 Later network requests outside an explicitly mediated visit document chain are
 blocked, and WebSockets are blocked throughout agent mode.
+The evidence JSON and Markdown report retain the normalized primary, navigation,
+and load-route declarations used for both the coverage decision and browser
+enforcement.
 
 The generated regression re-enforces the live scout's exact-origin, read-only,
 redirect, and 150 ms visit-settlement guards, including submission and outbound

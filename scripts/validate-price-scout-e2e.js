@@ -20,11 +20,14 @@ function requireCondition(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-async function run(command, cwd) {
+const externalCommandEnvironment = { ...process.env };
+delete externalCommandEnvironment.YELLOWBIRD_ENGINE_API_KEY;
+
+async function run(command, cwd, env) {
   const child = Bun.spawn({
     cmd: command,
     cwd,
-    env: process.env,
+    env,
     stdout: "pipe",
     stderr: "pipe"
   });
@@ -36,8 +39,8 @@ async function run(command, cwd) {
   return { exitCode, stdout, stderr };
 }
 
-async function checked(command, cwd, description) {
-  const result = await run(command, cwd);
+async function checked(command, cwd, description, env) {
+  const result = await run(command, cwd, env);
   if (result.exitCode !== 0) {
     throw new Error(
       `${description} failed with exit ${result.exitCode}\n${result.stdout}\n${result.stderr}`
@@ -68,7 +71,8 @@ requireCondition(
 const origin = await checked(
   ["git", "remote", "get-url", "origin"],
   priceScoutDirectory,
-  "Price Scout origin verification"
+  "Price Scout origin verification",
+  externalCommandEnvironment
 );
 requireCondition(
   canonicalRepository(origin) === expectedRepository,
@@ -77,12 +81,14 @@ requireCondition(
 const priceScoutCommit = await checked(
   ["git", "rev-parse", "HEAD"],
   priceScoutDirectory,
-  "Price Scout revision verification"
+  "Price Scout revision verification",
+  externalCommandEnvironment
 );
 const priceScoutStatus = await checked(
   ["git", "status", "--porcelain"],
   priceScoutDirectory,
-  "Price Scout checkout cleanliness verification"
+  "Price Scout checkout cleanliness verification",
+  externalCommandEnvironment
 );
 requireCondition(
   priceScoutStatus === "",
@@ -91,12 +97,14 @@ requireCondition(
 await checked(
   ["make", "up"],
   priceScoutDirectory,
-  "Price Scout target startup from the verified checkout"
+  "Price Scout target startup from the verified checkout",
+  externalCommandEnvironment
 );
 const startedPriceScoutCommit = await checked(
   ["git", "rev-parse", "HEAD"],
   priceScoutDirectory,
-  "Started Price Scout revision verification"
+  "Started Price Scout revision verification",
+  externalCommandEnvironment
 );
 requireCondition(
   startedPriceScoutCommit === priceScoutCommit,
@@ -148,7 +156,8 @@ const scout = await run(
     outputDirectory,
     "--verbose"
   ],
-  priceScoutDirectory
+  priceScoutDirectory,
+  process.env
 );
 requireCondition(
   scout.exitCode === 0,
@@ -176,6 +185,19 @@ requireCondition(
     evidence.observations.exploration.verification?.satisfied === true,
   "The owned initial-interface basic-flow profile was not satisfied"
 );
+const routePolicy = evidence.observations.exploration.routePolicy;
+requireCondition(
+  routePolicy?.primaryRoutes.some(
+    (route) => new URL(route).pathname === "/monitors/new"
+  ) &&
+    routePolicy.loadRoutes.some(
+      (route) => new URL(route).pathname === "/api/v1/monitors"
+    ) &&
+    routePolicy.loadRoutes.some(
+      (route) => new URL(route).pathname === "/api/v1/events"
+    ),
+  "The evidence did not preserve the declared Price Scout route authority"
+);
 const passedMonitorVisit = evidence.observations.exploration.steps.some(
   (step) =>
     step.action === "visit" &&
@@ -191,8 +213,18 @@ requireCondition(
   `Expected the Price Scout title, received ${evidence.observations.title}`
 );
 
-await checked([process.execPath, "install"], outputDirectory, "Replay dependency installation");
-await checked([process.execPath, "run", "test"], outputDirectory, "Portable replay");
+await checked(
+  [process.execPath, "install"],
+  outputDirectory,
+  "Replay dependency installation",
+  externalCommandEnvironment
+);
+await checked(
+  [process.execPath, "run", "test"],
+  outputDirectory,
+  "Portable replay",
+  externalCommandEnvironment
+);
 
 process.stdout.write(
   `${JSON.stringify(

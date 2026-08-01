@@ -39,9 +39,10 @@ read-only agent route, the application's asset prefixes declared as prefix load
 routes, and `/api/v1/monitors` plus `/api/v1/events` declared as exact load
 routes. It requires the observed
 `initial-interface-basic-flow.v1` profile, requires a passed visit to
-`/monitors/new`, installs the generated replay bundle, and runs that replay from
-its independent temporary artifact directory. The default external checkout
-remains uncommitted because `test/fixtures/external/` is ignored.
+`/monitors/new`, verifies that the evidence retains the declared primary and API
+load-route authority, installs the generated replay bundle, and runs that replay
+from its independent temporary artifact directory. The default external
+checkout remains uncommitted because `test/fixtures/external/` is ignored.
 Target and health endpoint overrides are rejected so the configured URL cannot
 be redirected to a service unrelated to the stack started by this gate.
 

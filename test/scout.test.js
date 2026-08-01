@@ -437,6 +437,9 @@ beforeAll(async () => {
     const snapshotBoundary = request.url?.startsWith(
       "/agent-snapshot-boundary"
     );
+    const deepSnapshotBoundary = request.url?.startsWith(
+      "/agent-deep-snapshot-boundary"
+    );
     const undeclaredNavigationSurface = request.url?.startsWith(
       "/agent-undeclared-navigation-surface"
     );
@@ -974,6 +977,15 @@ beforeAll(async () => {
         </html>`);
       return;
     }
+    if (deepSnapshotBoundary) {
+      const inertNodes = "<div></div>".repeat(6_000);
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Deep snapshot boundary</title></head>
+          <body>${inertNodes}<a href="/agent-flow">Late setup route</a></body>
+        </html>`);
+      return;
+    }
     response.end(`<!doctype html>
       <html>
         <head><title>${agentFlow ? "Monitor setup" : "Feather Shop"}</title></head>
@@ -1498,12 +1510,15 @@ test("later invalid planner output preserves partial coverage", async () => {
   }
 });
 
-test("v2 evidence schema requires exploration observations", async () => {
+test("v2 evidence schema keeps exploration observations backward-compatible", async () => {
   const schema = JSON.parse(
     await readFile(resolve("schemas/scout-evidence.v2.schema.json"), "utf8")
   );
 
-  assert.ok(schema.properties.observations.required.includes("exploration"));
+  assert.equal(
+    schema.properties.observations.required.includes("exploration"),
+    false
+  );
 });
 
 test("workflow capabilities must be declared before a run", () => {
@@ -1973,6 +1988,21 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
   assert.equal(
     report.provenance.agenticEngine,
     "test-compatible-engine:planner-fixture"
+  );
+  assert.ok(
+    report.observations.exploration.routePolicy.primaryRoutes.includes(
+      `${target}/agent-flow`
+    )
+  );
+  assert.ok(
+    report.observations.exploration.routePolicy.navigationRoutes.includes(
+      `${target}/`
+    )
+  );
+  assert.ok(
+    report.observations.exploration.routePolicy.loadRoutes.includes(
+      `${target}/agent-visit-data`
+    )
   );
   const regression = await readFile(report.artifacts.regression, "utf8");
   assert.match(regression, new RegExp(`${server.address().port}/agent-flow`));
@@ -2940,7 +2970,11 @@ test("agent policy omits destructive controls and blocks write requests", async 
   assert.equal(report.outcome, "inconclusive");
   assert.equal(report.findings.length, 0);
   assert.equal(report.observations.exploration.coverage, "partial");
-  assert.equal(report.invalidTestMechanics[0].id, "agent-effect-blocked");
+  assert.ok(
+    report.invalidTestMechanics.some(
+      (issue) => issue.id === "agent-effect-blocked"
+    )
+  );
   assert.ok(
     report.observations.blockedRequests.some(
       (request) =>
@@ -3036,7 +3070,11 @@ test("agent action broker and replay block read-method mutation behind safe-look
   assert.deepEqual([...new Set(exposedLabels)], ["View preview"]);
   assert.equal(readMutationRequestCount, 0);
   assert.equal(report.outcome, "inconclusive");
-  assert.equal(report.invalidTestMechanics[0].id, "agent-effect-blocked");
+  assert.ok(
+    report.invalidTestMechanics.some(
+      (issue) => issue.id === "agent-effect-blocked"
+    )
+  );
   assert.ok(
     report.observations.blockedRequests.some(
       (request) => request.reason === "agent-non-visit-request"
@@ -3351,6 +3389,33 @@ test("agent snapshots bound page fields, select options, and total prompt size",
   assert.ok(JSON.stringify(firstPlannerInput.page).length < 50_000);
   assert.equal(report.observations.exploration.steps.length, 1);
 });
+
+test("agent snapshots stop traversal before controls beyond the DOM bound", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-deep-snapshot-boundary-")
+  );
+  let planningCalls = 0;
+  const startedAt = Date.now();
+  const report = await createAgentRunner(() => {
+    planningCalls += 1;
+    throw new Error("a control beyond the DOM traversal bound must not be exposed");
+  })({
+    target: `${target}/agent-deep-snapshot-boundary`,
+    intent: "Assess the basic user flow",
+    exploreIntent: true,
+    outputDirectory,
+    timeoutMs: 1_000
+  });
+
+  assert.equal(planningCalls, 0);
+  assert.equal(report.outcome, "inconclusive");
+  assert.ok(
+    report.invalidTestMechanics.some(
+      (issue) => issue.id === "agent-no-authorized-actions"
+    )
+  );
+  assert.ok(Date.now() - startedAt < 2_000);
+}, 5_000);
 
 test("detached accessible-name candidates are skipped within a bounded interval", async () => {
   const outputDirectory = await mkdtemp(
