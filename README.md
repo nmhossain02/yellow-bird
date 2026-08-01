@@ -179,13 +179,14 @@ This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
 scoped run grants, sandboxing, and policy approval before they are enabled.
 
-An explicit natural-language intent may visit owner-declared exact-origin
-links, fill
-eligible fields with YellowBird-owned synthetic values, select supplied options,
-and use non-submit buttons whose labels do not indicate a destructive or
-mutation-oriented action. YellowBird applies the same semantic denial to every
-control type and blocks non-read HTTP methods, destructive request URLs, and
-outbound WebSocket messages throughout agent exploration. Form submission,
+An explicit natural-language intent may visit owner-declared exact-origin links,
+fill eligible fields with YellowBird-owned synthetic values, select supplied
+options, and use a narrow allowlist of read-only non-submit buttons whose labels
+begin with `collapse`, `detail`, `details`, `expand`, `hide`, `inspect`,
+`preview`, `reveal`, `show`, `toggle`, or `view`. YellowBird applies the same
+semantic denial to every control type and blocks non-read HTTP methods,
+destructive request URLs, and outbound WebSocket messages throughout agent
+exploration. Form submission,
 authentication, credential use, cross-origin navigation, and destructive
 controls are not available to the model as actions. The model proposes one
 supplied element at a time; YellowBird validates and executes the action. Model

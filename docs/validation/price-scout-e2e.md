@@ -35,8 +35,9 @@ checkout, and confirms that the revision did not change during startup. It also
 refuses a non-loopback planning-engine endpoint and verifies loopback engine
 provenance in the resulting evidence. It then runs the same intent scout from
 the Price Scout working directory with `/monitors/new` declared as the primary
-read-only agent route and the application's asset prefixes declared as load
-routes, requires the observed
+read-only agent route, the application's asset prefixes declared as prefix load
+routes, and `/api/v1/monitors` plus `/api/v1/events` declared as exact load
+routes. It requires the observed
 `initial-interface-basic-flow.v1` profile, requires a passed visit to
 `/monitors/new`, installs the generated replay bundle, and runs that replay from
 its independent temporary artifact directory. The default external checkout
