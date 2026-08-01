@@ -199,8 +199,8 @@ options, and use a narrow allowlist of read-only non-submit buttons whose labels
 begin with `collapse`, `detail`, `details`, `expand`, `hide`, `inspect`,
 `preview`, `reveal`, `show`, `toggle`, or `view`. YellowBird applies the same
 semantic denial to every control type and blocks non-read HTTP methods,
-destructive request URLs, and outbound WebSocket messages throughout agent
-exploration. Form submission,
+destructive request URLs, and WebSocket, WebTransport, and WebRTC connections
+throughout agent exploration. Form submission,
 authentication, credential use, cross-origin navigation, and destructive
 controls are not available to the model as actions. The model proposes one
 supplied element at a time; YellowBird validates and executes the action. Model
@@ -231,19 +231,19 @@ owner-declared exact-origin `GET` and `HEAD` non-document request URLs, includin
 `DOMContentLoaded`.
 Allowed response bodies continue streaming without YellowBird buffering them.
 Later network requests outside an explicitly mediated visit document chain are
-blocked, and WebSockets are blocked throughout agent mode.
+blocked, and the non-HTTP transports above remain blocked throughout agent mode.
 The evidence JSON and Markdown report retain the normalized primary, navigation,
 and load-route declarations used for both the coverage decision and browser
 enforcement.
 
 The generated regression re-enforces the live scout's exact-origin, read-only,
-redirect, and 150 ms visit-settlement guards, including submission and outbound
-WebSocket blocking, without calling the model. Every authorized visit attempt is
-retained for replay, including one that failed during the live scout. Recorded
-non-navigation actions also replay through verified locators and assert their
-match counts before using the recorded ordinal. The replay also fails for the
-same exact-origin HTTP response and request failures that produce live product
-findings.
+redirect, and 150 ms visit-settlement guards, including submission and the same
+non-HTTP transport blocking, without calling the model. Every authorized visit
+attempt is retained for replay, including one that failed during the live scout.
+Recorded non-navigation actions also replay through verified locators and assert
+their match counts before using the recorded ordinal. The replay also fails for
+the same exact-origin HTTP response and request failures that produce live
+product findings.
 
 Fetch errors caused by policy enforcement are correlated to the exact blocked
 request occurrence and excluded from product-failure evidence. Independent
