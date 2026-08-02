@@ -146,10 +146,13 @@ Agent document visits require repeated `--agent-primary-route` or
 `--agent-navigation-route` declarations. Primary routes are the owner-identified
 destinations that may satisfy an owned coverage profile. Navigation routes are
 safe to visit but cannot satisfy the primary-route criterion. Same-origin load
-requests are blocked unless their URLs are declared with repeated
-`--agent-load-route` options. Load declarations may end in `*` for an explicit
-path prefix. Relative declarations resolve against the target, and every
-declaration must remain on its exact origin.
+requests made by `fetch`, XHR, event streams, or other active data channels are
+blocked unless their URLs are declared with repeated `--agent-load-route`
+options. Same-origin scripts, stylesheets, images, fonts, media, manifests, and
+text tracks load automatically so a modern application can render. Their
+follow-on effects remain subject to the active request policy. Load declarations
+may end in `*` for an explicit path prefix. Relative declarations resolve
+against the target, and every declaration must remain on its exact origin.
 
 Repeated `--agent-expect-text` declarations bind the owned coverage profile to
 text the owner expects on the visited primary destination. YellowBird records
@@ -280,7 +283,8 @@ Owner-declared scenarios retain their explicit permission model for exact
 `fill`, `click`, `expectText`, and `expectVisible` steps. A failed action is
 reported as `inconclusive`, not as a product pass or product bug, because selector
 healing has not been implemented. That distinction is part of the evidence
-contract.
+contract. Assertions wait up to the configured browser timeout for async page
+transitions and rendering before they fail.
 
 Navigation and transport failures are also `inconclusive` test mechanics rather
 than product findings. The report provides a diagnostic code, remediation, and

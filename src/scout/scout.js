@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import { chromium } from "@playwright/test";
+import { chromium, expect as playwrightExpect } from "@playwright/test";
 import {
   cleanDiagnosticText,
   createDiagnosticRecorder,
@@ -36,6 +36,15 @@ const STEP_CAPABILITIES = {
   expectVisible: "browser.read"
 };
 const SUPPORTED_STEP_ACTIONS = new Set(Object.keys(STEP_CAPABILITIES));
+const PASSIVE_AGENT_RESOURCE_TYPES = new Set([
+  "font",
+  "image",
+  "manifest",
+  "media",
+  "script",
+  "stylesheet",
+  "texttrack"
+]);
 const AGENT_NAVIGATION_SETTLEMENT_MS = 150;
 const SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
 const EVIDENCE_ELEMENT_LIMITS = Object.freeze({
@@ -193,6 +202,22 @@ function normalizeAgentExpectedTexts(value) {
     }
     return normalized;
   });
+}
+
+function isAgentRequestRouteAuthorized(
+  url,
+  resourceType,
+  navigationRoutes,
+  loadRoutes
+) {
+  const normalizedResourceType = String(resourceType || "").toLowerCase();
+  if (normalizedResourceType === "document") {
+    return isAgentRouteAuthorized(url, navigationRoutes);
+  }
+  return (
+    PASSIVE_AGENT_RESOURCE_TYPES.has(normalizedResourceType) ||
+    isAgentRouteAuthorized(url, loadRoutes)
+  );
 }
 
 const AGENT_EXPECTED_CONTROL_TYPES = new Map([
@@ -660,6 +685,7 @@ function buildRegression(options, explorationSteps = []) {
     '  yellowbirdTargetRequestUrl.hash = "";',
     `  const yellowbirdAgentNavigationRoutes = new Set(${quoteForJavaScript(options.agentNavigationRoutes)});`,
     `  const yellowbirdAgentLoadRoutes = new Set(${quoteForJavaScript(options.agentLoadRoutes)});`,
+    `  const yellowbirdPassiveAgentResourceTypes = new Set(${quoteForJavaScript([...PASSIVE_AGENT_RESOURCE_TYPES])});`,
     `  const yellowbirdAgentMode = ${options.exploreIntent};`,
     "  const yellowbirdBlockedUrls = new Set();",
     "  const yellowbirdSameOrigin = value => {",
@@ -725,6 +751,13 @@ function buildRegression(options, explorationSteps = []) {
     "      }",
     "      return false;",
     "    } catch { return false; }",
+    "  };",
+    "  const yellowbirdAgentRequestRouteAllowed = (value, resourceType) => {",
+    '    const normalizedResourceType = String(resourceType || "").toLowerCase();',
+    '    if (normalizedResourceType === "document")',
+    "      return yellowbirdAgentRouteAllowed(value, yellowbirdAgentNavigationRoutes);",
+    "    return yellowbirdPassiveAgentResourceTypes.has(normalizedResourceType) ||",
+    "      yellowbirdAgentRouteAllowed(value, yellowbirdAgentLoadRoutes);",
     "  };",
     "  await page.context().exposeBinding(yellowbirdFetchBindingName, (_source, candidateToken, occurrence) => {",
     "    if (candidateToken !== yellowbirdFetchBindingToken ||",
@@ -939,8 +972,7 @@ function buildRegression(options, explorationSteps = []) {
     "              yellowbirdAgentAction.navigationWindowOpen &&",
     '              ["GET", "HEAD"].includes(event.request.method) &&',
     "              yellowbirdAgentUrlAllowed(redirectUrl) &&",
-    '              yellowbirdAgentRouteAllowed(redirectUrl, event.resourceType === "Document"',
-    "                ? yellowbirdAgentNavigationRoutes : yellowbirdAgentLoadRoutes);",
+    "              yellowbirdAgentRequestRouteAllowed(redirectUrl, event.resourceType);",
           "          } catch {}",
           "          if (!redirectAllowed) {",
           "            for (const url of [...(requestState?.urls || [event.request.url]), redirectUrl])",
@@ -1003,8 +1035,7 @@ function buildRegression(options, explorationSteps = []) {
     "    try {",
     "      const parsedRequestUrl = new URL(requestUrl);",
     "      const safeAgentUrl = yellowbirdAgentUrlAllowed(requestUrl);",
-    '      const safeAgentRoute = yellowbirdAgentRouteAllowed(requestUrl, request.resourceType() === "document"',
-    "        ? yellowbirdAgentNavigationRoutes : yellowbirdAgentLoadRoutes);",
+    "      const safeAgentRoute = yellowbirdAgentRequestRouteAllowed(requestUrl, request.resourceType());",
     "      let safeAgentAction = false;",
     "      if (yellowbirdAgentAction) {",
     '        if (yellowbirdAgentAction.action !== "visit") {',
@@ -2429,11 +2460,11 @@ export function createScoutRunner({
         requestUrl,
         authorization.origin
       );
-      const agentRouteAllowed = isAgentRouteAuthorized(
+      const agentRouteAllowed = isAgentRequestRouteAuthorized(
         requestUrl,
-        route.request().resourceType() === "document"
-          ? agentNavigationRoutes
-          : agentLoadRoutes
+        route.request().resourceType(),
+        agentNavigationRoutes,
+        agentLoadRoutes
       );
       let agentActionAllowed = false;
       if (agentNetworkPolicyActive && agentActionContext && !localResource) {
@@ -2856,11 +2887,11 @@ export function createScoutRunner({
                 agentActionContext.navigationWindowOpen &&
                 ["GET", "HEAD"].includes(event.request.method) &&
                 isAgentUrlAllowed(redirectUrl, authorization.origin) &&
-                isAgentRouteAuthorized(
+                isAgentRequestRouteAuthorized(
                   redirectUrl,
-                  event.resourceType === "Document"
-                    ? agentNavigationRoutes
-                    : agentLoadRoutes
+                  event.resourceType,
+                  agentNavigationRoutes,
+                  agentLoadRoutes
                 );
             } catch {}
             if (!redirectAllowed) {
@@ -3223,16 +3254,13 @@ export function createScoutRunner({
             : step.value;
           await locator.fill(value);
         } else if (step.action === "expectText") {
-          const observed = (await locator.textContent()) || "";
-          if (!observed.includes(step.text)) {
-            throw new Error(
-              `expected ${JSON.stringify(step.text)}, observed ${JSON.stringify(observed.slice(0, 300))}`
-            );
-          }
+          await playwrightExpect(locator).toContainText(step.text, {
+            timeout: options.timeoutMs
+          });
         } else if (step.action === "expectVisible") {
-          if (!(await locator.isVisible())) {
-            throw new Error(`selector was not visible: ${step.selector}`);
-          }
+          await playwrightExpect(locator).toBeVisible({
+            timeout: options.timeoutMs
+          });
         }
 
         workflowSteps.push({

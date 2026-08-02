@@ -164,6 +164,56 @@ beforeAll(async () => {
   const { chromium } = await import("@playwright/test");
   sharedBrowser = await chromium.launch({ headless: true, timeout: 15_000 });
   server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/implicit-static-app.js") {
+      response.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+      response.end(
+        'document.querySelector("#hydration-status").textContent = "Application hydrated";'
+      );
+      return;
+    }
+    if (request.method === "GET" && request.url === "/implicit-static-app.css") {
+      response.writeHead(200, { "content-type": "text/css; charset=utf-8" });
+      response.end("#hydration-status { display: block; }");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/implicit-static-app") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html>
+          <head>
+            <title>Hydrated application</title>
+            <link rel="stylesheet" href="/implicit-static-app.css">
+          </head>
+          <body>
+            <h1 id="hydration-status">Application shell</h1>
+            <script src="/implicit-static-app.js"></script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/delayed-workflow") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Delayed workflow</title></head>
+          <body>
+            <input name="email" aria-label="Email">
+            <button id="checkout">Buy</button>
+            <p id="status"></p>
+            <script>
+              document.querySelector("#checkout").addEventListener("click", () => {
+                setTimeout(() => {
+                  document.querySelector("#status").textContent =
+                    document.querySelector("[name=email]").value
+                      ? "Order ready"
+                      : "Email required";
+                }, 200);
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
     if (request.method === "POST" && request.url === "/agent-write") {
       mutationRequestCount += 1;
       response.writeHead(204);
@@ -2151,6 +2201,41 @@ test("a browser network guard failure cannot produce a clear report", async () =
     /hidden-value/
   );
 });
+
+test("intent exploration loads passive same-origin application assets without declarations", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-static-assets-")
+  );
+  const report = await createAgentRunner(() => ({
+    action: "finish",
+    elementRef: null,
+    value: null,
+    rationale: "The hydrated initial interface was observed.",
+    coverage: "covered",
+    summary: "The hydrated initial interface was observed."
+  }))({
+    target: `${target}/implicit-static-app`,
+    intent: "Assess the initial interface",
+    exploreIntent: true,
+    expectedTexts: ["Application hydrated"],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.findings.length, 0);
+  assert.equal(report.observations.blockedRequests.length, 0);
+  assert.equal(report.observations.consoleErrors.length, 0);
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(regression, /yellowbirdPassiveAgentResourceTypes/);
+
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+}, 30_000);
 
 test("action-policy cleanup failures retain findings and durable evidence", async () => {
   const outputDirectory = await mkdtemp(
@@ -5637,7 +5722,7 @@ test("a markdown output option separates the report from its evidence bundle", a
 test("scout executes a permission-declared workflow and generates its regression", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "yellowbird-workflow-"));
   const report = await runSharedScout({
-    target,
+    target: `${target}/delayed-workflow`,
     intent: "Prepare an order",
     permissions: [
       "browser.navigate",
