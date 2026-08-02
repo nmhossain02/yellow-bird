@@ -54,8 +54,20 @@ The scout reports `attention` and exits `2` when it finds product failures, or
 reports `inconclusive` and exits `3` when test mechanics prevent a trustworthy
 result. Product findings take precedence when both occur, while the mechanics
 issue remains explicit in the report. Invalid input or configuration and
-evidence-bundle persistence failures remain fatal and exit `1`. Runs that reach
-finalization write an evidence bundle under
+evidence-bundle persistence failures remain fatal and exit `1`.
+
+The human report leads with an operational assessment separate from the stable
+machine outcome. `ERROR` means YellowBird could not complete a trustworthy
+evaluation and should be treated as an operational concern until diagnosed.
+`LIMITED` means the runner completed without mechanics errors, but only a smoke
+check or bounded safe exploration ran without a declared functional workflow.
+`ATTENTION` identifies observed product failure signals, and combines with
+`ERROR` when both product findings and run-integrity problems occur. `CLEAR` is
+reserved for completed owner-declared checks. The same summary states the
+YellowBird run status, product signal, and effective scope so a narrow `clear`
+evidence outcome cannot read as broad product health.
+
+Runs that reach finalization write an evidence bundle under
 `.yellowbird/scout/<run-id>/`:
 
 - `report.md` - human-readable findings, reproduction steps, and coverage gaps

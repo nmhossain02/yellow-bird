@@ -1880,6 +1880,16 @@ test("browser launch failure finalizes an inconclusive run", async () => {
   );
   assert.equal(report.artifacts.screenshot, null);
   await assert.rejects(stat(join(outputDirectory, "page.png")));
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(
+    markdown,
+    /> \*\*ERROR\*\* - YellowBird could not complete a trustworthy evaluation\./
+  );
+  assert.match(markdown, /YellowBird run: \*\*ERROR\*\*/);
+  assert.match(
+    markdown,
+    /Product signal: Not established because the evaluation was incomplete or untrustworthy\./
+  );
   await Promise.all(
     Object.entries(report.artifacts)
       .filter(([name]) => name !== "screenshot")
@@ -2208,6 +2218,16 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
     report.provenance.agenticEngine,
     "test-compatible-engine:planner-fixture"
   );
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(
+    markdown,
+    /> \*\*LIMITED\*\* - YellowBird completed, but the run did not exercise a declared functional workflow\./
+  );
+  assert.match(
+    markdown,
+    /Effective scope: Bounded safe exploration; 2\/2 interaction\(s\) exercised; no declared workflow; 0 declared product assertions\./
+  );
+  assert.match(markdown, /Evidence outcome: \*\*clear\*\*/);
   assert.ok(
     report.observations.exploration.routePolicy.primaryRoutes.includes(
       `${target}/agent-flow`
@@ -4420,6 +4440,10 @@ test("product findings take precedence when related targets make coverage inconc
         ["GET", "POST"].includes(request.method)
     )
   );
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(markdown, /> \*\*ATTENTION \+ ERROR\*\*/);
+  assert.match(markdown, /YellowBird run: \*\*ERROR\*\*/);
+  assert.match(markdown, /Product signal: 1 failure signal observed\./);
 });
 
 test("agent policy omits cross-origin and authentication controls", async () => {
@@ -5181,6 +5205,17 @@ test("scout writes portable evidence and a deterministic regression", async () =
   assert.equal(report.observations.status, 200);
   assert.equal(report.target.authorization.method, "local-loopback-attestation");
 
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(
+    markdown,
+    /> \*\*CLEAR\*\* - Declared checks completed with no observed product failures\./
+  );
+  assert.match(
+    markdown,
+    /Effective scope: Initial-page smoke check; no declared workflow; 2 declared product assertions\./
+  );
+  assert.doesNotMatch(markdown, /- Outcome: \*\*clear\*\*/);
+
   await Promise.all(Object.values(report.artifacts).map((path) => stat(path)));
   const regression = await readFile(report.artifacts.regression, "utf8");
   assert.match(regression, /toHaveTitle\("Feather Shop"\)/);
@@ -5281,6 +5316,17 @@ test("scout reports explicit failures without changing expected results", async 
     ["console-errors", "missing-text"]
   );
   assert.deepEqual(report.assertions.expectedTexts, ["Checkout ready"]);
+
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(
+    markdown,
+    /> \*\*ATTENTION\*\* - 2 product failure signals require attention\./
+  );
+  assert.match(
+    markdown,
+    /YellowBird run: Completed without test-mechanics errors\./
+  );
+  assert.match(markdown, /Product signal: 2 failure signals observed\./);
 
   const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
   assert.doesNotMatch(diagnostics, /checkout failed/);
@@ -5422,6 +5468,11 @@ test("scout executes a permission-declared workflow and generates its regression
       { id: "prepare-order", status: "passed" },
       { id: "confirm-ready", status: "passed" }
     ]
+  );
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(
+    markdown,
+    /Effective scope: Declared workflow; 3\/3 step\(s\) exercised; 1 declared product assertion\./
   );
   const regression = await readFile(report.artifacts.regression, "utf8");
   assert.match(regression, /locator\("\[name=email\]"\)\.fill/);

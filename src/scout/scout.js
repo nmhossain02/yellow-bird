@@ -274,6 +274,87 @@ function diagnosticsJsonl(events) {
   return `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
 }
 
+function pluralizedCount(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function buildOperationalAssessment(report) {
+  const workflowSteps = report.observations.workflowSteps || [];
+  const exploration = report.observations.exploration || {
+    requested: false,
+    steps: []
+  };
+  const explorationSteps = exploration.steps || [];
+  const exercisedStatuses = new Set(["passed", "failed"]);
+  const exercisedWorkflowSteps = workflowSteps.filter((step) =>
+    exercisedStatuses.has(step.status)
+  ).length;
+  const exercisedExplorationSteps = explorationSteps.filter((step) =>
+    exercisedStatuses.has(step.status)
+  ).length;
+  const workflowAssertionCount = workflowSteps.filter((step) =>
+    ["expectText", "expectVisible"].includes(step.action)
+  ).length;
+  const declaredProductAssertionCount =
+    Number(Boolean(report.assertions.expectedTitle)) +
+    (report.assertions.expectedTexts?.length || 0) +
+    (report.assertions.agentExpectedTexts?.length || 0) +
+    (report.assertions.agentExpectedControls?.length || 0) +
+    workflowAssertionCount;
+  const mechanicsIssueCount = report.invalidTestMechanics.length;
+  const findingCount = report.findings.length;
+
+  let level;
+  let summary;
+  if (findingCount && (mechanicsIssueCount || report.outcome === "inconclusive")) {
+    level = "ATTENTION + ERROR";
+    summary = `${pluralizedCount(findingCount, "product failure signal")} ${findingCount === 1 ? "requires" : "require"} attention, and YellowBird did not complete a trustworthy evaluation.`;
+  } else if (findingCount) {
+    level = "ATTENTION";
+    summary = `${pluralizedCount(findingCount, "product failure signal")} ${findingCount === 1 ? "requires" : "require"} attention.`;
+  } else if (mechanicsIssueCount || report.outcome === "inconclusive") {
+    level = "ERROR";
+    summary =
+      "YellowBird could not complete a trustworthy evaluation. Treat this as an operational concern until diagnosed.";
+  } else if (
+    !workflowSteps.length &&
+    (exploration.requested || declaredProductAssertionCount === 0)
+  ) {
+    level = "LIMITED";
+    summary =
+      "YellowBird completed, but the run did not exercise a declared functional workflow.";
+  } else {
+    level = "CLEAR";
+    summary = "Declared checks completed with no observed product failures.";
+  }
+
+  const runStatus = mechanicsIssueCount
+    ? `**ERROR** - ${pluralizedCount(mechanicsIssueCount, "test-mechanics issue")} made the evaluation incomplete or untrustworthy.`
+    : "Completed without test-mechanics errors.";
+  const productSignal = findingCount
+    ? `${pluralizedCount(findingCount, "failure signal")} observed.`
+    : mechanicsIssueCount || report.outcome === "inconclusive"
+      ? "Not established because the evaluation was incomplete or untrustworthy."
+      : "No failures observed within the executed scope.";
+
+  let effectiveScope;
+  if (workflowSteps.length) {
+    effectiveScope = `Declared workflow; ${exercisedWorkflowSteps}/${workflowSteps.length} step(s) exercised; ${pluralizedCount(declaredProductAssertionCount, "declared product assertion")}.`;
+  } else if (exploration.requested) {
+    effectiveScope = `Bounded safe exploration; ${exercisedExplorationSteps}/${explorationSteps.length} interaction(s) exercised; no declared workflow; ${pluralizedCount(declaredProductAssertionCount, "declared product assertion")}.`;
+  } else {
+    effectiveScope = `Initial-page smoke check; no declared workflow; ${pluralizedCount(declaredProductAssertionCount, "declared product assertion")}.`;
+  }
+
+  return {
+    level,
+    summary,
+    runStatus,
+    productSignal,
+    effectiveScope
+  };
+}
+
 function buildMarkdown(report) {
   const findingRows = report.findings.length
     ? report.findings
@@ -319,11 +400,22 @@ function buildMarkdown(report) {
   const destinationControlAssertions = exploration.steps.flatMap(
     (step) => step.destinationControlAssertions || []
   );
+  const operationalAssessment = buildOperationalAssessment(report);
 
   return `# YellowBird scout report
 
+## Operational assessment
+
+> **${operationalAssessment.level}** - ${operationalAssessment.summary}
+
+- YellowBird run: ${operationalAssessment.runStatus}
+- Product signal: ${operationalAssessment.productSignal}
+- Effective scope: ${operationalAssessment.effectiveScope}
+- Evidence outcome: **${report.outcome}** (stable machine contract; not a broad product-health claim)
+
+## Run details
+
 - Run: \`${report.run.id}\`
-- Outcome: **${report.outcome}**
 - Target: \`${report.target.url}\`
 - Requested target: \`${report.target.requestedUrl}\`
 - Authorization: ${report.target.authorization.method}, ${report.target.authorization.scope}
