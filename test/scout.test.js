@@ -457,6 +457,21 @@ beforeAll(async () => {
     const staticControlCopyDestination = request.url?.startsWith(
       "/agent-static-control-copy-destination"
     );
+    const nativeSemanticSurface = request.url?.startsWith(
+      "/agent-native-semantic-surface"
+    );
+    const nativeSemanticDestination = request.url?.startsWith(
+      "/agent-native-semantic-destination"
+    );
+    const multiPrimarySurface = request.url?.startsWith(
+      "/agent-multi-primary-surface"
+    );
+    const multiPrimaryFirst = request.url?.startsWith(
+      "/agent-multi-primary-first"
+    );
+    const multiPrimarySecond = request.url?.startsWith(
+      "/agent-multi-primary-second"
+    );
     const semanticSpoofSurface = request.url?.startsWith(
       "/agent-semantic-spoof-surface"
     );
@@ -607,6 +622,63 @@ beforeAll(async () => {
             <p>Frequency</p>
             <p>Compile monitor</p>
             <a href="/">Home</a>
+          </body>
+        </html>`);
+      return;
+    }
+    if (nativeSemanticSurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Native semantic roles</title></head>
+          <body><a href="/agent-native-semantic-destination">New filters</a></body>
+        </html>`);
+      return;
+    }
+    if (nativeSemanticDestination) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Native semantic destination</title></head>
+          <body>
+            <h1>Catalog filters</h1>
+            <input type="search" aria-label="Catalog query">
+            <select multiple aria-label="Regions">
+              <option>North</option>
+              <option>South</option>
+            </select>
+          </body>
+        </html>`);
+      return;
+    }
+    if (multiPrimarySurface) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Multiple primary routes</title></head>
+          <body>
+            <a href="/agent-multi-primary-first">Inspect overview</a>
+            <a href="/agent-multi-primary-second">Inspect matching setup</a>
+          </body>
+        </html>`);
+      return;
+    }
+    if (multiPrimaryFirst) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Overview destination</title></head>
+          <body>
+            <h1>Overview destination</h1>
+            <a href="/agent-multi-primary-second">Inspect matching setup</a>
+            <input type="text" aria-label="Overview query">
+          </body>
+        </html>`);
+      return;
+    }
+    if (multiPrimarySecond) {
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Matching setup destination</title></head>
+          <body>
+            <h1>Matching destination</h1>
+            <input type="text" aria-label="Setup query">
           </body>
         </html>`);
       return;
@@ -2225,7 +2297,7 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
   );
   assert.match(
     markdown,
-    /Effective scope: Bounded safe exploration; 2\/2 interaction\(s\) exercised; no declared workflow; 0 declared product assertions\./
+    /Effective scope: Bounded safe exploration; 2\/2 interaction\(s\) exercised; no declared workflow; 1 product assertion\./
   );
   assert.match(markdown, /Evidence outcome: \*\*clear\*\*/);
   assert.ok(
@@ -2544,6 +2616,53 @@ test("owned coverage rejects static copy without declared semantic controls", as
   assert.match(regression, /yellowbirdReadSemanticControls/);
   assert.match(regression, /candidateTraversalComplete/);
   assert.doesNotMatch(regression, /getByRole\(/);
+});
+
+test("owned coverage normalizes native search and multi-select roles", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-native-semantic-")
+  );
+  const report = await createAgentRunner(() => ({
+    action: "finish",
+    elementRef: null,
+    value: null,
+    rationale: "The native controls were inspected.",
+    coverage: "partial",
+    summary: "The native controls were inspected."
+  }))({
+    target: `${target}/agent-native-semantic-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentPrimaryRoutes: ["/agent-native-semantic-destination"],
+    agentExpectedTexts: ["Catalog filters"],
+    agentExpectedControls: [
+      "textbox:search:Catalog query",
+      "combobox:select-multiple:Regions"
+    ],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.exploration.verification.satisfied, true);
+  assert.deepEqual(
+    report.observations.exploration.steps[0].destinationControlAssertions,
+    [
+      {
+        role: "textbox",
+        type: "search",
+        name: "Catalog query",
+        matchCount: 1,
+        satisfied: true
+      },
+      {
+        role: "combobox",
+        type: "select-multiple",
+        name: "Regions",
+        matchCount: 1,
+        satisfied: true
+      }
+    ]
+  );
 });
 
 test("owned coverage uses browser accessibility semantics for controls", async () => {
@@ -2880,6 +2999,72 @@ test("owned coverage profile links a distinct destination to its visit", async (
     /yellowbird-observed-criteria \(initial-interface-basic-flow\.v1, unsatisfied\)/
   );
   assert.doesNotMatch(markdown, /model-guided within YellowBird policy/);
+});
+
+test("owned coverage selects the primary visit matching owner declarations", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-multi-primary-")
+  );
+  const decisions = [
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Inspect the first declared primary route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "act",
+      elementRef: "element-1",
+      value: null,
+      rationale: "Inspect the next declared primary route.",
+      coverage: "continue",
+      summary: ""
+    },
+    {
+      action: "finish",
+      elementRef: null,
+      value: null,
+      rationale: "Both declared primary routes were inspected.",
+      coverage: "covered",
+      summary: "Both declared primary routes were inspected."
+    }
+  ];
+  const report = await createAgentRunner(() => decisions.shift())({
+    target: `${target}/agent-multi-primary-surface`,
+    intent: "Assess the initial interface and basic user flow",
+    exploreIntent: true,
+    agentPrimaryRoutes: [
+      "/agent-multi-primary-first",
+      "/agent-multi-primary-second"
+    ],
+    agentExpectedTexts: ["Matching destination"],
+    agentExpectedControls: ["textbox:text:Setup query"],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.exploration.verification.satisfied, true);
+  assert.deepEqual(
+    report.observations.exploration.steps.map((step) => ({
+      url: step.url,
+      textSatisfied: step.destinationAssertions[0].satisfied,
+      controlSatisfied: step.destinationControlAssertions[0].satisfied
+    })),
+    [
+      {
+        url: `${target}/agent-multi-primary-first`,
+        textSatisfied: false,
+        controlSatisfied: false
+      },
+      {
+        url: `${target}/agent-multi-primary-second`,
+        textSatisfied: true,
+        controlSatisfied: true
+      }
+    ]
+  );
 });
 
 test("owned coverage profile rejects a non-primary authorized route", async () => {
@@ -5208,11 +5393,11 @@ test("scout writes portable evidence and a deterministic regression", async () =
   const markdown = await readFile(report.artifacts.report, "utf8");
   assert.match(
     markdown,
-    /> \*\*CLEAR\*\* - Declared checks completed with no observed product failures\./
+    /> \*\*LIMITED\*\* - YellowBird completed, but the run did not exercise a declared functional workflow\./
   );
   assert.match(
     markdown,
-    /Effective scope: Initial-page smoke check; no declared workflow; 2 declared product assertions\./
+    /Effective scope: Initial-page smoke check; no declared workflow; 3 product assertions\./
   );
   assert.doesNotMatch(markdown, /- Outcome: \*\*clear\*\*/);
 
@@ -5232,6 +5417,28 @@ test("scout writes portable evidence and a deterministic regression", async () =
   assert.equal(schema.properties.schema.const, evidence.schema);
   assertConformsToSchema(schema, evidence);
   assert.equal(evidence.provenance.agenticEngine, null);
+});
+
+test("initial-page smoke counts the enforced HTTP status assertion", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-status-assertion-")
+  );
+  const report = await runSharedScout({
+    target,
+    expectedStatus: 200,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(
+    markdown,
+    /> \*\*LIMITED\*\* - YellowBird completed, but the run did not exercise a declared functional workflow\./
+  );
+  assert.match(
+    markdown,
+    /Effective scope: Initial-page smoke check; no declared workflow; 1 product assertion\./
+  );
 });
 
 test("historical v1 scout evidence remains valid", async () => {
@@ -5472,7 +5679,7 @@ test("scout executes a permission-declared workflow and generates its regression
   const markdown = await readFile(report.artifacts.report, "utf8");
   assert.match(
     markdown,
-    /Effective scope: Declared workflow; 3\/3 step\(s\) exercised; 1 declared product assertion\./
+    /Effective scope: Declared workflow; 3\/3 step\(s\) exercised; 2 product assertions\./
   );
   const regression = await readFile(report.artifacts.regression, "utf8");
   assert.match(regression, /locator\("\[name=email\]"\)\.fill/);

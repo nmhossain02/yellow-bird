@@ -363,6 +363,13 @@ export async function verifyBrowserSemanticCandidates(
     if (tag === "textarea") return "textarea";
     return declared;
   };
+  const declarationRole = (role, tag, type) => {
+    if (role === "searchbox" && tag === "input" && type === "search") {
+      return "textbox";
+    }
+    if (role === "listbox" && tag === "select") return "combobox";
+    return role;
+  };
   const verifiedElements = [];
   let session = null;
   try {
@@ -501,9 +508,13 @@ export async function verifyBrowserSemanticCandidates(
           continue;
         }
         const tag = String(node.localName || node.nodeName || "").toLowerCase();
-        const semanticRole = String(semanticNode.role?.value || "");
         const semanticName = normalize(semanticNode.name?.value);
         const semanticType = controlType(tag, attributes);
+        const semanticRole = declarationRole(
+          String(semanticNode.role?.value || ""),
+          tag,
+          semanticType
+        );
         if (
           Object.hasOwn(candidate, "tag") &&
           (tag !== candidate.tag ||
@@ -1492,7 +1503,28 @@ function verifyOwnedCoverageProfile(
       step.status === "passed" &&
       isAgentRouteAuthorized(step.url, authorizedPrimaryRoutes)
   );
+  const satisfiesOwnedDestinationProfile = (step) => {
+    const source = normalizedObservedUrl(step.sourceUrl);
+    const destination = normalizedObservedUrl(step.url);
+    return (
+      source &&
+      destination &&
+      source !== destination &&
+      step.destinationControlCount > 0 &&
+      (!expectedDestinationTexts.length ||
+        (step.destinationAssertions?.length ===
+          expectedDestinationTexts.length &&
+          step.destinationAssertions.every((assertion) => assertion.satisfied))) &&
+      (!expectedDestinationControls.length ||
+        (step.destinationControlAssertions?.length ===
+          expectedDestinationControls.length &&
+          step.destinationControlAssertions.every(
+            (assertion) => assertion.satisfied
+          )))
+    );
+  };
   const passedVisit =
+    passedVisits.find(satisfiesOwnedDestinationProfile) ||
     passedVisits.find((step) => {
       const source = normalizedObservedUrl(step.sourceUrl);
       const destination = normalizedObservedUrl(step.url);

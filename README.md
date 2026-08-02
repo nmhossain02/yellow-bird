@@ -63,9 +63,10 @@ evaluation and should be treated as an operational concern until diagnosed.
 check or bounded safe exploration ran without a declared functional workflow.
 `ATTENTION` identifies observed product failure signals, and combines with
 `ERROR` when both product findings and run-integrity problems occur. `CLEAR` is
-reserved for completed owner-declared checks. The same summary states the
-YellowBird run status, product signal, and effective scope so a narrow `clear`
-evidence outcome cannot read as broad product health.
+reserved for completed declared functional workflows. The effective scope
+counts every enforced product assertion, including the expected HTTP status.
+The same summary states the YellowBird run status, product signal, and effective
+scope so a narrow `clear` evidence outcome cannot read as broad product health.
 
 Runs that reach finalization write an evidence bundle under
 `.yellowbird/scout/<run-id>/`:
@@ -158,6 +159,8 @@ declarations use `role:type:name` and require one visible semantic control with
 that exact accessible name and DOM control type. These structural assertions
 prevent static copy from impersonating a working form, and replay preserves the
 same role, name, visibility, uniqueness, and type checks.
+Native search inputs and multi-select controls retain the declaration roles
+`textbox` and `combobox` while browser accessibility roles are verified.
 
 The compatible endpoint can be selected per command:
 

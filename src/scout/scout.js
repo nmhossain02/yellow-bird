@@ -295,7 +295,8 @@ function buildOperationalAssessment(report) {
   const workflowAssertionCount = workflowSteps.filter((step) =>
     ["expectText", "expectVisible"].includes(step.action)
   ).length;
-  const declaredProductAssertionCount =
+  const productAssertionCount =
+    Number(Number.isInteger(report.assertions.expectedStatus)) +
     Number(Boolean(report.assertions.expectedTitle)) +
     (report.assertions.expectedTexts?.length || 0) +
     (report.assertions.agentExpectedTexts?.length || 0) +
@@ -316,10 +317,7 @@ function buildOperationalAssessment(report) {
     level = "ERROR";
     summary =
       "YellowBird could not complete a trustworthy evaluation. Treat this as an operational concern until diagnosed.";
-  } else if (
-    !workflowSteps.length &&
-    (exploration.requested || declaredProductAssertionCount === 0)
-  ) {
+  } else if (!workflowSteps.length) {
     level = "LIMITED";
     summary =
       "YellowBird completed, but the run did not exercise a declared functional workflow.";
@@ -339,11 +337,11 @@ function buildOperationalAssessment(report) {
 
   let effectiveScope;
   if (workflowSteps.length) {
-    effectiveScope = `Declared workflow; ${exercisedWorkflowSteps}/${workflowSteps.length} step(s) exercised; ${pluralizedCount(declaredProductAssertionCount, "declared product assertion")}.`;
+    effectiveScope = `Declared workflow; ${exercisedWorkflowSteps}/${workflowSteps.length} step(s) exercised; ${pluralizedCount(productAssertionCount, "product assertion")}.`;
   } else if (exploration.requested) {
-    effectiveScope = `Bounded safe exploration; ${exercisedExplorationSteps}/${explorationSteps.length} interaction(s) exercised; no declared workflow; ${pluralizedCount(declaredProductAssertionCount, "declared product assertion")}.`;
+    effectiveScope = `Bounded safe exploration; ${exercisedExplorationSteps}/${explorationSteps.length} interaction(s) exercised; no declared workflow; ${pluralizedCount(productAssertionCount, "product assertion")}.`;
   } else {
-    effectiveScope = `Initial-page smoke check; no declared workflow; ${pluralizedCount(declaredProductAssertionCount, "declared product assertion")}.`;
+    effectiveScope = `Initial-page smoke check; no declared workflow; ${pluralizedCount(productAssertionCount, "product assertion")}.`;
   }
 
   return {
