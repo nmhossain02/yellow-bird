@@ -355,6 +355,42 @@ test("built-in planner chooses one unambiguous safe setup route", async () => {
   });
   assert.equal(fieldResponse.output.action, "act");
   assert.equal(fieldResponse.output.elementRef, "field-ref");
+
+  const prohibitedResponse = await engine.completeStructured({
+    purpose: "safe_interaction_exploration",
+    messages: [
+      {
+        role: "user",
+        content: JSON.stringify({
+          intent: "Ensure the user flow can compile a monitor",
+          policy: { stepsTaken: 0 },
+          page: {
+            availableElements: [
+              {
+                ref: "unsafe-intent-ref",
+                label: "New monitor",
+                href: "http://localhost:3000/monitors/new",
+                allowedAction: "visit"
+              }
+            ]
+          }
+        })
+      }
+    ],
+    schema: {
+      type: "object",
+      required: ["action", "coverage"],
+      properties: {
+        action: { type: "string", enum: ["act", "finish"] },
+        coverage: {
+          type: "string",
+          enum: ["continue", "covered", "partial", "blocked"]
+        }
+      }
+    }
+  });
+  assert.equal(prohibitedResponse.output.action, "finish");
+  assert.equal(prohibitedResponse.output.coverage, "blocked");
 });
 
 test("configured engine rejects malformed structured content", async () => {

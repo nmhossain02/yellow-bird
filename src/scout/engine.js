@@ -1,4 +1,5 @@
 import { cleanDiagnosticText, diagnosticUrl } from "./diagnostics.js";
+import { PROHIBITED_AGENT_ACTION_PATTERN } from "./explorer.js";
 
 const DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
 const DEFAULT_ENGINE_TIMEOUT_MS = 120_000;
@@ -8,8 +9,7 @@ const BASIC_FLOW_INTENT =
   /\buser\s+flow\b/i;
 const BASIC_FLOW_VERB =
   /\b(?:assess|ensure|evaluate|inspect|review|verify)\b/i;
-const PROHIBITED_INTENT =
-  /(?:^|[^a-z0-9])(?:activate|approve|authenticate|buy|checkout|confirm|create|delete|log[ -]?in|order|pay|purchase|register|remove|save|sign[ -]?(?:in|up)|submit|subscribe|update|upload)(?=$|[^a-z0-9])/i;
+const PROHIBITED_INTENT = new RegExp(PROHIBITED_AGENT_ACTION_PATTERN, "i");
 const NON_PRINTABLE_MODEL_IDENTIFIER = /[\p{C}\p{Zl}\p{Zp}]/u;
 const PROBE_SCHEMA = {
   type: "object",
