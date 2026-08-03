@@ -19,20 +19,31 @@ bun install
 bun run setup:browsers
 ```
 
-Natural-language exploration uses an OpenAI-compatible chat endpoint. By default,
-YellowBird probes Ollama at `http://127.0.0.1:11434/v1` and selects its first
-available model. For the currently tested local setup, install Ollama, make sure
-its service is running, and pull the model:
+The common non-mutating intent `Ensure user flow works as expected` uses
+YellowBird's in-process bounded planner by default. It needs no model service and
+does not expose page content to a general-purpose agent. `doctor` reports the
+selected planner and its capability state:
 
 ```bash
-ollama pull qwen3.5:9b
 bun run doctor
 ```
 
-`doctor` reports the selected model and whether strict JSON Schema output passed
-the harmless conformance probe. The first probe may wait up to two minutes for a
-local model to load cold. A scout running intent exploration is `inconclusive`
-with exit code `3` if no compatible engine is available.
+Broader natural-language exploration uses an OpenAI-compatible chat endpoint.
+For the currently tested local setup, install Ollama, make sure its service is
+running, pull the model, and select the HTTP adapter:
+
+```bash
+ollama pull qwen3.5:9b
+export YELLOWBIRD_ENGINE_ADAPTER=http
+export YELLOWBIRD_ENGINE_MODEL=qwen3.5:9b
+bun run doctor
+```
+
+For HTTP engines, `doctor` reports the selected model and whether strict JSON
+Schema output passed the harmless conformance probe. The first probe may wait up
+to two minutes for a local model to load cold. A scout is `inconclusive` with
+exit code `3` if its configured engine is unavailable or its intent exceeds the
+built-in planner's bounded profile.
 
 Start the deliberately broken demo product:
 
@@ -121,6 +132,18 @@ Markdown file and places the remaining evidence in `report.assets/`:
 cd /path/to/product
 yellowbird scout \
   --target http://127.0.0.1:3000 \
+  --intent "Ensure user flow works as expected" \
+  --output yellowbird-report.md
+```
+
+With no route declarations, YellowBird uses its zero-configuration safe mode:
+same-origin `GET` and `HEAD` navigation, initial application reads, prohibited
+action filtering, and no submission or mutation authority. Add owner assertions
+when the report must prove a specific destination contract:
+
+```bash
+yellowbird scout \
+  --target http://127.0.0.1:3000 \
   --intent "Assess the initial interface and basic user flow" \
   --agent-primary-route /monitors/new \
   --agent-expect-text "Track any public product page" \
@@ -142,17 +165,19 @@ requested only through `--agent`. Use a versioned `--scenario` when the owner
 needs an exact deterministic workflow, including an empty initial-page smoke
 check or mutation-capable actions with explicit assertions.
 
-Agent document visits require repeated `--agent-primary-route` or
-`--agent-navigation-route` declarations. Primary routes are the owner-identified
-destinations that may satisfy an owned coverage profile. Navigation routes are
-safe to visit but cannot satisfy the primary-route criterion. Same-origin load
-requests made by `fetch`, XHR, event streams, or other active data channels are
-blocked unless their URLs are declared with repeated `--agent-load-route`
-options. Same-origin scripts, stylesheets, images, fonts, media, manifests, and
-text tracks load automatically so a modern application can render. Their
-follow-on effects remain subject to the active request policy. Load declarations
-may end in `*` for an explicit path prefix. Relative declarations resolve
-against the target, and every declaration must remain on its exact origin.
+Repeated `--agent-primary-route` or `--agent-navigation-route` declarations
+replace automatic navigation discovery with owner-defined authority. Primary
+routes are the owner-identified destinations that may satisfy an owned coverage
+profile. Navigation routes are safe to visit but cannot satisfy the
+primary-route criterion. Repeated `--agent-load-route` declarations likewise
+replace automatic initial load discovery. Same-origin scripts, stylesheets,
+images, fonts, media, manifests, and text tracks load automatically so a modern
+application can render. Automatically observed `fetch`, XHR, and event-stream
+URLs may continue their exact background reads for the current page and portable
+replay. Their follow-on effects remain subject to the read-only request policy.
+Load declarations may end in `*` for an explicit path prefix. Relative
+declarations resolve against the target, and every declaration must remain on
+its exact origin.
 
 Repeated `--agent-expect-text` declarations bind the owned coverage profile to
 text the owner expects on the visited primary destination. YellowBird records
@@ -165,7 +190,16 @@ same role, name, visibility, uniqueness, and type checks.
 Native search inputs and multi-select controls retain the declaration roles
 `textbox` and `combobox` while browser accessibility roles are verified.
 
-The compatible endpoint can be selected per command:
+Engine adapter selection defaults to `auto`. Without HTTP engine configuration,
+YellowBird uses its built-in bounded planner for the non-mutating initial
+interface and basic user-flow intent shown above. The built-in planner selects
+only one unambiguous `New`, `Start`, `Setup`, `Begin`, or `Onboard` navigation,
+exercises eligible fields with deterministic synthetic values without
+submitting, then YellowBird decides coverage from browser-observed criteria. It
+does not invoke a general-purpose agent or send the page snapshot to another
+process. Force it with `--engine-adapter builtin`.
+
+Configure a compatible HTTP endpoint for broader intents:
 
 ```bash
 yellowbird scout \
@@ -176,8 +210,9 @@ yellowbird scout \
   --engine-model qwen3.5:9b
 ```
 
-The equivalent environment variables are `YELLOWBIRD_ENGINE_BASE_URL`,
-`YELLOWBIRD_ENGINE_MODEL`, and `YELLOWBIRD_ENGINE_API_KEY`. The API key is sent
+The equivalent environment variables are `YELLOWBIRD_ENGINE_ADAPTER`,
+`YELLOWBIRD_ENGINE_BASE_URL`, `YELLOWBIRD_ENGINE_MODEL`, and
+`YELLOWBIRD_ENGINE_API_KEY`. The API key is sent
 only as a bearer token and is never written to the evidence bundle. Configured
 and provider-reported model identifiers must be nonempty printable text, at most
 200 UTF-16 code units, with no surrounding whitespace. Invalid identifiers are
@@ -246,14 +281,14 @@ blocked browser operations through a per-run channel. Agent document visits
 intercept every redirect response so an unsafe destination is blocked before the
 browser follows it. Policy-rejected `fetch` calls are recorded and rejected
 before dispatch. During the initial target load and each authorized visit,
-owner-declared exact-origin `GET` and `HEAD` non-document request URLs, including
-`EventSource`, are allowed only through a 150 ms settlement interval after
-`DOMContentLoaded`.
+exact-origin `GET` and `HEAD` non-document request URLs, including `EventSource`,
+are allowed through a 150 ms settlement interval after `DOMContentLoaded`.
 Allowed response bodies continue streaming without YellowBird buffering them.
-Later network requests outside an explicitly mediated visit document chain are
-blocked, and the non-HTTP transports above remain blocked throughout agent mode.
-The evidence JSON and Markdown report retain the normalized primary, navigation,
-and load-route declarations used for both the coverage decision and browser
+In zero-configuration mode, exact `fetch`, XHR, and event-stream URLs observed in
+that window may repeat as page-owned background reads. New later URLs are
+blocked, as are the non-HTTP transports above throughout agent mode. The
+evidence JSON and Markdown report retain declared or automatic navigation and
+load authority plus the exact observed background routes used for browser
 enforcement.
 
 The generated regression re-enforces the live scout's exact-origin, read-only,
@@ -271,13 +306,14 @@ console, page, and request errors, including another failure at the same URL,
 remain product signals.
 
 A bounded snapshot of the current page URL, title, text, and control inventory,
-including supplied link URLs and select options, is sent to the configured model
-endpoint. Text and controls must pass ancestor visibility, rendered geometry,
+including supplied link URLs and select options, is evaluated by the selected
+planner. Text and controls must pass ancestor visibility, rendered geometry,
 closed-container, and clipping checks before entering that snapshot. URLs are
-sent exactly and can include query values. The default endpoint is loopback.
-Planning requests never follow endpoint redirects. Operators choosing a remote
-endpoint are responsible for that data boundary. Query values and console
-contents remain out of operational diagnostics.
+represented exactly and can include query values. The built-in planner keeps
+that data in process. Planning requests to a configured HTTP engine never follow
+endpoint redirects. Operators choosing a remote endpoint are responsible for
+that data boundary. Query values and console contents remain out of operational
+diagnostics.
 
 Owner-declared scenarios retain their explicit permission model for exact
 `fill`, `click`, `expectText`, and `expectVisible` steps. A failed action is
@@ -356,8 +392,8 @@ local browser check.
 - Loopback-only target authorization and exact-origin browser network policy
 - Initial-page navigation with status, title, text, console, exception, failed
   request, screenshot, and interactive-element evidence
-- Intent-driven bounded exploration through a probed OpenAI-compatible local or
-  hosted endpoint
+- Intent-driven bounded exploration through YellowBird's safe built-in planner
+  or a probed OpenAI-compatible endpoint
 - YellowBird-enforced same-origin action policy, synthetic form values, truthful
   coverage accounting, engine provenance, and model-free replay
 - Permission-declared `fill`, `click`, `expectText`, and `expectVisible` workflow

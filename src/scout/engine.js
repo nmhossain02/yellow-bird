@@ -2,6 +2,14 @@ import { cleanDiagnosticText, diagnosticUrl } from "./diagnostics.js";
 
 const DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1";
 const DEFAULT_ENGINE_TIMEOUT_MS = 120_000;
+const ENGINE_ADAPTERS = new Set(["auto", "builtin", "http"]);
+const BUILTIN_ENGINE_ID = "yellowbird-safe-flow-v1";
+const BASIC_FLOW_INTENT =
+  /\buser\s+flow\b/i;
+const BASIC_FLOW_VERB =
+  /\b(?:assess|ensure|evaluate|inspect|review|verify)\b/i;
+const PROHIBITED_INTENT =
+  /(?:^|[^a-z0-9])(?:activate|approve|authenticate|buy|checkout|confirm|create|delete|log[ -]?in|order|pay|purchase|register|remove|save|sign[ -]?(?:in|up)|submit|subscribe|update|upload)(?=$|[^a-z0-9])/i;
 const NON_PRINTABLE_MODEL_IDENTIFIER = /[\p{C}\p{Zl}\p{Zp}]/u;
 const PROBE_SCHEMA = {
   type: "object",
@@ -51,6 +59,15 @@ function modelIdentifier(value, source) {
 }
 
 export function validateAgentEngineConfig(config = {}) {
+  const adapter =
+    config.adapter !== undefined
+      ? config.adapter
+      : process.env.YELLOWBIRD_ENGINE_ADAPTER !== undefined
+        ? process.env.YELLOWBIRD_ENGINE_ADAPTER
+        : "auto";
+  if (!ENGINE_ADAPTERS.has(adapter)) {
+    throw new Error("engine adapter must be auto, builtin, or http");
+  }
   const baseUrl =
     config.baseUrl !== undefined
       ? config.baseUrl
@@ -71,6 +88,19 @@ export function validateAgentEngineConfig(config = {}) {
         : null;
   const timeoutMs = config.timeoutMs ?? DEFAULT_ENGINE_TIMEOUT_MS;
   const fetchImpl = config.fetchImpl ?? fetch;
+  if (
+    adapter === "builtin" &&
+    (config.baseUrl !== undefined ||
+      process.env.YELLOWBIRD_ENGINE_BASE_URL !== undefined ||
+      config.model !== undefined ||
+      process.env.YELLOWBIRD_ENGINE_MODEL !== undefined ||
+      config.apiKey !== undefined ||
+      process.env.YELLOWBIRD_ENGINE_API_KEY !== undefined)
+  ) {
+    throw new Error(
+      "the built-in engine adapter cannot be combined with HTTP engine configuration"
+    );
+  }
 
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   const normalizedModel =
@@ -89,14 +119,20 @@ export function validateAgentEngineConfig(config = {}) {
   }
 
   return {
+    adapter,
     baseUrl: normalizedBaseUrl,
     model: normalizedModel,
     apiKey,
     fetchImpl,
     timeoutMs,
     explicitlyConfigured:
+      adapter !== "auto" ||
       config.baseUrl !== undefined ||
-      process.env.YELLOWBIRD_ENGINE_BASE_URL !== undefined
+      process.env.YELLOWBIRD_ENGINE_BASE_URL !== undefined ||
+      config.model !== undefined ||
+      process.env.YELLOWBIRD_ENGINE_MODEL !== undefined ||
+      config.apiKey !== undefined ||
+      process.env.YELLOWBIRD_ENGINE_API_KEY !== undefined
   };
 }
 
@@ -436,35 +472,186 @@ export function createCompatibleEngine({
   };
 }
 
-export async function resolveAgentEngine(config = {}) {
-  const validated = validateAgentEngineConfig(config);
-  const engine = createCompatibleEngine(validated);
+function finishAction(coverage, summary) {
+  return {
+    action: "finish",
+    elementRef: null,
+    value: null,
+    rationale: summary,
+    coverage,
+    summary
+  };
+}
 
+function parsePlannerRequest(messages) {
+  const content = messages
+    ?.filter((message) => message?.role === "user")
+    .at(-1)?.content;
+  if (typeof content !== "string") {
+    throw new Error("built-in planner received no user request");
+  }
+  let request;
   try {
-    const capabilities = await engine.probe();
-    return { engine, capabilities, diagnostic: null };
-  } catch (error) {
-    const detail = cleanDiagnosticText(error?.message || error);
-    const unavailable = detail.includes("connection failed");
+    request = JSON.parse(content);
+  } catch {
+    throw new Error("built-in planner received malformed request data");
+  }
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new Error("built-in planner request was not an object");
+  }
+  return request;
+}
+
+function preferredSetupVisit(elements) {
+  const visits = elements.filter(
+    (element) => element?.allowedAction === "visit"
+  );
+  const uniqueRoutes = (candidates) =>
+    [
+      ...new Map(
+        candidates.map((element) => [element.href || element.ref, element])
+      ).values()
+    ];
+  const preferred = uniqueRoutes(
+    visits.filter((element) =>
+      /\b(?:begin|new|onboard|setup|start)\b/i.test(element.label || "")
+    )
+  );
+  if (preferred.length === 1) return preferred[0];
+  const distinctVisits = uniqueRoutes(visits);
+  return distinctVisits.length === 1 ? distinctVisits[0] : null;
+}
+
+export function createBuiltinIntentEngine() {
+  async function completeStructured({ purpose, messages, schema }) {
+    if (purpose !== "safe_interaction_exploration") {
+      throw new Error(
+        "the built-in planner only supports bounded safe-interaction exploration"
+      );
+    }
+    const request = parsePlannerRequest(messages);
+    const intent = String(request.intent || "");
+    const elements = Array.isArray(request.page?.availableElements)
+      ? request.page.availableElements
+      : [];
+    const stepsTaken = Number(request.policy?.stepsTaken || 0);
+    let output;
+
+    if (
+      !BASIC_FLOW_INTENT.test(intent) ||
+      !BASIC_FLOW_VERB.test(intent) ||
+      PROHIBITED_INTENT.test(intent)
+    ) {
+      output = finishAction(
+        "blocked",
+        "The built-in planner only covers a non-mutating initial interface and basic user flow. Configure an HTTP planning engine or provide a deterministic scenario for this intent."
+      );
+    } else if (stepsTaken > 0) {
+      const safeField = elements.find(
+        (element) => element?.allowedAction === "fill"
+      );
+      output = safeField
+        ? {
+            action: "act",
+            elementRef: safeField.ref,
+            value: null,
+            rationale:
+              "YellowBird exercised the next bounded synthetic field on the safe setup destination without submitting the form.",
+            coverage: "continue",
+            summary: ""
+          }
+        : finishAction(
+            "covered",
+            "YellowBird observed the initial interface, one unambiguous safe setup destination, and its bounded synthetic fields."
+          );
+    } else {
+      const visit = preferredSetupVisit(elements);
+      output = visit
+        ? {
+            action: "act",
+            elementRef: visit.ref,
+            value: null,
+            rationale:
+              "YellowBird selected the single unambiguous safe setup navigation for the requested basic user flow.",
+            coverage: "continue",
+            summary: ""
+          }
+        : finishAction(
+            "partial",
+            "YellowBird could not identify exactly one safe setup navigation for the requested basic user flow."
+          );
+    }
+
+    validateSchemaValue(schema, output);
     return {
-      engine: null,
-      capabilities: null,
-      diagnostic: engineIssue(
-        unavailable ? "agent-engine-unavailable" : "agent-engine-invalid",
-        unavailable && validated.explicitlyConfigured
-          ? "The configured agent engine is unavailable."
-          : unavailable
-            ? "No compatible local agent engine is available."
-            : "The configured agent engine could not be used.",
-        unavailable && validated.explicitlyConfigured
-          ? "Start the configured engine endpoint and check its URL, credentials, and model, then rerun the scout."
-          : unavailable
-            ? "Start Ollama with a tool-capable model, or set YELLOWBIRD_ENGINE_BASE_URL and YELLOWBIRD_ENGINE_MODEL."
-            : "Check the engine endpoint, model name, credentials, and structured-output support, then rerun the scout.",
-        detail
-      )
+      output,
+      usage: null,
+      modelReported: BUILTIN_ENGINE_ID
     };
   }
+
+  return {
+    async probe() {
+      return {
+        jsonSchema: "verified",
+        toolCalls: "not-applicable",
+        imageInput: "not-applicable"
+      };
+    },
+    completeStructured,
+    provenance() {
+      return {
+        adapter: "yellowbird-bounded-planner",
+        endpointClass: "local-process",
+        modelRequested: BUILTIN_ENGINE_ID,
+        modelReported: BUILTIN_ENGINE_ID,
+        capabilityManifestVersion: "yellowbird.engine-capabilities.v1"
+      };
+    }
+  };
+}
+
+export async function resolveAgentEngine(config = {}) {
+  const validated = validateAgentEngineConfig(config);
+  const probe = async (engine) => ({
+    engine,
+    capabilities: await engine.probe(),
+    diagnostic: null
+  });
+
+  if (
+    validated.adapter === "builtin" ||
+    (validated.adapter === "auto" && !validated.explicitlyConfigured)
+  ) {
+    return probe(createBuiltinIntentEngine());
+  }
+
+  let compatibleError;
+  try {
+    return await probe(createCompatibleEngine(validated));
+  } catch (error) {
+    compatibleError = error;
+  }
+  const compatibleDetail = cleanDiagnosticText(
+    compatibleError?.message || compatibleError
+  );
+  const compatibleUnavailable = compatibleDetail.includes("connection failed");
+  return {
+    engine: null,
+    capabilities: null,
+    diagnostic: engineIssue(
+      compatibleUnavailable
+        ? "agent-engine-unavailable"
+        : "agent-engine-invalid",
+      compatibleUnavailable && validated.explicitlyConfigured
+        ? "The configured agent engine is unavailable."
+        : "The configured agent engine could not be used.",
+      compatibleUnavailable
+        ? "Start the configured engine endpoint and check its URL, credentials, and model, then rerun the scout."
+        : "Check the engine endpoint, model name, credentials, and structured-output support, then rerun the scout.",
+      compatibleDetail
+    )
+  };
 }
 
 export async function inspectAgentEngine(config = {}) {

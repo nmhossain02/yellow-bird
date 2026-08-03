@@ -49,6 +49,8 @@ The local scout now implements the first usable slice of this decision:
 
 - a Yellow Bird-owned bounded planning and execution loop;
 - a generic OpenAI-compatible Chat Completions adapter;
+- a deterministic in-process planner for the zero-configuration, non-mutating
+  initial-interface basic-flow profile;
 - a harmless strict JSON Schema conformance probe;
 - model and adapter provenance plus capability state in portable scout evidence;
 - named Yellow Bird-owned coverage criteria for the initial-interface basic-flow
@@ -59,12 +61,14 @@ The local scout now implements the first usable slice of this decision:
 - an explicit `inconclusive` result when the engine or requested capability is
   unavailable.
 
-The default local binding probes Ollama at `http://127.0.0.1:11434/v1`. The
-implementation has been exercised with `qwen3.5:9b`; this is a tested local
-binding, not a change to the Kimi-first reference strategy. Native Moonshot/Kimi
-transport behavior, tool-call probes, image input, model-response streaming,
-cancellation, and production deployment bindings remain future work and are
-reported as unverified rather than implied.
+The configured local HTTP binding defaults to Ollama at
+`http://127.0.0.1:11434/v1`. The implementation has been exercised with
+`qwen3.5:9b`; this is a tested local binding, not a change to the Kimi-first
+reference strategy. With no HTTP engine configuration, the bounded built-in
+planner is selected instead. Native Moonshot/Kimi transport behavior, tool-call
+probes, image input, model-response streaming, cancellation, and production
+deployment bindings remain future work and are reported as unverified rather
+than implied.
 
 Kimi is the first reference model family because its current models are designed for agentic tool use, expose structured output and multimodal capabilities through the hosted API, and publish weights that can be deployed through common inference servers. As of 2026-07-30, Kimi K3 is Moonshot's current flagship and its official repository recommends vLLM, SGLang, or TokenSpeed for deployment. Its hosted API exposes Chat Completions, tools, JSON Schema output, streaming, usage, and reasoning controls ([Kimi API concepts](https://platform.kimi.ai/docs/introduction), [Kimi Chat API](https://platform.kimi.ai/docs/api/chat), [Kimi K3](https://github.com/MoonshotAI/Kimi-K3)).
 

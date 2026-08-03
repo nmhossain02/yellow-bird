@@ -1493,7 +1493,9 @@ function verifyOwnedCoverageProfile(
   const initialInterfaceFlow =
     /^\s*(?:assess|evaluate|inspect|review)(?:\s+the)?\s+initial\s+interface\s+and(?:\s+the)?\s+basic\s+user\s+flow\s*[.!]?\s*$/i.test(
       intent
-    );
+    ) ||
+    (/\buser\s+flow\b/i.test(intent) &&
+      /\b(?:assess|ensure|evaluate|inspect|review|verify)\b/i.test(intent));
   if (!initialInterfaceFlow || hasProhibitedSemantics({ label: intent })) {
     return null;
   }
@@ -1501,7 +1503,8 @@ function verifyOwnedCoverageProfile(
     (step) =>
       step.action === "visit" &&
       step.status === "passed" &&
-      isAgentRouteAuthorized(step.url, authorizedPrimaryRoutes)
+      (authorizedPrimaryRoutes.size === 0 ||
+        isAgentRouteAuthorized(step.url, authorizedPrimaryRoutes))
   );
   const satisfiesOwnedDestinationProfile = (step) => {
     const source = normalizedObservedUrl(step.sourceUrl);
@@ -1543,7 +1546,10 @@ function verifyOwnedCoverageProfile(
       satisfied: pages.length >= 1
     },
     {
-      id: "primary-route-visited",
+      id:
+        authorizedPrimaryRoutes.size > 0
+          ? "primary-route-visited"
+          : "safe-setup-route-visited",
       satisfied: Boolean(passedVisit)
     },
     {

@@ -45,6 +45,11 @@ const PASSIVE_AGENT_RESOURCE_TYPES = new Set([
   "stylesheet",
   "texttrack"
 ]);
+const BACKGROUND_AGENT_RESOURCE_TYPES = new Set([
+  "eventsource",
+  "fetch",
+  "xhr"
+]);
 const AGENT_NAVIGATION_SETTLEMENT_MS = 150;
 const SCREENSHOT_MAX_BYTES = 6 * 1024 * 1024;
 const EVIDENCE_ELEMENT_LIMITS = Object.freeze({
@@ -327,6 +332,10 @@ function buildOperationalAssessment(report) {
     (report.assertions.agentExpectedTexts?.length || 0) +
     (report.assertions.agentExpectedControls?.length || 0) +
     workflowAssertionCount;
+  const coverageCriteria = exploration.verification?.criteria || [];
+  const satisfiedCoverageCriteria = coverageCriteria.filter(
+    (criterion) => criterion.satisfied
+  ).length;
   const mechanicsIssueCount = report.invalidTestMechanics.length;
   const findingCount = report.findings.length;
 
@@ -367,6 +376,9 @@ function buildOperationalAssessment(report) {
     effectiveScope = `Bounded safe exploration; ${exercisedExplorationSteps}/${explorationSteps.length} interaction(s) exercised; no declared workflow; ${pluralizedCount(productAssertionCount, "product assertion")}.`;
   } else {
     effectiveScope = `Initial-page smoke check; no declared workflow; ${pluralizedCount(productAssertionCount, "product assertion")}.`;
+  }
+  if (coverageCriteria.length) {
+    effectiveScope = `${effectiveScope.slice(0, -1)}; ${satisfiedCoverageCriteria}/${coverageCriteria.length} YellowBird-observed coverage criteria satisfied.`;
   }
 
   return {
@@ -481,7 +493,10 @@ ${workflowRows}
 - Coverage authority: ${exploration.verification ? `${exploration.verification.authority} (${exploration.verification.profile}, ${exploration.verification.satisfied ? "satisfied" : "unsatisfied"})` : "unverified model advisory (cannot authorize covered coverage)"}
 - Primary route authority: ${exploration.routePolicy?.primaryRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
 - Navigation route authority: ${exploration.routePolicy?.navigationRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
+- Navigation authority source: ${exploration.routePolicy?.automaticNavigationRoutes ? "automatic safe same-origin discovery" : "owner declarations"}
 - Load route authority: ${exploration.routePolicy?.loadRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
+- Load authority source: ${exploration.routePolicy?.automaticLoadRoutes ? "automatic initial-page discovery" : "owner declarations"}
+- Observed background load authority: ${exploration.routePolicy?.backgroundLoadRoutes?.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
 - Destination text assertions: ${report.assertions.agentExpectedTexts.map((text) => `\`${markdownEscape(text)}\``).join(", ") || "none"}
 - Destination control assertions: ${destinationControlAssertions.map((assertion) => `\`${markdownEscape(`${assertion.role}:${assertion.type}:${assertion.name}`)}=${assertion.satisfied ? "satisfied" : "unsatisfied"}\``).join(", ") || "none"}
 - Engine: ${markdownEscape(exploration.engine || "not used")}
@@ -533,6 +548,16 @@ function evidenceUrl(value) {
     return url.href;
   } catch {
     return "unparseable";
+  }
+}
+
+function exactAgentRoute(value) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return url.href;
+  } catch {
+    return null;
   }
 }
 
@@ -685,6 +710,7 @@ function buildRegression(options, explorationSteps = []) {
     '  yellowbirdTargetRequestUrl.hash = "";',
     `  const yellowbirdAgentNavigationRoutes = new Set(${quoteForJavaScript(options.agentNavigationRoutes)});`,
     `  const yellowbirdAgentLoadRoutes = new Set(${quoteForJavaScript(options.agentLoadRoutes)});`,
+    `  const yellowbirdAgentBackgroundLoadRoutes = new Set(${quoteForJavaScript(options.agentBackgroundLoadRoutes || [])});`,
     `  const yellowbirdPassiveAgentResourceTypes = new Set(${quoteForJavaScript([...PASSIVE_AGENT_RESOURCE_TYPES])});`,
     `  const yellowbirdAgentMode = ${options.exploreIntent};`,
     "  const yellowbirdBlockedUrls = new Set();",
@@ -768,10 +794,11 @@ function buildRegression(options, explorationSteps = []) {
     "    let policyRejected = false;",
     "    if (yellowbirdAgentMode && !localResource) {",
     "      const readAllowed = [\"GET\", \"HEAD\"].includes(occurrence.method);",
+    "      const backgroundLoadAllowed = yellowbirdAgentRouteAllowed(occurrence.url, yellowbirdAgentBackgroundLoadRoutes);",
     "      policyRejected = !yellowbirdSameOrigin(occurrence.url) || !readAllowed ||",
     "        !yellowbirdAgentUrlAllowed(occurrence.url) ||",
     "        !yellowbirdAgentRouteAllowed(occurrence.url, yellowbirdAgentLoadRoutes) ||",
-    "        yellowbirdAgentAction?.action !== \"visit\";",
+    "        (yellowbirdAgentAction?.action !== \"visit\" && !backgroundLoadAllowed);",
     "    }",
     "    if (policyRejected) {",
     "      yellowbirdBlockedFetchOccurrences.add(occurrenceId);",
@@ -781,6 +808,13 @@ function buildRegression(options, explorationSteps = []) {
     "  });",
     "  await page.context().addInitScript(({ authorizedOrigin, authorizedNavigationRoutes, controlName, controlToken, fetchBindingName, fetchBindingToken, fetchFailurePrefix, fetchOccurrenceHeader, fetchOccurrencePrefix, guardFailurePrefix, guardPrefix, prohibitedPattern, startActive }) => {",
     "    const navigationRoutes = new Set(authorizedNavigationRoutes);",
+    "    const routeAllowed = value => {",
+    "      for (const route of navigationRoutes) {",
+    '        if (route.endsWith("*") && value.startsWith(route.slice(0, -1))) return true;',
+    "        if (route === value) return true;",
+    "      }",
+    "      return false;",
+    "    };",
     "    const prohibited = new RegExp(prohibitedPattern, \"i\");",
     "    const canonicalizeSemanticText = value => String(value ?? \"\")",
     '      .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")',
@@ -814,7 +848,7 @@ function buildRegression(options, explorationSteps = []) {
     '        return ["http:", "https:"].includes(url.protocol) &&',
     "          url.origin === authorizedOrigin && !url.username && !url.password &&",
     "          decoded !== null && !prohibited.test(canonicalizeSemanticText(decoded)) &&",
-    "          navigationRoutes.has(url.href);",
+    "          routeAllowed(url.href);",
     "      } catch { return false; }",
     "    };",
     "    const active = Boolean(startActive);",
@@ -1036,6 +1070,8 @@ function buildRegression(options, explorationSteps = []) {
     "      const parsedRequestUrl = new URL(requestUrl);",
     "      const safeAgentUrl = yellowbirdAgentUrlAllowed(requestUrl);",
     "      const safeAgentRoute = yellowbirdAgentRequestRouteAllowed(requestUrl, request.resourceType());",
+    "      const safeBackgroundLoad = request.resourceType() !== \"document\" &&",
+    "        yellowbirdAgentRouteAllowed(requestUrl, yellowbirdAgentBackgroundLoadRoutes);",
     "      let safeAgentAction = false;",
     "      if (yellowbirdAgentAction) {",
     '        if (yellowbirdAgentAction.action !== "visit") {',
@@ -1053,6 +1089,7 @@ function buildRegression(options, explorationSteps = []) {
     "            yellowbirdAgentAction.navigationRequests.add(request);",
     "          }",
     "        } else safeAgentAction = yellowbirdAgentAction.navigationWindowOpen;",
+    "        if (!safeAgentAction && safeBackgroundLoad) safeAgentAction = true;",
     "      }",
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
     '        (!yellowbirdAgentMode || (["GET", "HEAD"].includes(requestMethod) &&',
@@ -1550,6 +1587,11 @@ async function finalizeRun(state) {
       `Only the ${options.steps.length} owner-declared workflow step(s) were exercised; YellowBird did not explore beyond them.`
     );
   } else if (options.exploreIntent) {
+    if (options.agentAutoNavigationRoutes || options.agentAutoLoadRoutes) {
+      coverageGaps.push(
+        "Zero-configuration intent mode authorized safe same-origin GET navigation and initial background reads; prohibited routes, non-read methods, submission, and mutation remained blocked."
+      );
+    }
     if (state.exploration.status === "completed") {
       coverageGaps.push(
         `The agent exercised ${state.exploration.steps.length} bounded safe same-origin interaction step(s); form submission, mutation, authentication, and cross-origin behavior were not authorized.`
@@ -1843,6 +1885,7 @@ export function createScoutRunner({
   }
   if (exploreIntent) {
     validateAgentEngineConfig({
+      adapter: input.engineAdapter,
       baseUrl: input.engineBaseUrl,
       model: input.engineModel,
       timeoutMs: Math.max(timeoutMs, 120_000)
@@ -1891,16 +1934,33 @@ export function createScoutRunner({
     authorization.origin,
     "agent navigation routes"
   );
+  const agentAutoNavigationRoutes =
+    exploreIntent &&
+    input.agentPrimaryRoutes === undefined &&
+    input.agentNavigationRoutes === undefined;
+  const agentAutoLoadRoutes =
+    exploreIntent && input.agentLoadRoutes === undefined;
+  const automaticSameOriginPrefix = `${authorization.origin}/*`;
   const agentNavigationRoutes = [
-    ...new Set([...declaredAgentNavigationRoutes, ...agentPrimaryRoutes])
+    ...new Set([
+      ...declaredAgentNavigationRoutes,
+      ...agentPrimaryRoutes,
+      ...(agentAutoNavigationRoutes ? [automaticSameOriginPrefix] : [])
+    ])
   ];
-  const agentLoadRoutes = normalizeAgentRoutes(
+  const declaredAgentLoadRoutes = normalizeAgentRoutes(
     input.agentLoadRoutes,
     authorization.target,
     authorization.origin,
     "agent load routes",
     true
   );
+  const agentLoadRoutes = [
+    ...new Set([
+      ...declaredAgentLoadRoutes,
+      ...(agentAutoLoadRoutes ? [automaticSameOriginPrefix] : [])
+    ])
+  ];
   const targetDocumentUrl = new URL(authorization.target);
   targetDocumentUrl.hash = "";
   const options = {
@@ -1915,12 +1975,16 @@ export function createScoutRunner({
     steps: workflow.steps,
     exploreIntent,
     maxAgentSteps,
+    engineAdapter: input.engineAdapter,
     engineBaseUrl: input.engineBaseUrl,
     engineModel: input.engineModel,
     agentPrimaryRoutes,
+    agentAutoNavigationRoutes,
     agentNavigationRoutes: [
       ...new Set([targetDocumentUrl.href, ...agentNavigationRoutes])
     ],
+    agentAutoLoadRoutes,
+    agentBackgroundLoadRoutes: [],
     agentLoadRoutes,
     agentExpectedTexts,
     agentExpectedControls,
@@ -1963,10 +2027,13 @@ export function createScoutRunner({
       steps: [],
       pages: [],
       routePolicy: exploreIntent
-        ? {
+          ? {
             primaryRoutes: [...options.agentPrimaryRoutes],
             navigationRoutes: [...options.agentNavigationRoutes],
-            loadRoutes: [...options.agentLoadRoutes]
+            loadRoutes: [...options.agentLoadRoutes],
+            automaticNavigationRoutes: options.agentAutoNavigationRoutes,
+            automaticLoadRoutes: options.agentAutoLoadRoutes,
+            backgroundLoadRoutes: [...options.agentBackgroundLoadRoutes]
           }
         : null,
       verification: null,
@@ -2179,6 +2246,9 @@ export function createScoutRunner({
     const agentNavigationRoutes = new Set(options.agentNavigationRoutes);
     const agentPrimaryRoutes = new Set(options.agentPrimaryRoutes);
     const agentLoadRoutes = new Set(options.agentLoadRoutes);
+    const agentBackgroundLoadRoutes = new Set(
+      options.agentBackgroundLoadRoutes || []
+    );
     let agentNetworkPolicyActive = options.exploreIntent;
     let agentActionContext = options.exploreIntent
       ? {
@@ -2275,11 +2345,20 @@ export function createScoutRunner({
                 requestOrigin = new URL(occurrence.url).origin;
               } catch {}
               const readAllowed = ["GET", "HEAD"].includes(occurrence.method);
+              const backgroundLoadAllowed =
+                options.agentAutoLoadRoutes &&
+                isAgentRouteAuthorized(
+                  occurrence.url,
+                  agentBackgroundLoadRoutes
+                );
               if (requestOrigin !== authorization.origin) {
                 policyReason = "agent-cross-origin";
               } else if (!readAllowed) {
                 policyReason = "agent-non-read-method";
-              } else if (agentActionContext?.action !== "visit") {
+              } else if (
+                agentActionContext?.action !== "visit" &&
+                !backgroundLoadAllowed
+              ) {
                 policyReason = "agent-non-visit-request";
               } else if (
                 !isAgentUrlAllowed(occurrence.url, authorization.origin)
@@ -2289,6 +2368,12 @@ export function createScoutRunner({
                 !isAgentRouteAuthorized(occurrence.url, agentLoadRoutes)
               ) {
                 policyReason = "agent-route-not-authorized";
+              } else if (
+                options.agentAutoLoadRoutes &&
+                agentActionContext?.action === "visit"
+              ) {
+                const route = exactAgentRoute(occurrence.url);
+                if (route) agentBackgroundLoadRoutes.add(route);
               }
             }
             if (policyReason) {
@@ -2466,6 +2551,12 @@ export function createScoutRunner({
         agentNavigationRoutes,
         agentLoadRoutes
       );
+      const backgroundAgentLoad =
+        options.agentAutoLoadRoutes &&
+        BACKGROUND_AGENT_RESOURCE_TYPES.has(
+          route.request().resourceType()
+        ) &&
+        isAgentRouteAuthorized(requestUrl, agentBackgroundLoadRoutes);
       let agentActionAllowed = false;
       if (agentNetworkPolicyActive && agentActionContext && !localResource) {
         if (agentActionContext.action !== "visit") {
@@ -2486,6 +2577,9 @@ export function createScoutRunner({
         } else {
           agentActionAllowed = agentActionContext.navigationWindowOpen;
         }
+        if (!agentActionAllowed && backgroundAgentLoad) {
+          agentActionAllowed = true;
+        }
       }
       if (
         (localResource &&
@@ -2498,6 +2592,17 @@ export function createScoutRunner({
               agentRouteAllowed &&
               agentActionAllowed)))
       ) {
+        if (
+          options.agentAutoLoadRoutes &&
+          agentNetworkPolicyActive &&
+          agentActionContext?.action === "visit" &&
+          BACKGROUND_AGENT_RESOURCE_TYPES.has(
+            route.request().resourceType()
+          )
+        ) {
+          const routeUrl = exactAgentRoute(requestUrl);
+          if (routeUrl) agentBackgroundLoadRoutes.add(routeUrl);
+        }
         await route.continue(
           fetchOccurrence ? { headers: forwardedHeaders } : undefined
         );
@@ -2567,6 +2672,15 @@ export function createScoutRunner({
       startActive
     }) => {
       const navigationRoutes = new Set(authorizedNavigationRoutes);
+      const routeAllowed = (value) => {
+        for (const route of navigationRoutes) {
+          if (route.endsWith("*") && value.startsWith(route.slice(0, -1))) {
+            return true;
+          }
+          if (route === value) return true;
+        }
+        return false;
+      };
       const prohibited = new RegExp(prohibitedPattern, "i");
       const canonicalizeSemanticText = (value) =>
         String(value ?? "")
@@ -2611,7 +2725,7 @@ export function createScoutRunner({
             !url.password &&
             decoded !== null &&
             !prohibited.test(canonicalizeSemanticText(decoded)) &&
-            navigationRoutes.has(url.href)
+            routeAllowed(url.href)
           );
         } catch {
           return false;
@@ -3328,6 +3442,7 @@ export function createScoutRunner({
         let resolvedEngine;
         try {
           resolvedEngine = await resolveEngine({
+            adapter: options.engineAdapter,
             baseUrl: options.engineBaseUrl,
             model: options.engineModel,
             timeoutMs: Math.max(options.timeoutMs, 120_000)
@@ -3550,6 +3665,12 @@ export function createScoutRunner({
       noteScreenshotCaptureFailure(error);
     }
     await collectAgentGuardAttempts();
+    options.agentBackgroundLoadRoutes = [...agentBackgroundLoadRoutes];
+    if (state.exploration.routePolicy) {
+      state.exploration.routePolicy.backgroundLoadRoutes = [
+        ...agentBackgroundLoadRoutes
+      ];
+    }
   }
   let screenshot = null;
   let browserRunError = null;

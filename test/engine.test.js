@@ -6,6 +6,7 @@ import { delimiter, join, resolve } from "node:path";
 import { test } from "bun:test";
 import {
   classifyAgentEngineEndpoint,
+  createBuiltinIntentEngine,
   createCompatibleEngine,
   resolveAgentEngine
 } from "../src/scout/engine.js";
@@ -239,6 +240,7 @@ test("compatible engine rejects redirects without forwarding planning data", asy
 
 test("missing default local engine resolves to actionable test mechanics", async () => {
   const resolved = await resolveAgentEngine({
+    adapter: "http",
     fetchImpl: async () => {
       throw new Error("connection refused at http://127.0.0.1:11434/?secret=value");
     },
@@ -247,8 +249,112 @@ test("missing default local engine resolves to actionable test mechanics", async
 
   assert.equal(resolved.engine, null);
   assert.equal(resolved.diagnostic.id, "agent-engine-unavailable");
-  assert.match(resolved.diagnostic.remediation, /Start Ollama/);
+  assert.match(resolved.diagnostic.remediation, /Start the configured engine/);
   assert.doesNotMatch(JSON.stringify(resolved.diagnostic), /secret=value/);
+});
+
+test("automatic engine resolution uses the bounded built-in planner", async () => {
+  const resolved = await resolveAgentEngine();
+  assert.ok(resolved.engine);
+  assert.equal(resolved.capabilities.jsonSchema, "verified");
+  assert.equal(resolved.capabilities.toolCalls, "not-applicable");
+  assert.equal(
+    resolved.engine.provenance().adapter,
+    "yellowbird-bounded-planner"
+  );
+  assert.equal(resolved.engine.provenance().endpointClass, "local-process");
+});
+
+test("built-in planner chooses one unambiguous safe setup route", async () => {
+  const engine = createBuiltinIntentEngine();
+  const response = await engine.completeStructured({
+    purpose: "safe_interaction_exploration",
+    messages: [
+      {
+        role: "user",
+        content: JSON.stringify({
+          intent: "Ensure user flow works as expected",
+          policy: { stepsTaken: 0 },
+          page: {
+            availableElements: [
+              {
+                ref: "safe-ref",
+                label: "New monitor",
+                href: "http://localhost:3000/monitors/new",
+                allowedAction: "visit"
+              },
+              {
+                ref: "safe-ref-duplicate",
+                label: "New monitor",
+                href: "http://localhost:3000/monitors/new",
+                allowedAction: "visit"
+              },
+              {
+                ref: "other-ref",
+                label: "Existing monitor",
+                href: "http://localhost:3000/monitors/existing",
+                allowedAction: "visit"
+              }
+            ]
+          }
+        })
+      }
+    ],
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "action",
+        "elementRef",
+        "value",
+        "rationale",
+        "coverage",
+        "summary"
+      ],
+      properties: {
+        action: { type: "string", enum: ["act", "finish"] },
+        elementRef: { type: ["string", "null"] },
+        value: { type: ["string", "null"] },
+        rationale: { type: "string" },
+        coverage: {
+          type: "string",
+          enum: ["continue", "covered", "partial", "blocked"]
+        },
+        summary: { type: "string" }
+      }
+    }
+  });
+
+  assert.equal(response.output.action, "act");
+  assert.ok(["safe-ref", "safe-ref-duplicate"].includes(response.output.elementRef));
+
+  const fieldResponse = await engine.completeStructured({
+    purpose: "safe_interaction_exploration",
+    messages: [
+      {
+        role: "user",
+        content: JSON.stringify({
+          intent: "Ensure user flow works as expected",
+          policy: { stepsTaken: 1 },
+          page: {
+            availableElements: [
+              { ref: "field-ref", allowedAction: "fill" }
+            ]
+          }
+        })
+      }
+    ],
+    schema: {
+      type: "object",
+      required: ["action", "elementRef"],
+      properties: {
+        action: { type: "string", enum: ["act", "finish"] },
+        elementRef: { type: ["string", "null"] }
+      }
+    }
+  });
+  assert.equal(fieldResponse.output.action, "act");
+  assert.equal(fieldResponse.output.elementRef, "field-ref");
 });
 
 test("configured engine rejects malformed structured content", async () => {

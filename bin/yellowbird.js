@@ -35,6 +35,11 @@ function argumentsFor(name) {
   return optionValues(name);
 }
 
+function optionalArgumentsFor(name) {
+  const values = argumentsFor(name);
+  return values.length ? values : undefined;
+}
+
 function flag(name) {
   return process.argv.includes(`--${name}`);
 }
@@ -89,16 +94,17 @@ async function doctor() {
     detail: "fixed local development principal"
   });
   checks.push({
-    name: "Model provider",
-    ok: true,
-    warning: true,
-    detail: "checking local compatible endpoint"
+    name: "Intent planner",
+    ok: false,
+    detail: "checking configured planner"
   });
   const { inspectAgentEngine } = await import("../src/scout/engine.js");
   const engine = await inspectAgentEngine();
-  checks[checks.length - 1].detail = engine.available
-    ? `${engine.provenance.modelReported} via ${engine.provenance.adapter}; JSON Schema verified`
-    : `${engine.diagnostic.title} Deterministic scenarios remain available.`;
+  const engineCheck = checks[checks.length - 1];
+  engineCheck.ok = engine.available;
+  engineCheck.detail = engine.available
+    ? `${engine.provenance.modelReported} via ${engine.provenance.adapter}; structured output verified`
+    : `${engine.diagnostic.title} ${engine.diagnostic.remediation}`;
 
   console.log("Yellow Bird doctor\n");
   for (const check of checks) {
@@ -106,7 +112,9 @@ async function doctor() {
     console.log(`${icon} ${check.name}: ${check.detail}`);
   }
   console.log(
-    "\nThe local scout and bounded intent exploration are executable. Dashboard orchestration remains simulated."
+    engine.available
+      ? "\nThe local scout and bounded intent exploration are executable. Dashboard orchestration remains simulated."
+      : "\nThe local scout can still run deterministic scenarios, but intent exploration is not operational."
   );
   process.exitCode = checks.every((check) => check.ok) ? 0 : 1;
 }
@@ -186,11 +194,12 @@ async function scout() {
       !scenarioPath &&
       (explicitIntent !== undefined || (flag("agent") && !flag("no-agent"))),
     maxAgentSteps: argument("max-agent-steps", "4"),
+    engineAdapter: argument("engine-adapter"),
     engineBaseUrl: argument("engine-base-url"),
     engineModel: argument("engine-model"),
-    agentPrimaryRoutes: argumentsFor("agent-primary-route"),
-    agentNavigationRoutes: argumentsFor("agent-navigation-route"),
-    agentLoadRoutes: argumentsFor("agent-load-route"),
+    agentPrimaryRoutes: optionalArgumentsFor("agent-primary-route"),
+    agentNavigationRoutes: optionalArgumentsFor("agent-navigation-route"),
+    agentLoadRoutes: optionalArgumentsFor("agent-load-route"),
     agentExpectedTexts: argumentsFor("agent-expect-text"),
     agentExpectedControls: argumentsFor("agent-expect-control"),
     ...output,
@@ -275,6 +284,7 @@ Usage:
                    [--expect-title TEXT] [--expect-text TEXT ...]
                    [--output DIRECTORY|REPORT.md] [--verbose]
                    [--agent|--no-agent] [--max-agent-steps 4]
+                   [--engine-adapter auto|builtin|http]
                    [--engine-base-url URL] [--engine-model ID]
                    [--agent-primary-route URL ...]
                    [--agent-navigation-route URL ...]

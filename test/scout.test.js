@@ -43,6 +43,7 @@ let delete2FARequestCount = 0;
 let relatedTargetEffectCount = 0;
 let sameUrlCorrelationRequestCount = 0;
 let replaySettlementDelayedRequestCount = 0;
+let zeroConfigBackgroundRequestCount = 0;
 let failVisitNavigation = false;
 let changeReplaySettlementUrl = false;
 let hideAgentFlowHeading = false;
@@ -164,6 +165,44 @@ beforeAll(async () => {
   const { chromium } = await import("@playwright/test");
   sharedBrowser = await chromium.launch({ headless: true, timeout: 15_000 });
   server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/zero-config-flow-data") {
+      zeroConfigBackgroundRequestCount += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ready: true }));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/zero-config-flow") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Zero-config dashboard</title></head>
+          <body>
+            <h1>Product monitors</h1>
+            <a href="/zero-config-setup">New monitor</a>
+            <script>
+              const refresh = () => fetch("/zero-config-flow-data").catch(() => {});
+              refresh();
+              setInterval(refresh, 100);
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/zero-config-setup") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Zero-config setup</title></head>
+          <body>
+            <h1>Track any public product page</h1>
+            <input type="url" aria-label="Product URL">
+            <textarea aria-label="Tracking instruction"></textarea>
+            <select aria-label="Frequency"><option>Daily</option></select>
+            <button type="submit">Compile monitor</button>
+          </body>
+        </html>`);
+      return;
+    }
     if (request.method === "GET" && request.url === "/implicit-static-app.js") {
       response.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
       response.end(
@@ -2237,6 +2276,62 @@ test("intent exploration loads passive same-origin application assets without de
   assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
 }, 30_000);
 
+test("zero-configuration intent discovers a safe setup route and background reads", async () => {
+  zeroConfigBackgroundRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-zero-config-intent-")
+  );
+  const report = await createScoutRunner({
+    launchBrowser: launchSharedBrowser
+  })({
+    target: `${target}/zero-config-flow`,
+    intent: "Ensure user flow works as expected",
+    exploreIntent: true,
+    agentPrimaryRoutes: undefined,
+    agentNavigationRoutes: undefined,
+    agentLoadRoutes: undefined,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.invalidTestMechanics.length, 0);
+  assert.equal(report.observations.blockedRequests.length, 0);
+  assert.deepEqual(
+    report.observations.exploration.steps.map((step) => step.action),
+    ["visit", "fill", "fill"]
+  );
+  assert.ok(zeroConfigBackgroundRequestCount >= 2);
+  assert.equal(
+    report.observations.exploration.verification?.profile,
+    "initial-interface-basic-flow.v1"
+  );
+  assert.equal(report.observations.exploration.verification?.satisfied, true);
+  assert.equal(
+    report.observations.exploration.routePolicy.automaticNavigationRoutes,
+    true
+  );
+  assert.equal(
+    report.observations.exploration.routePolicy.automaticLoadRoutes,
+    true
+  );
+  assert.ok(
+    report.observations.exploration.routePolicy.backgroundLoadRoutes.includes(
+      `${target}/zero-config-flow-data`
+    )
+  );
+
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(markdown, /5\/5 YellowBird-observed coverage criteria satisfied/);
+  assert.match(markdown, /automatic safe same-origin discovery/);
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+}, 30_000);
+
 test("action-policy cleanup failures retain findings and durable evidence", async () => {
   const outputDirectory = await mkdtemp(
     join(tmpdir(), "yellowbird-agent-cleanup-failure-")
@@ -2382,7 +2477,7 @@ test("intent-driven scout executes bounded same-origin navigation", async () => 
   );
   assert.match(
     markdown,
-    /Effective scope: Bounded safe exploration; 2\/2 interaction\(s\) exercised; no declared workflow; 1 product assertion\./
+    /Effective scope: Bounded safe exploration; 2\/2 interaction\(s\) exercised; no declared workflow; 1 product assertion; 5\/5 YellowBird-observed coverage criteria satisfied\./
   );
   assert.match(markdown, /Evidence outcome: \*\*clear\*\*/);
   assert.ok(
