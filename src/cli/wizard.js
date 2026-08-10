@@ -1,28 +1,26 @@
 import { createInterface } from "node:readline/promises";
+import { authorizeScoutTarget } from "../scout/target.js";
 
 export const DEFAULT_WIZARD_INTENT =
   "Assess the initial interface and basic user flow";
 export const DEFAULT_WIZARD_TARGET = "http://127.0.0.1:3000";
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
-
 function targetValidationError(value) {
-  let target;
   try {
-    target = new URL(value);
-  } catch {
-    return "Enter an absolute URL such as http://127.0.0.1:3000.";
+    authorizeScoutTarget(value);
+    return null;
+  } catch (error) {
+    return (
+      {
+        "invalid-target-url":
+          "Enter an absolute URL such as http://127.0.0.1:3000.",
+        "invalid-target-protocol": "The target must use http or https.",
+        "target-credentials": "Do not embed credentials in the target URL.",
+        "target-not-loopback":
+          "This Yellowbird version supports localhost, 127.0.0.1, and ::1 targets."
+      }[error.code] || error.message
+    );
   }
-  if (!["http:", "https:"].includes(target.protocol)) {
-    return "The target must use http or https.";
-  }
-  if (target.username || target.password) {
-    return "Do not embed credentials in the target URL.";
-  }
-  if (!LOOPBACK_HOSTS.has(target.hostname)) {
-    return "This Yellowbird version supports localhost, 127.0.0.1, and ::1 targets.";
-  }
-  return null;
 }
 
 async function promptValue({ ask, write, label, fallback, validate }) {
