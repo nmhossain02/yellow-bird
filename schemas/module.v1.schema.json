@@ -1,42 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://yellowbird.dev/schemas/scenario.v1.schema.json",
-  "title": "YellowBird owner-declared browser scenario",
+  "$id": "https://yellowbird.dev/schemas/module.v1.schema.json",
+  "title": "YellowBird reusable browser workflow module",
   "type": "object",
-  "required": [
-    "schema",
-    "target",
-    "intent",
-    "permissions",
-    "assertions",
-    "steps"
-  ],
+  "required": ["schema", "parameters", "steps"],
   "properties": {
-    "schema": {
-      "const": "yellowbird.scenario.v1"
-    },
-    "target": {
-      "type": "string",
-      "format": "uri"
-    },
-    "intent": {
-      "type": "string",
-      "minLength": 1
-    },
-    "permissions": {
+    "schema": { "const": "yellowbird.module.v1" },
+    "parameters": {
       "type": "array",
+      "maxItems": 50,
       "uniqueItems": true,
       "items": {
-        "enum": [
-          "browser.navigate",
-          "browser.read",
-          "browser.fill",
-          "browser.click",
-          "browser.submit"
-        ]
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
       }
     },
-    "variables": {
+    "defaults": {
       "type": "object",
       "propertyNames": {
         "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
@@ -46,132 +25,28 @@
         "maxLength": 4000
       }
     },
-    "assertions": {
-      "type": "object",
-      "required": ["expectedStatus"],
-      "properties": {
-        "expectedStatus": {
-          "type": "integer",
-          "minimum": 100,
-          "maximum": 599
-        },
-        "expectedTitle": {
-          "type": "string"
-        },
-        "expectedTexts": {
-          "type": "array",
-          "items": { "type": "string" }
-        }
-      }
-    },
-    "agent": {
-      "$ref": "#/$defs/agent"
-    },
     "steps": {
       "type": "array",
       "maxItems": 200,
       "items": {
         "oneOf": [
-          {
-            "$ref": "#/$defs/click"
-          },
-          {
-            "$ref": "#/$defs/fill"
-          },
+          { "$ref": "#/$defs/click" },
+          { "$ref": "#/$defs/fill" },
           { "$ref": "#/$defs/select" },
           { "$ref": "#/$defs/check" },
           { "$ref": "#/$defs/uncheck" },
           { "$ref": "#/$defs/hover" },
           { "$ref": "#/$defs/press" },
-          {
-            "$ref": "#/$defs/expectText"
-          },
-          {
-            "$ref": "#/$defs/expectVisible"
-          },
+          { "$ref": "#/$defs/expectText" },
+          { "$ref": "#/$defs/expectVisible" },
           { "$ref": "#/$defs/expectValue" },
-          {
-            "$ref": "#/$defs/expectVisual"
-          },
-          {
-            "$ref": "#/$defs/module"
-          }
+          { "$ref": "#/$defs/expectVisual" },
+          { "$ref": "#/$defs/module" }
         ]
       }
     }
   },
   "$defs": {
-    "agent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schema",
-        "mode",
-        "fields",
-        "mutationControls",
-        "mutationRoutes",
-        "expectedTexts"
-      ],
-      "properties": {
-        "schema": { "const": "yellowbird.agent.v1" },
-        "mode": { "const": "authorized-workflow" },
-        "fields": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 19,
-          "items": { "$ref": "#/$defs/agentField" }
-        },
-        "mutationControls": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 10,
-          "items": { "$ref": "#/$defs/agentMutationControl" }
-        },
-        "mutationRoutes": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 1,
-          "items": { "$ref": "#/$defs/agentMutationRoute" }
-        },
-        "expectedTexts": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 20,
-          "items": { "type": "string", "minLength": 1, "maxLength": 400 }
-        }
-      }
-    },
-    "agentField": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["role", "type", "name", "value"],
-      "properties": {
-        "role": { "enum": ["textbox", "searchbox", "spinbutton"] },
-        "type": { "enum": ["email", "number", "search", "tel", "text", "textarea", "url"] },
-        "name": { "type": "string", "minLength": 1, "maxLength": 400 },
-        "value": { "type": "string", "maxLength": 4000 }
-      }
-    },
-    "agentMutationControl": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["role", "type", "name"],
-      "properties": {
-        "role": { "const": "button" },
-        "type": { "enum": ["button", "submit"] },
-        "name": { "type": "string", "minLength": 1, "maxLength": 400 }
-      }
-    },
-    "agentMutationRoute": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["method", "url"],
-      "properties": {
-        "method": { "enum": ["POST", "PUT", "PATCH", "DELETE"] },
-        "url": { "type": "string", "minLength": 1 },
-        "maxRequests": { "const": 1 }
-      }
-    },
     "base": {
       "type": "object",
       "required": ["id", "action"],
@@ -218,11 +93,7 @@
     "click": {
       "allOf": [
         { "$ref": "#/$defs/base" },
-        {
-          "properties": {
-            "action": { "const": "click" }
-          }
-        }
+        { "properties": { "action": { "const": "click" } } }
       ]
     },
     "fill": {
@@ -247,24 +118,9 @@
         { "required": ["value"], "properties": { "action": { "const": "select" }, "value": { "type": "string" } } }
       ]
     },
-    "check": {
-      "allOf": [
-        { "$ref": "#/$defs/base" },
-        { "properties": { "action": { "const": "check" } } }
-      ]
-    },
-    "uncheck": {
-      "allOf": [
-        { "$ref": "#/$defs/base" },
-        { "properties": { "action": { "const": "uncheck" } } }
-      ]
-    },
-    "hover": {
-      "allOf": [
-        { "$ref": "#/$defs/base" },
-        { "properties": { "action": { "const": "hover" } } }
-      ]
-    },
+    "check": { "allOf": [{ "$ref": "#/$defs/base" }, { "properties": { "action": { "const": "check" } } }] },
+    "uncheck": { "allOf": [{ "$ref": "#/$defs/base" }, { "properties": { "action": { "const": "uncheck" } } }] },
+    "hover": { "allOf": [{ "$ref": "#/$defs/base" }, { "properties": { "action": { "const": "hover" } } }] },
     "press": {
       "allOf": [
         { "$ref": "#/$defs/base" },
@@ -286,11 +142,7 @@
     "expectVisible": {
       "allOf": [
         { "$ref": "#/$defs/base" },
-        {
-          "properties": {
-            "action": { "const": "expectVisible" }
-          }
-        }
+        { "properties": { "action": { "const": "expectVisible" } } }
       ]
     },
     "expectValue": {
@@ -306,21 +158,9 @@
           "required": ["baseline"],
           "properties": {
             "action": { "const": "expectVisual" },
-            "baseline": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^(?![/\\\\])"
-            },
-            "maxDiffPixelRatio": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "colorThreshold": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            }
+            "baseline": { "type": "string", "minLength": 1, "pattern": "^(?![/\\\\])" },
+            "maxDiffPixelRatio": { "type": "number", "minimum": 0, "maximum": 1 },
+            "colorThreshold": { "type": "number", "minimum": 0, "maximum": 1 }
           }
         }
       ]

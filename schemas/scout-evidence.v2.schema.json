@@ -96,6 +96,31 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "agentExpectedTexts": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "string", "minLength": 1, "maxLength": 400 }
+        },
+        "agentExpectedControls": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "type", "name"],
+            "properties": {
+              "role": {
+                "enum": ["button", "combobox", "spinbutton", "textbox"]
+              },
+              "type": { "type": "string" },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 400
+              }
+            }
+          }
+        },
         "consoleErrorsAllowed": { "type": "boolean" }
       }
     },
@@ -171,7 +196,409 @@
               "status": { "enum": ["passed", "failed", "invalid", "skipped"] },
               "evidence": { "type": "string" },
               "reason": { "type": "string" },
-              "durationMs": { "type": "integer", "minimum": 0 }
+              "durationMs": { "type": "integer", "minimum": 0 },
+              "healed": { "type": "boolean" },
+              "visual": {
+                "type": "object",
+                "required": [
+                  "dimensionsMatch",
+                  "actual",
+                  "baseline",
+                  "baselinePath",
+                  "diffPixels",
+                  "diffPixelRatio",
+                  "maxDiffPixelRatio",
+                  "colorThreshold"
+                ],
+                "properties": {
+                  "dimensionsMatch": { "type": "boolean" },
+                  "actual": { "$ref": "#/$defs/imageDimensions" },
+                  "baseline": { "$ref": "#/$defs/imageDimensions" },
+                  "baselinePath": { "type": "string" },
+                  "diffPixels": { "type": "integer", "minimum": 0 },
+                  "diffPixelRatio": { "type": "number", "minimum": 0, "maximum": 1 },
+                  "maxDiffPixelRatio": { "type": "number", "minimum": 0, "maximum": 1 },
+                  "colorThreshold": { "type": "number", "minimum": 0, "maximum": 1 }
+                }
+              },
+              "repair": {
+                "type": "object",
+                "required": [
+                  "from",
+                  "to",
+                  "confidence",
+                  "expectedResultChanged"
+                ],
+                "properties": {
+                  "from": { "$ref": "#/$defs/workflowSemanticTarget" },
+                  "to": { "$ref": "#/$defs/workflowSemanticTarget" },
+                  "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "expectedResultChanged": { "const": false }
+                }
+              }
+            }
+          }
+        },
+        "exploration": {
+          "type": "object",
+          "required": [
+            "requested",
+            "mode",
+            "status",
+            "coverage",
+            "summary",
+            "steps",
+            "pages",
+            "verification",
+            "engine",
+            "capabilities",
+            "provenance",
+            "issue"
+          ],
+          "properties": {
+            "requested": { "type": "boolean" },
+            "mode": {
+              "enum": [
+                "agent-safe-interaction",
+                "agent-authorized-workflow",
+                "not-requested"
+              ]
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "not-requested",
+                "skipped",
+                "inconclusive",
+                "completed"
+              ]
+            },
+            "coverage": {
+              "enum": [
+                "pending",
+                "not-requested",
+                "covered",
+                "partial",
+                "blocked"
+              ]
+            },
+            "summary": { "type": "string" },
+            "engine": { "type": ["string", "null"] },
+            "capabilities": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "required": ["jsonSchema", "toolCalls", "imageInput"],
+                  "properties": {
+                    "jsonSchema": {
+                      "enum": ["verified", "unverified", "unavailable"]
+                    },
+                    "toolCalls": {
+                      "enum": [
+                        "verified",
+                        "unverified",
+                        "unavailable",
+                        "not-applicable"
+                      ]
+                    },
+                    "imageInput": {
+                      "enum": [
+                        "verified",
+                        "unverified",
+                        "unavailable",
+                        "not-applicable"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "provenance": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "required": [
+                    "adapter",
+                    "endpointClass",
+                    "modelRequested",
+                    "modelReported",
+                    "capabilityManifestVersion"
+                  ],
+                  "properties": {
+                    "adapter": { "type": "string" },
+                    "endpointClass": {
+                      "enum": ["loopback", "remote", "local-process"]
+                    },
+                    "modelRequested": { "type": "string" },
+                    "modelReported": { "type": "string" },
+                    "capabilityManifestVersion": { "type": "string" }
+                  }
+                }
+              ]
+            },
+            "issue": { "type": ["object", "null"] },
+            "routePolicy": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "required": [
+                    "primaryRoutes",
+                    "navigationRoutes",
+                    "loadRoutes"
+                  ],
+                  "properties": {
+                    "primaryRoutes": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    },
+                    "navigationRoutes": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    },
+                    "loadRoutes": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    },
+                    "backgroundLoadRoutes": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    },
+                    "mutationRoutes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["method", "url", "maxRequests"],
+                        "properties": {
+                          "method": { "enum": ["POST", "PUT", "PATCH", "DELETE"] },
+                          "url": { "type": "string" },
+                          "maxRequests": { "const": 1 }
+                        }
+                      }
+                    },
+                    "automaticNavigationRoutes": {
+                      "type": "boolean"
+                    },
+                    "automaticLoadRoutes": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              ]
+            },
+            "verification": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "required": [
+                    "profile",
+                    "authority",
+                    "satisfied",
+                    "criteria",
+                    "summary"
+                  ],
+                  "properties": {
+                    "profile": { "type": "string" },
+                    "authority": {
+                      "const": "yellowbird-observed-criteria"
+                    },
+                    "satisfied": { "type": "boolean" },
+                    "criteria": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["id", "satisfied"],
+                        "properties": {
+                          "id": { "type": "string" },
+                          "satisfied": { "type": "boolean" }
+                        }
+                      }
+                    },
+                    "summary": { "type": "string" }
+                  }
+                }
+              ]
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["url", "title", "authorizedControlCount"],
+                "properties": {
+                  "url": { "type": "string" },
+                  "title": { "type": "string" },
+                  "authorizedControlCount": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "action",
+                  "status",
+                  "sourceUrl",
+                  "requestedUrl",
+                  "url",
+                  "title",
+                  "destinationControlCount",
+                  "destinationAssertions",
+                  "httpStatus",
+                  "evidence",
+                  "rationale",
+                  "value",
+                  "locator",
+                  "navigationAttempted",
+                  "durationMs"
+                ],
+                "properties": {
+                  "id": { "type": "string" },
+                  "action": {
+                    "enum": ["visit", "fill", "select", "click", "mutate"]
+                  },
+                  "status": {
+                    "enum": ["passed", "failed", "invalid"]
+                  },
+                  "sourceUrl": { "type": "string" },
+                  "requestedUrl": { "type": ["string", "null"] },
+                  "url": { "type": "string" },
+                  "title": { "type": "string" },
+                  "destinationControlCount": {
+                    "type": ["integer", "null"],
+                    "minimum": 0
+                  },
+                  "destinationAssertions": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["text", "satisfied"],
+                      "properties": {
+                        "text": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 400
+                        },
+                        "satisfied": { "type": "boolean" }
+                      }
+                    }
+                  },
+                  "destinationControlAssertions": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "role",
+                        "type",
+                        "name",
+                        "matchCount",
+                        "satisfied"
+                      ],
+                      "properties": {
+                        "role": {
+                          "enum": [
+                            "button",
+                            "combobox",
+                            "spinbutton",
+                            "textbox"
+                          ]
+                        },
+                        "type": { "type": "string" },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 400
+                        },
+                        "matchCount": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 120
+                        },
+                        "satisfied": { "type": "boolean" }
+                      }
+                    }
+                  },
+                  "httpStatus": { "type": ["integer", "null"] },
+                  "evidence": { "type": "string" },
+                  "rationale": { "type": "string" },
+                  "value": { "type": ["string", "null"] },
+                  "control": {
+                    "type": "object",
+                    "required": ["role", "type", "name"],
+                    "properties": {
+                      "role": { "type": "string" },
+                      "type": { "type": "string" },
+                      "name": { "type": "string" }
+                    }
+                  },
+                  "mutationRequests": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["method", "url"],
+                      "properties": {
+                        "method": { "enum": ["POST", "PUT", "PATCH", "DELETE"] },
+                        "url": { "type": "string" }
+                      }
+                    }
+                  },
+                  "navigationAttempted": { "type": "boolean" },
+                  "locator": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "selector",
+                          "ordinal",
+                          "matchCount"
+                        ],
+                        "properties": {
+                          "kind": { "const": "css" },
+                          "selector": { "type": "string" },
+                          "ordinal": { "type": "integer", "minimum": 0 },
+                          "matchCount": { "type": "integer", "minimum": 1 }
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "role",
+                          "name",
+                          "ordinal",
+                          "matchCount"
+                        ],
+                        "properties": {
+                          "kind": { "const": "role" },
+                          "role": { "type": "string" },
+                          "name": { "type": "string" },
+                          "ordinal": { "type": "integer", "minimum": 0 },
+                          "matchCount": { "type": "integer", "minimum": 1 }
+                        }
+                      }
+                    ]
+                  },
+                  "durationMs": { "type": "integer", "minimum": 0 }
+                }
+              }
             }
           }
         }
@@ -209,7 +636,43 @@
         "runner": { "type": "string" },
         "runtime": { "type": "string" },
         "browser": { "type": "string" },
-        "agenticEngine": { "type": ["string", "null"] }
+        "agenticEngine": { "type": ["string", "null"] },
+        "engine": {
+          "type": "object",
+          "required": [
+            "adapter",
+            "endpointClass",
+            "modelRequested",
+            "modelReported",
+            "capabilityManifestVersion"
+          ],
+          "properties": {
+            "adapter": { "type": "string" },
+            "endpointClass": { "enum": ["loopback", "remote", "local-process"] },
+            "modelRequested": { "type": "string" },
+            "modelReported": { "type": "string" },
+            "capabilityManifestVersion": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "imageDimensions": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "workflowSemanticTarget": {
+      "type": "object",
+      "required": ["role", "name", "exact"],
+      "properties": {
+        "role": { "type": "string" },
+        "name": { "type": "string" },
+        "exact": { "type": "boolean" }
       }
     }
   }

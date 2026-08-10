@@ -3,6 +3,7 @@ node_modules/
 coverage/
 playwright-report/
 test-results/
+test/fixtures/external/
 .DS_Store
 .env
 .env.*

@@ -4,10 +4,13 @@ YellowBird is an open-source, deploy-anywhere canary testing project. Its goal i
 to discover product failures before customers do, preserve the product owner's
 expected results, and return evidence that can be reproduced without YellowBird.
 
-The first executable slice is intentionally small: a local browser scout. It
-checks a loopback web target, captures runtime evidence, and generates a portable
-Playwright regression. The dashboard still demonstrates the larger orchestration
-model while that model is implemented incrementally.
+The executable product is a local browser scout. It checks a loopback web target,
+can explore a bounded flow from natural-language intent, captures runtime
+evidence, and generates a portable Playwright regression. Ordinary intent runs
+remain non-submitting. A versioned scenario can grant one exact owner-declared
+mutation request with observed final assertions. The dashboard
+still demonstrates the larger orchestration model while that model is implemented
+incrementally.
 
 ## Try the real scout
 
@@ -17,6 +20,32 @@ YellowBird uses [Bun](https://bun.sh/) 1.3 or newer.
 bun install
 bun run setup:browsers
 ```
+
+The common non-mutating intent `Ensure user flow works as expected` uses
+YellowBird's in-process bounded planner by default. It needs no model service and
+does not expose page content to a general-purpose agent. `doctor` reports the
+selected planner and its capability state:
+
+```bash
+bun run doctor
+```
+
+Broader natural-language exploration uses an OpenAI-compatible chat endpoint.
+For the currently tested local setup, install Ollama, make sure its service is
+running, pull the model, and select the HTTP adapter:
+
+```bash
+ollama pull qwen3.5:9b
+export YELLOWBIRD_ENGINE_ADAPTER=http
+export YELLOWBIRD_ENGINE_MODEL=qwen3.5:9b
+bun run doctor
+```
+
+For HTTP engines, `doctor` reports the selected model and whether strict JSON
+Schema output passed the harmless conformance probe. The first probe may wait up
+to two minutes for a local model to load cold. A scout is `inconclusive` with
+exit code `3` if its configured engine is unavailable or its intent exceeds the
+built-in planner's bounded profile.
 
 Start the deliberately broken demo product:
 
@@ -34,19 +63,36 @@ bun run scout -- \
   --expect-text "Checkout ready"
 ```
 
-The scout exits `2` when it finds asserted failures and `3` when test mechanics
-make the result inconclusive. It writes an evidence bundle under
+The scout reports `attention` and exits `2` when it finds product failures, or
+reports `inconclusive` and exits `3` when test mechanics prevent a trustworthy
+result. Product findings take precedence when both occur, while the mechanics
+issue remains explicit in the report. Invalid input or configuration and
+evidence-bundle persistence failures remain fatal and exit `1`.
+
+The human report leads with an operational assessment separate from the stable
+machine outcome. `ERROR` means YellowBird could not complete a trustworthy
+evaluation and should be treated as an operational concern until diagnosed.
+`LIMITED` means the runner completed without mechanics errors, but only a smoke
+check or bounded safe exploration ran without a declared functional workflow.
+`ATTENTION` identifies observed product failure signals, and combines with
+`ERROR` when both product findings and run-integrity problems occur. `CLEAR` is
+reserved for completed deterministic or owner-authorized functional workflows. The effective scope
+counts every enforced product assertion, including the expected HTTP status.
+The same summary states the YellowBird run status, product signal, and effective
+scope so a narrow `clear` evidence outcome cannot read as broad product health.
+
+Runs that reach finalization write an evidence bundle under
 `.yellowbird/scout/<run-id>/`:
 
-- `report.md` — human-readable findings, reproduction steps, and coverage gaps
-- `evidence.json` — versioned machine-readable observations and provenance
-- `page.png` — full-page visual evidence when a browser page was available
-- `regression.spec.js` — deterministic Playwright assertions suitable for review
-- `playwright.config.js` — makes the regression immediately replayable from the
+- `report.md` - human-readable findings, reproduction steps, and coverage gaps
+- `evidence.json` - versioned machine-readable observations and provenance
+- `page.png` - bounded viewport visual evidence when screenshot capture succeeds
+- `regression.spec.js` - deterministic Playwright assertions suitable for review
+- `playwright.config.js` - makes the regression immediately replayable from the
   hidden evidence directory
-- `package.json` — pins the Playwright dependency needed to replay from any
+- `package.json` - pins the Playwright dependency needed to replay from any
   product repository
-- `diagnostics.jsonl` — ordered, run-correlated operational events conforming to
+- `diagnostics.jsonl` - ordered, run-correlated operational events conforming to
   [`schemas/diagnostic-event.v1.schema.json`](./schemas/diagnostic-event.v1.schema.json),
   with URL query values and console contents omitted
 
@@ -57,8 +103,9 @@ The original
 remains available unchanged for historical evidence, so integrations can migrate
 between explicit contract versions without depending on YellowBird internals.
 
-The demo has a fixed state at `http://127.0.0.1:4321/?fixed`, so the same command
-with that target should complete with `clear`.
+The demo has a fixed state at `http://127.0.0.1:4321/?fixed`. To verify the fixed
+assertions as an initial-page smoke check, use that target without `--intent`
+and add `--no-agent`; the run should complete with `clear`.
 
 To run a real multi-step canary, use the versioned example scenario:
 
@@ -69,8 +116,86 @@ bun run scout -- --scenario examples/checkout.scenario.json
 That workflow declares `browser.fill` and `browser.click` before the run, enters
 an email, prepares an order, and asserts that the product reaches `Order ready`.
 Its actions and assertions are also written into the generated regression.
+Steps can use a CSS `selector` or a semantic `target` with an accessibility
+`role`, optional accessible `name`, and optional `exact` matching. Semantic
+targets are preferred because they preserve user-facing intent across DOM class
+and layout changes while keeping execution and replay deterministic. Set
+`"heal": true` on a named semantic target to allow bounded accessible-name
+healing. YellowBird waits for the original target, considers only visible
+controls with the same role, requires one high-confidence unambiguous match,
+records the repair without changing expected results, and pins the observed name
+into the generated replay.
+Scenarios may also declare non-secret string `variables` and interpolate them as
+`{{ vars.NAME }}` in the target, intent, assertions, and workflow string fields.
+An `action: "module"` step loads a `yellowbird.module.v1` JSON file relative to
+the scenario, supplies parameter `inputs`, and expands its steps with stable
+dot-prefixed IDs before validation and execution. Modules may define parameter
+`defaults` and invoke nested modules. Module paths are resolved physically and
+must remain inside the scenario directory. Expansion is limited to 10 nesting
+levels, 50 module files, and 200 browser steps. Continue to use `valueFromEnv`
+for secrets because scenario variables are intentionally preserved in the
+portable regression.
 The public format is
-[`schemas/scenario.v1.schema.json`](./schemas/scenario.v1.schema.json).
+[`schemas/scenario.v1.schema.json`](./schemas/scenario.v1.schema.json), and the
+module format is [`schemas/module.v1.schema.json`](./schemas/module.v1.schema.json).
+
+Intent-driven server mutation is available only inside a versioned scenario.
+It cannot be enabled by `--intent`, `--agent`, planner output, or a route flag.
+The scenario must declare `browser.submit` and an `agent` object with schema
+`yellowbird.agent.v1`, mode `authorized-workflow`, exact semantic fields, one
+exact semantic mutation control, one exact-origin non-read route with a request
+budget of one, and final rendered-text assertions. Deterministic workflow steps
+cannot be mixed with this mode. For example:
+
+```json
+{
+  "agent": {
+    "schema": "yellowbird.agent.v1",
+    "mode": "authorized-workflow",
+    "fields": [
+      {
+        "role": "textbox",
+        "type": "url",
+        "name": "Product URL",
+        "value": "https://example.test/product"
+      }
+    ],
+    "mutationControls": [
+      { "role": "button", "type": "submit", "name": "Compile monitor" }
+    ],
+    "mutationRoutes": [
+      { "method": "POST", "url": "/api/v1/monitors", "maxRequests": 1 }
+    ],
+    "expectedTexts": ["Review your monitor"]
+  }
+}
+```
+
+YellowBird keeps owner field values out of planner input, records the chosen
+actions and exact authorized request, and generates a model-free replay with the
+same request budget and final assertions. Scenario variables are non-secret, so
+this first authority version intentionally does not accept credentials or
+environment-backed field values.
+
+Scenarios and modules also support deterministic `select`, `check`, `uncheck`,
+`hover`, `press`, and `expectValue` steps. An `expectVisual` step compares a
+selector or semantic target against a repository-owned PNG with configurable
+`maxDiffPixelRatio` and `colorThreshold` values from 0 to 1. Baseline paths are
+resolved physically, must remain inside the scenario directory, must be PNG
+files no larger than 2 MiB, and are embedded into the portable replay. Live
+evidence records dimensions, changed pixels, the observed ratio, and configured
+thresholds. For example:
+
+```json
+{
+  "id": "summary-card",
+  "action": "expectVisual",
+  "target": { "role": "region", "name": "Order summary" },
+  "baseline": "baselines/order-summary.png",
+  "maxDiffPixelRatio": 0.01,
+  "colorThreshold": 0.1
+}
+```
 
 ## Use YellowBird from another repository
 
@@ -87,10 +212,91 @@ Markdown file and places the remaining evidence in `report.assets/`:
 cd /path/to/product
 yellowbird scout \
   --target http://127.0.0.1:3000 \
-  --intent "Assess the initial interface" \
+  --intent "Ensure user flow works as expected" \
+  --output yellowbird-report.md
+```
+
+With no route declarations, YellowBird uses its zero-configuration safe mode:
+same-origin `GET` and `HEAD` navigation, initial application reads, prohibited
+action filtering, and no submission or mutation authority. Add owner assertions
+when the report must prove a specific destination contract:
+
+```bash
+yellowbird scout \
+  --target http://127.0.0.1:3000 \
+  --intent "Assess the initial interface and basic user flow" \
+  --agent-primary-route /monitors/new \
+  --agent-expect-text "Track any public product page" \
+  --agent-expect-control "textbox:url:Product URL" \
+  --agent-expect-control "textbox:textarea:Tracking instruction" \
+  --agent-expect-control "combobox:select-one:Frequency" \
+  --agent-expect-control "button:submit:Compile monitor" \
   --output yellowbird-report.md \
   --verbose
 ```
+
+Outside a versioned scenario, an explicit `--intent` enables bounded agent
+exploration. `--agent` opts into the same loop with the default initial-page
+intent. The interaction budget defaults to four steps; `--max-agent-steps`
+accepts values from `1` through `20`. An explicit `--intent` takes precedence
+over `--no-agent`; YellowBird never turns a requested intent into an
+initial-page-only clear result. `--no-agent` can suppress a default loop
+requested only through `--agent`. Use a versioned `--scenario` when the owner
+needs an exact deterministic workflow, including an empty initial-page smoke
+check or mutation-capable actions with explicit assertions.
+
+Repeated `--agent-primary-route` or `--agent-navigation-route` declarations
+replace automatic navigation discovery with owner-defined authority. Primary
+routes are the owner-identified destinations that may satisfy an owned coverage
+profile. Navigation routes are safe to visit but cannot satisfy the
+primary-route criterion. Repeated `--agent-load-route` declarations likewise
+replace automatic initial load discovery. Same-origin scripts, stylesheets,
+images, fonts, media, manifests, and text tracks load automatically so a modern
+application can render. Automatically observed `fetch`, XHR, and event-stream
+URLs may continue their exact background reads for the current page and portable
+replay. Their follow-on effects remain subject to the read-only request policy.
+Load declarations may end in `*` for an explicit path prefix. Relative
+declarations resolve against the target, and every declaration must remain on
+its exact origin.
+
+Repeated `--agent-expect-text` declarations bind the owned coverage profile to
+text the owner expects on the visited primary destination. YellowBird records
+whether each bounded destination assertion was satisfied and preserves the same
+assertions in the portable replay. Repeated `--agent-expect-control`
+declarations use `role:type:name` and require one visible semantic control with
+that exact accessible name and DOM control type. These structural assertions
+prevent static copy from impersonating a working form, and replay preserves the
+same role, name, visibility, uniqueness, and type checks.
+Native search inputs and multi-select controls retain the declaration roles
+`textbox` and `combobox` while browser accessibility roles are verified.
+
+Engine adapter selection defaults to `auto`. Without HTTP engine configuration,
+YellowBird uses its built-in bounded planner for the non-mutating initial
+interface and basic user-flow intent shown above. The built-in planner selects
+only one unambiguous `New`, `Start`, `Setup`, `Begin`, or `Onboard` navigation,
+exercises eligible fields with deterministic synthetic values without
+submitting, then YellowBird decides coverage from browser-observed criteria. It
+does not invoke a general-purpose agent or send the page snapshot to another
+process. Force it with `--engine-adapter builtin`.
+
+Configure a compatible HTTP endpoint for broader intents:
+
+```bash
+yellowbird scout \
+  --target http://127.0.0.1:3000 \
+  --intent "Assess the initial interface and basic user flow" \
+  --agent-primary-route /monitors/new \
+  --engine-base-url http://127.0.0.1:11434/v1 \
+  --engine-model qwen3.5:9b
+```
+
+The equivalent environment variables are `YELLOWBIRD_ENGINE_ADAPTER`,
+`YELLOWBIRD_ENGINE_BASE_URL`, `YELLOWBIRD_ENGINE_MODEL`, and
+`YELLOWBIRD_ENGINE_API_KEY`. The API key is sent
+only as a bearer token and is never written to the evidence bundle. Configured
+and provider-reported model identifiers must be nonempty printable text, at most
+200 UTF-16 code units, with no surrounding whitespace. Invalid identifiers are
+rejected before they enter terminal, Markdown, diagnostic, or evidence output.
 
 An existing directory whose name ends in `.md` is diagnosed as legacy output;
 rename or remove it, choose a new Markdown filename, or pass a directory path
@@ -98,6 +304,10 @@ without a `.md` suffix. Verbose mode renders a live view of the same structured
 lifecycle events retained in `diagnostics.jsonl`. Exit `0` means no failure was
 observed within the tested scope; consult the coverage gaps before treating that
 as broader product health.
+
+The repository also provides an identity-checked local validation against the
+real Price Scout checkout and its portable replay. See
+[`docs/validation/price-scout-e2e.md`](./docs/validation/price-scout-e2e.md).
 
 ## Scout safety boundary
 
@@ -116,11 +326,87 @@ This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
 scoped run grants, sandboxing, and policy approval before they are enabled.
 
-The scout clicks and fills controls only when an owner-declared scenario requests
-those capabilities. It does not explore beyond declared steps, sign up external
-users, or use an LLM. A failed action is reported as `inconclusive`, not as a
-product pass or product bug, because selector healing has not been implemented.
-That distinction is part of the evidence contract.
+An ordinary natural-language intent may visit owner-declared exact-origin links,
+fill eligible fields with YellowBird-owned synthetic values, select supplied
+options, and use a narrow allowlist of read-only non-submit buttons whose labels
+begin with `collapse`, `detail`, `details`, `expand`, `hide`, `inspect`,
+`preview`, `reveal`, `show`, `toggle`, or `view`. YellowBird applies the same
+semantic denial to every control type and blocks non-read HTTP methods,
+destructive request URLs, and WebSocket, WebTransport, and WebRTC connections
+throughout agent exploration. Dedicated and shared worker creation is also
+policy-blocked because a worker can open WebTransport before a page-level
+observer can constrain it. Form submission,
+authentication, credential use, cross-origin navigation, and destructive
+controls are not available to the model as actions. A `yellowbird.agent.v1`
+scenario is the only exception: it exposes only the exact owner-declared fields
+and mutation control, opens only the single declared non-read request for one
+active action, requires exactly one observed mutation request, and verifies the
+owner-declared final text. The model proposes one
+supplied element at a time; YellowBird validates and executes the action. Model
+text is coverage guidance, never product-failure evidence. Planner output alone
+cannot authorize `covered` coverage. An intent-exploration run can be `clear`
+only when a named YellowBird-owned profile satisfies every machine-readable
+observed criterion. The initial-interface basic-flow profile, for example,
+requires the initial page, a passed visit to a distinct authorized route, safe
+controls observed on that destination, and no failed agent action. Intents that
+do not match an owned profile, need undeclared server-side mutation, or require another
+action outside the safe interaction authority produce an `inconclusive` result
+instead of an unverified pass. After at least one authorized step passes, a
+later planner, action, cleanup, policy, or browser-operation failure preserves
+the earlier steps and page observations as `partial` coverage.
+
+Before authorizing controls or requests, YellowBird repeatedly percent-decodes
+URL and control semantics, normalizes case and letter-digit boundaries so names
+such as `delete2FA` remain prohibited, considers computed accessible names
+including `aria-labelledby`, and fails closed when encoded text or a referenced
+label cannot be resolved. Browser guards are installed before destination scripts
+run, keep their enforcement state outside page-accessible objects, and report
+blocked browser operations through a per-run channel. Agent document visits
+intercept every redirect response so an unsafe destination is blocked before the
+browser follows it. Policy-rejected `fetch` calls are recorded and rejected
+before dispatch. During the initial target load and each authorized visit,
+exact-origin `GET` and `HEAD` non-document request URLs, including `EventSource`,
+are allowed through a 150 ms settlement interval after `DOMContentLoaded`.
+Allowed response bodies continue streaming without YellowBird buffering them.
+In zero-configuration mode, exact `fetch`, XHR, and event-stream URLs observed in
+that window may repeat as page-owned background reads. New later URLs are
+blocked, as are the non-HTTP transports above throughout agent mode. The
+evidence JSON and Markdown report retain declared or automatic navigation and
+load authority plus the exact observed background routes used for browser
+enforcement.
+
+The generated regression re-enforces the live scout's exact-origin, request,
+redirect, and 150 ms action-settlement guards, including submission and the same
+non-HTTP transport blocking, without calling the model. Every authorized visit
+attempt is retained for replay, including one that failed during the live scout.
+Recorded non-navigation actions also replay through verified locators and assert
+their match counts before using the recorded ordinal. The replay also fails for
+the same exact-origin HTTP response and request failures that produce live
+product findings.
+
+Fetch errors caused by policy enforcement are correlated to the exact blocked
+request occurrence and excluded from product-failure evidence. Independent
+console, page, and request errors, including another failure at the same URL,
+remain product signals.
+
+A bounded snapshot of the current page URL, title, text, and control inventory,
+including supplied link URLs and select options, is evaluated by the selected
+planner. Text and controls must pass ancestor visibility, rendered geometry,
+closed-container, and clipping checks before entering that snapshot. URLs are
+represented exactly and can include query values. The built-in planner keeps
+that data in process. Planning requests to a configured HTTP engine never follow
+endpoint redirects. Operators choosing a remote endpoint are responsible for
+that data boundary. Query values and console contents remain out of operational
+diagnostics.
+
+Owner-declared scenarios retain their explicit permission model for exact
+`fill`, `click`, `expectText`, and `expectVisible` steps. A failed action is
+reported as `inconclusive`, not as a product pass or product bug. Scenarios can
+use deterministic accessibility-role targets to avoid CSS-selector drift, but
+automatic healing is limited to explicitly opted-in semantic accessible names
+and fails closed on low-confidence or ambiguous candidates. That distinction is
+part of the evidence contract. Assertions wait up to the configured browser timeout for async page
+transitions and rendering before they fail.
 
 Navigation and transport failures are also `inconclusive` test mechanics rather
 than product findings. The report provides a diagnostic code, remediation, and
@@ -135,7 +421,24 @@ steps are marked skipped with reason `browser-unavailable`, and the report says
 the product was not evaluated. Since no page existed, `artifacts.screenshot` is
 `null` and no screenshot file is claimed. Applications embedding the scout can
 inject a browser launcher with `createScoutRunner({ launchBrowser })`;
-`runScout(input)` uses the real Playwright Chromium launcher.
+`runScout(input)` uses the real Playwright Chromium launcher. The runner's
+`timeoutMs` input defaults to 15 seconds and is passed to Playwright when Chromium
+launches.
+
+An isolated browser-context creation failure is also finalized as
+`inconclusive`. The report marks navigation and declared workflow steps skipped,
+keeps the screenshot artifact `null`, and retains an actionable operational
+diagnostic.
+
+A screenshot capture failure likewise finalizes with a test-mechanics issue,
+keeps `artifacts.screenshot` set to `null`, records the visual-evidence coverage
+gap, and preserves the remaining evidence bundle. With no product findings, the
+outcome is `inconclusive`.
+
+A browser cleanup failure is recorded at the same finalization boundary. The
+completed product observations and available artifacts are retained, cleanup is
+reported as test mechanics, and a run without product findings is
+`inconclusive`.
 
 ## Run the dashboard
 
@@ -175,8 +478,16 @@ local browser check.
 - Loopback-only target authorization and exact-origin browser network policy
 - Initial-page navigation with status, title, text, console, exception, failed
   request, screenshot, and interactive-element evidence
-- Permission-declared `fill`, `click`, `expectText`, and `expectVisible` workflow
-  steps with `inconclusive` handling for invalid test mechanics
+- Intent-driven bounded exploration through YellowBird's safe built-in planner,
+  including versioned owner-authorized one-request workflows,
+  or a probed OpenAI-compatible endpoint
+- YellowBird-enforced same-origin action policy, synthetic form values, truthful
+  coverage accounting, engine provenance, and model-free replay
+- Permission-declared form, pointer, keyboard, text, value, visibility, and
+  pixel-tolerant visual workflow steps with `inconclusive` handling for invalid
+  test mechanics
+- Non-secret scenario variables and bounded, parameterized, nested workflow
+  modules that expand before validation into deterministic replay steps
 - Loopback transport diagnosis and evidence-backed HTTPS-to-HTTP scheme repair
 - Ordered JSONL diagnostics correlated by run ID, with a live `--verbose` view
 - Owner-authored assertions that YellowBird does not rewrite
@@ -193,8 +504,9 @@ local browser check.
   customer code.
 - Dashboard findings and evidence are deterministic demo fixtures.
 - Remote target verification records proof state without making a network challenge.
-- Kimi, open-weight model endpoints, email, source provider, secret store, issue
-  tracker, and production sandbox integrations remain adapter boundaries.
+- A generic OpenAI-compatible model endpoint is real. A native hosted Kimi
+  adapter, email, source provider, secret store, issue tracker, and production
+  sandbox integrations remain adapter boundaries.
 - Dashboard authentication uses a fixed development principal.
 
 These seams are visible in API output and the UI so the product does not imply
@@ -203,10 +515,11 @@ security or coverage it has not earned.
 ## Engine direction
 
 YellowBird is Kimi-first and open-model-first, but its test domain is not coupled
-to one model. YellowBird will own the agent loop, tool authorization, evidence
-rules, and expected-result integrity. Model/runtime pairs must pass capability
-probes because an API shape alone does not guarantee equivalent tool calling,
-structured output, multimodal input, or cancellation behavior.
+to one model. The local scout now owns its first agent loop, action authorization,
+evidence rules, and expected-result integrity. The compatible adapter verifies
+strict JSON Schema output and records other capabilities as unverified. Additional
+probes remain necessary because an API shape alone does not guarantee equivalent
+tool calling, multimodal input, streaming, or cancellation behavior.
 
 See [the engine strategy report](./docs/research/004-open-model-first-engine-strategy.md).
 

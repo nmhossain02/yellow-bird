@@ -8,6 +8,9 @@
     "browser.fill",
     "browser.click"
   ],
+  "variables": {
+    "TEST_EMAIL": "bird@example.test"
+  },
   "assertions": {
     "expectedStatus": 200,
     "expectedTitle": "Feather Shop",
@@ -15,21 +18,12 @@
   },
   "steps": [
     {
-      "id": "enter-email",
-      "action": "fill",
-      "selector": "[name=email]",
-      "value": "bird@example.test"
-    },
-    {
       "id": "prepare-order",
-      "action": "click",
-      "selector": "#checkout"
-    },
-    {
-      "id": "confirm-order-ready",
-      "action": "expectText",
-      "selector": "#status",
-      "text": "Order ready"
+      "action": "module",
+      "path": "modules/prepare-order.module.json",
+      "inputs": {
+        "EMAIL": "{{ vars.TEST_EMAIL }}"
+      }
     }
   ]
 }

@@ -1,7 +1,13 @@
-const ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+const TERMINAL_SEQUENCE_PATTERN =
+  /\u001b(?:\][\s\S]*?(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~]|[PX^_][\s\S]*?\u001b\\|[@-_])/g;
+const CONTROL_CHARACTER_PATTERN =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 
 export function cleanDiagnosticText(value) {
-  return String(value || "").replace(ANSI_PATTERN, "").trim();
+  return String(value || "")
+    .replace(TERMINAL_SEQUENCE_PATTERN, "")
+    .replace(CONTROL_CHARACTER_PATTERN, "")
+    .trim();
 }
 
 function redactUrlValues(value) {
@@ -10,6 +16,10 @@ function redactUrlValues(value) {
     const url = trailing ? candidate.slice(0, -trailing.length) : candidate;
     return `${diagnosticUrl(url).url}${trailing}`;
   });
+}
+
+export function sanitizeDiagnosticText(value) {
+  return redactUrlValues(cleanDiagnosticText(value));
 }
 
 export function diagnosticUrl(value) {
@@ -84,8 +94,14 @@ function httpAlternative(requested) {
   return candidate;
 }
 
-export async function resolveLoopbackScheme(target, timeoutMs, record) {
+export async function resolveLoopbackScheme(
+  target,
+  timeoutMs,
+  record,
+  validateProbeTarget = () => {}
+) {
   const requested = new URL(target);
+  validateProbeTarget(requested.href);
   record("debug", "target.probe.started", "Probing the requested target", {
     ...diagnosticUrl(requested.href),
     method: "HEAD"
@@ -105,6 +121,7 @@ export async function resolveLoopbackScheme(target, timeoutMs, record) {
   }
 
   const candidate = httpAlternative(requested);
+  validateProbeTarget(candidate.href);
   record(
     "debug",
     "target.scheme_probe.started",
@@ -155,7 +172,7 @@ export async function resolveLoopbackScheme(target, timeoutMs, record) {
 }
 
 export function diagnoseNavigationError(error, target) {
-  const detail = redactUrlValues(cleanDiagnosticText(error));
+  const detail = sanitizeDiagnosticText(error);
   const lower = detail.toLowerCase();
   if (lower.includes("err_ssl_protocol_error")) {
     const suggestedTarget = diagnosticUrl(
@@ -210,7 +227,7 @@ export function diagnoseNavigationError(error, target) {
 }
 
 export function diagnoseBrowserLaunchError(error) {
-  const detail = redactUrlValues(cleanDiagnosticText(error));
+  const detail = sanitizeDiagnosticText(error);
   const lower = detail.toLowerCase();
   if (
     lower.includes("executable doesn't exist") ||

@@ -37,11 +37,38 @@ Yellow Bird will be **Kimi-first and open-model-first, but model-independent**.
 The initial implementation order is:
 
 1. a Yellow Bird-owned agent loop and normalized engine contract;
-2. a Moonshot-hosted Kimi adapter;
-3. a generic OpenAI-compatible endpoint adapter for customer-hosted Kimi and other open-weight models;
-4. conformance probes and capability manifests for every configured model/runtime pair;
+2. a generic OpenAI-compatible endpoint adapter for customer-hosted Kimi and other open-weight models;
+3. conformance probes and capability manifests for every configured model/runtime pair;
+4. a Moonshot-hosted Kimi adapter;
 5. additional native provider adapters only where the common protocol loses a capability Yellow Bird needs;
 6. subscription-backed agent CLIs as an optional local compatibility tier, not the core engine.
+
+### Implementation checkpoint: 2026-07-31
+
+The local scout now implements the first usable slice of this decision:
+
+- a Yellow Bird-owned bounded planning and execution loop;
+- a generic OpenAI-compatible Chat Completions adapter;
+- a deterministic in-process planner for the zero-configuration, non-mutating
+  initial-interface basic-flow profile;
+- a harmless strict JSON Schema conformance probe;
+- model and adapter provenance plus capability state in portable scout evidence;
+- named Yellow Bird-owned coverage criteria for the initial-interface basic-flow
+  profile, while other partial planner coverage remains inconclusive;
+- exact-origin link visits, deterministic synthetic field values, supplied select
+  options, and narrowly filtered non-submit button actions;
+- deterministic replay that does not call the planning model;
+- an explicit `inconclusive` result when the engine or requested capability is
+  unavailable.
+
+The configured local HTTP binding defaults to Ollama at
+`http://127.0.0.1:11434/v1`. The implementation has been exercised with
+`qwen3.5:9b`; this is a tested local binding, not a change to the Kimi-first
+reference strategy. With no HTTP engine configuration, the bounded built-in
+planner is selected instead. Native Moonshot/Kimi transport behavior, tool-call
+probes, image input, model-response streaming, cancellation, and production
+deployment bindings remain future work and are reported as unverified rather
+than implied.
 
 Kimi is the first reference model family because its current models are designed for agentic tool use, expose structured output and multimodal capabilities through the hosted API, and publish weights that can be deployed through common inference servers. As of 2026-07-30, Kimi K3 is Moonshot's current flagship and its official repository recommends vLLM, SGLang, or TokenSpeed for deployment. Its hosted API exposes Chat Completions, tools, JSON Schema output, streaming, usage, and reasoning controls ([Kimi API concepts](https://platform.kimi.ai/docs/introduction), [Kimi Chat API](https://platform.kimi.ai/docs/api/chat), [Kimi K3](https://github.com/MoonshotAI/Kimi-K3)).
 
@@ -137,9 +164,9 @@ Yellow Bird must preserve the complete provider continuation state needed for a 
 
 Use three layers instead of one adapter per model:
 
-1. **Transport adapter** — Chat Completions-compatible HTTP, provider-native HTTP, or local process.
-2. **Model-family codec** — message history, reasoning preservation, tool-call formatting, multimodal encoding, recommended sampling.
-3. **Deployment binding** — base URL, credential reference, model identifier, data boundary, runtime, and limits.
+1. **Transport adapter** - Chat Completions-compatible HTTP, provider-native HTTP, or local process.
+2. **Model-family codec** - message history, reasoning preservation, tool-call formatting, multimodal encoding, recommended sampling.
+3. **Deployment binding** - base URL, credential reference, model identifier, data boundary, runtime, and limits.
 
 This lets hosted Kimi and self-hosted Kimi share a model-family codec while differing in transport extensions and operational policy.
 
@@ -233,9 +260,9 @@ Kimi's frontier open weights are large. Kimi K3 has 2.8 trillion total parameter
 
 The same capability probes decide whether a smaller local model is suitable for a particular run profile. Deterministic scenarios may need little or no agent inference; exploratory, multimodal, and adversarial profiles may require a stronger binding.
 
-### 4. Model output is not evidence by itself
+### 4. Model output does not create findings or assertions
 
-Kimi or another model may identify a promising failure, but Yellow Bird reports a product bug only after collecting target observations and replayable actions. A model assertion without target evidence becomes a hypothesis or an inconclusive result.
+Kimi or another model may choose where to inspect, but it does not create product findings or change owner assertions. Yellow Bird reports a product bug only from owner-defined assertions and runtime signals backed by target observations and replayable actions. Model text remains coverage guidance rather than a finding or hypothesis.
 
 For high-severity findings, configurable verification should support:
 
@@ -275,7 +302,7 @@ Scores are relative: 5 is best. “Implementation simplicity” rewards lower co
 | Hosted Kimi first | 4 | 2 | 5 | 5 | 4 | **Choose as first hosted binding** |
 | Self-hosted compatible endpoint first | 5 | 5 | 3 | 2 | 3 | **Choose as first open-weight binding** |
 | Require frontier Kimi locally | 1 | 2 | 5 | 1 | 1 | Reject |
-| Capability-tested smaller local models | 5 | 5 | 2–4 | 4 | 3 | **Choose** |
+| Capability-tested smaller local models | 5 | 5 | 2-4 | 4 | 3 | **Choose** |
 
 ## Forward-looking considerations
 

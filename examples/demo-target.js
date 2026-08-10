@@ -23,7 +23,7 @@ const server = createServer((request, response) => {
       <p>${fixed ? "Checkout ready" : "Checkout temporarily unavailable"}</p>
       <label>Email <input name="email" type="email"></label>
       <button id="checkout" type="button">Buy a feather</button>
-      <p id="status" aria-live="polite"></p>
+      <p id="status" role="status" aria-live="polite"></p>
     </main>
     ${
       fixed

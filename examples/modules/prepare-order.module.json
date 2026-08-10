@@ -1,0 +1,31 @@
+{
+  "schema": "yellowbird.module.v1",
+  "parameters": ["EMAIL"],
+  "steps": [
+    {
+      "id": "enter-email",
+      "action": "fill",
+      "target": {
+        "role": "textbox",
+        "name": "Email"
+      },
+      "value": "{{ vars.EMAIL }}"
+    },
+    {
+      "id": "buy",
+      "action": "click",
+      "target": {
+        "role": "button",
+        "name": "Buy a feather"
+      }
+    },
+    {
+      "id": "confirm-ready",
+      "action": "expectText",
+      "target": {
+        "role": "status"
+      },
+      "text": "Order ready"
+    }
+  ]
+}

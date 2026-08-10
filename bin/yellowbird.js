@@ -1,29 +1,52 @@
 #!/usr/bin/env bun
 
-import { access, readFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
-import { diagnosticUrl } from "../src/scout/diagnostics.js";
+import {
+  cleanDiagnosticText,
+  diagnosticUrl
+} from "../src/scout/diagnostics.js";
 import { resolveOutputOption } from "../src/scout/output.js";
+import { loadScenarioFile } from "../src/scout/scenario.js";
 import { startServer } from "../src/server.js";
 
-function argument(name, fallback) {
-  const index = process.argv.indexOf(`--${name}`);
-  return index === -1 ? fallback : process.argv[index + 1];
-}
-
-function argumentsFor(name) {
+function optionValues(name) {
   const values = [];
   for (let index = 0; index < process.argv.length; index += 1) {
-    if (process.argv[index] === `--${name}` && process.argv[index + 1]) {
-      values.push(process.argv[index + 1]);
+    if (process.argv[index] !== `--${name}`) continue;
+    const value = process.argv[index + 1];
+    if (
+      typeof value !== "string" ||
+      !value.trim() ||
+      value.startsWith("--")
+    ) {
+      throw new Error(`--${name} requires a non-empty value`);
     }
+    values.push(value);
   }
   return values;
 }
 
+function argument(name, fallback) {
+  return optionValues(name)[0] ?? fallback;
+}
+
+function argumentsFor(name) {
+  return optionValues(name);
+}
+
+function optionalArgumentsFor(name) {
+  const values = argumentsFor(name);
+  return values.length ? values : undefined;
+}
+
 function flag(name) {
   return process.argv.includes(`--${name}`);
+}
+
+function terminalText(value) {
+  return cleanDiagnosticText(value).replaceAll(/\s+/g, " ");
 }
 
 async function doctor() {
@@ -72,11 +95,17 @@ async function doctor() {
     detail: "fixed local development principal"
   });
   checks.push({
-    name: "Model provider",
-    ok: true,
-    warning: true,
-    detail: "simulated — Kimi and generic open-weight endpoint adapters are unconfigured"
+    name: "Intent planner",
+    ok: false,
+    detail: "checking configured planner"
   });
+  const { inspectAgentEngine } = await import("../src/scout/engine.js");
+  const engine = await inspectAgentEngine();
+  const engineCheck = checks[checks.length - 1];
+  engineCheck.ok = engine.available;
+  engineCheck.detail = engine.available
+    ? `${engine.provenance.modelReported} via ${engine.provenance.adapter}; structured output verified`
+    : `${engine.diagnostic.title} ${engine.diagnostic.remediation}`;
 
   console.log("Yellow Bird doctor\n");
   for (const check of checks) {
@@ -84,7 +113,9 @@ async function doctor() {
     console.log(`${icon} ${check.name}: ${check.detail}`);
   }
   console.log(
-    "\nThe local scout is executable. Dashboard orchestration and agentic testing remain simulated."
+    engine.available
+      ? "\nThe local scout and bounded intent exploration are executable. Dashboard orchestration remains simulated."
+      : "\nThe local scout can still run deterministic scenarios, but intent exploration is not operational."
   );
   process.exitCode = checks.every((check) => check.ok) ? 0 : 1;
 }
@@ -125,12 +156,7 @@ async function scout() {
   const scenarioPath = argument("scenario");
   let scenario = {};
   if (scenarioPath) {
-    scenario = JSON.parse(await readFile(resolve(scenarioPath), "utf8"));
-    if (scenario.schema !== "yellowbird.scenario.v1") {
-      throw new Error(
-        "scenario must declare schema yellowbird.scenario.v1"
-      );
-    }
+    scenario = await loadScenarioFile(scenarioPath);
   }
 
   const target = argument("target", scenario.target);
@@ -140,10 +166,12 @@ async function scout() {
 
   const output = await resolveOutputOption(argument("output"));
   const verbose = flag("verbose");
+  const explicitIntent = argument("intent");
+  const intent = explicitIntent ?? scenario.intent;
   const { runScout } = await import("../src/scout/scout.js");
   const report = await runScout({
     target,
-    intent: argument("intent", scenario.intent),
+    intent,
     expectedStatus: argument(
       "expect-status",
       String(scenario.assertions?.expectedStatus ?? 200)
@@ -158,6 +186,23 @@ async function scout() {
     ],
     permissions: scenario.permissions,
     steps: scenario.steps,
+    exploreIntent:
+      scenario.agent?.mode === "authorized-workflow" ||
+      (!scenarioPath &&
+        (explicitIntent !== undefined || (flag("agent") && !flag("no-agent")))),
+    maxAgentSteps: argument(
+      "max-agent-steps",
+      String(scenario.agent ? scenario.agent.fields.length + 1 : 4)
+    ),
+    engineAdapter: argument("engine-adapter"),
+    engineBaseUrl: argument("engine-base-url"),
+    engineModel: argument("engine-model"),
+    agentPrimaryRoutes: optionalArgumentsFor("agent-primary-route"),
+    agentNavigationRoutes: optionalArgumentsFor("agent-navigation-route"),
+    agentLoadRoutes: optionalArgumentsFor("agent-load-route"),
+    agentExpectedTexts: argumentsFor("agent-expect-text"),
+    agentExpectedControls: argumentsFor("agent-expect-control"),
+    agentAuthorization: scenario.agent,
     ...output,
     headed: flag("headed"),
     ignoreConsoleErrors: flag("ignore-console-errors"),
@@ -178,10 +223,28 @@ async function scout() {
   }
   console.log(`Findings: ${report.findings.length}`);
   console.log(
-    report.observations.workflowSteps.length
+    report.observations.exploration.requested
+      ? `Scope: ${report.observations.exploration.steps.length} bounded agent interaction step(s); coverage=${report.observations.exploration.coverage}`
+      : report.observations.workflowSteps.length
       ? `Scope: ${report.observations.workflowSteps.length} declared workflow step(s); no autonomous exploration`
       : `Scope: initial page load only; ${report.observations.interactiveElements.length} interactive element(s) not exercised`
   );
+  if (report.observations.exploration.requested) {
+    console.log(`Agent: ${report.observations.exploration.status}`);
+    if (report.observations.exploration.verification?.satisfied) {
+      console.log(
+        `Coverage verified: ${report.observations.exploration.verification.profile}`
+      );
+    }
+    console.log(
+      `Engine: ${report.observations.exploration.engine || "unavailable"}`
+    );
+    if (report.observations.exploration.summary) {
+      console.log(
+        `Agent summary (coverage only): ${terminalText(report.observations.exploration.summary)}`
+      );
+    }
+  }
   if (report.invalidTestMechanics.length) {
     console.log(`Test-mechanics issues: ${report.invalidTestMechanics.length}`);
     for (const issue of report.invalidTestMechanics) {
@@ -221,6 +284,14 @@ Usage:
   yellowbird scout [--scenario FILE] [--target URL] [--intent TEXT] [--expect-status 200]
                    [--expect-title TEXT] [--expect-text TEXT ...]
                    [--output DIRECTORY|REPORT.md] [--verbose]
+                   [--agent|--no-agent] [--max-agent-steps 4]
+                   [--engine-adapter auto|builtin|http]
+                   [--engine-base-url URL] [--engine-model ID]
+                   [--agent-primary-route URL ...]
+                   [--agent-navigation-route URL ...]
+                   [--agent-load-route URL|URL* ...]
+                   [--agent-expect-text TEXT ...]
+                   [--agent-expect-control ROLE:TYPE:NAME ...]
                    [--headed] [--ignore-console-errors]
 `);
 }
