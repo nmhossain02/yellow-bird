@@ -462,7 +462,20 @@ credentials, approvals, and operational bindings stay outside the product repo.
 
 ## CLI
 
+Run `yellowbird` without arguments in an interactive terminal to open the
+first-run wizard. It offers an intent-guided browser flow, an initial-page smoke
+check, or an existing scenario. The wizard validates the target and expected
+status, collects optional headed and output settings, prints the equivalent
+shell-safe `yellowbird scout` command, and asks for confirmation before running
+it. This is intentionally a small command builder today so the same entry point
+can later grow into run history and automation management.
+
+When standard input or output is not a terminal, a no-argument invocation prints
+help and exits instead of waiting for prompts. Existing explicit commands remain
+unchanged.
+
 ```bash
+yellowbird
 bun run doctor
 bun bin/yellowbird.js serve --port 4310
 bun bin/yellowbird.js run --project prj_feather --target tgt_local --profile balanced
@@ -483,6 +496,8 @@ local browser check.
   or a probed OpenAI-compatible endpoint
 - YellowBird-enforced same-origin action policy, synthetic form values, truthful
   coverage accounting, engine provenance, and model-free replay
+- Interactive first-run wizard that builds, previews, confirms, and executes a
+  real scout command without changing non-interactive CLI behavior
 - Permission-declared form, pointer, keyboard, text, value, visibility, and
   pixel-tolerant visual workflow steps with `inconclusive` handling for invalid
   test mechanics
@@ -527,6 +542,7 @@ See [the engine strategy report](./docs/research/004-open-model-first-engine-str
 
 ```text
 bin/yellowbird.js       Local CLI
+src/cli/                Interactive terminal wizard
 examples/               Runnable target used to demonstrate scout behavior
 src/scout/              Real local browser scout and evidence generation
 src/server.js           Dashboard HTTP server and API routes

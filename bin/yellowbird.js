@@ -10,6 +10,7 @@ import {
 import { resolveOutputOption } from "../src/scout/output.js";
 import { loadScenarioFile } from "../src/scout/scenario.js";
 import { startServer } from "../src/server.js";
+import { runFirstRunWizard } from "../src/cli/wizard.js";
 
 function optionValues(name) {
   const values = [];
@@ -278,6 +279,7 @@ function help() {
   console.log(`YellowBird
 
 Usage:
+  yellowbird                         Start the first-run wizard
   yellowbird serve [--port 4310]
   yellowbird doctor
   yellowbird run [--server URL] [--project ID] [--target ID] [--profile balanced|deterministic|exploratory]
@@ -296,14 +298,27 @@ Usage:
 `);
 }
 
-const command = process.argv[2] || "help";
-
-try {
+async function main() {
+  let command = process.argv[2];
+  if (!command) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      help();
+      return;
+    }
+    const wizardArguments = await runFirstRunWizard();
+    if (!wizardArguments) return;
+    process.argv.splice(2, process.argv.length - 2, ...wizardArguments);
+    command = process.argv[2];
+  }
   if (command === "serve") await serve();
   else if (command === "doctor") await doctor();
   else if (command === "run") await run();
   else if (command === "scout") await scout();
   else help();
+}
+
+try {
+  await main();
 } catch (error) {
   console.error(`yellowbird: ${error.message}`);
   process.exitCode = 1;
