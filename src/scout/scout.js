@@ -29,8 +29,10 @@ import {
   SEMANTIC_CONTROL_LIMITS,
   verifyBrowserSemanticCandidates
 } from "./explorer.js";
+import { authorizeScoutTarget } from "./target.js";
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+export { authorizeScoutTarget } from "./target.js";
+
 const STEP_CAPABILITIES = {
   click: "browser.click",
   fill: "browser.fill",
@@ -194,38 +196,6 @@ function compareVisualBuffers(actualBytes, baselineBytes, options = {}) {
     baseline: { width: baseline.width, height: baseline.height },
     diffPixels,
     diffPixelRatio: diffPixels / (actual.width * actual.height)
-  };
-}
-
-export function authorizeScoutTarget(value) {
-  let target;
-  try {
-    target = new URL(value);
-  } catch {
-    throw new Error("scout target must be an absolute http(s) URL");
-  }
-
-  if (!["http:", "https:"].includes(target.protocol)) {
-    throw new Error("scout target must use http or https");
-  }
-  if (target.username || target.password) {
-    throw new Error("credentials must not be embedded in the target URL");
-  }
-  if (!LOOPBACK_HOSTS.has(target.hostname)) {
-    throw new Error(
-      "this alpha only authorizes loopback targets (localhost, 127.0.0.1, or ::1)"
-    );
-  }
-
-  return {
-    target: target.href,
-    origin: target.origin,
-    authorization: {
-      method: "local-loopback-attestation",
-      scope: "exact-origin",
-      rationale:
-        "The operator running YellowBird already controls access to this local machine."
-    }
   };
 }
 
