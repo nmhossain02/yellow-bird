@@ -3,6 +3,8 @@ import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { chromium, expect as playwrightExpect } from "@playwright/test";
+import pixelmatch from "pixelmatch";
+import { PNG } from "pngjs";
 import {
   cleanDiagnosticText,
   createDiagnosticRecorder,
@@ -32,10 +34,101 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const STEP_CAPABILITIES = {
   click: "browser.click",
   fill: "browser.fill",
+  select: "browser.fill",
+  check: "browser.click",
+  uncheck: "browser.click",
+  hover: "browser.read",
+  press: "browser.click",
   expectText: "browser.read",
-  expectVisible: "browser.read"
+  expectVisible: "browser.read",
+  expectValue: "browser.read",
+  expectVisual: "browser.read"
 };
 const SUPPORTED_STEP_ACTIONS = new Set(Object.keys(STEP_CAPABILITIES));
+const WORKFLOW_TARGET_ROLES = new Set([
+  "alert",
+  "alertdialog",
+  "application",
+  "article",
+  "banner",
+  "blockquote",
+  "button",
+  "caption",
+  "cell",
+  "checkbox",
+  "code",
+  "columnheader",
+  "combobox",
+  "complementary",
+  "contentinfo",
+  "definition",
+  "deletion",
+  "dialog",
+  "directory",
+  "document",
+  "emphasis",
+  "feed",
+  "figure",
+  "form",
+  "generic",
+  "grid",
+  "gridcell",
+  "group",
+  "heading",
+  "img",
+  "insertion",
+  "link",
+  "list",
+  "listbox",
+  "listitem",
+  "log",
+  "main",
+  "marquee",
+  "math",
+  "meter",
+  "menu",
+  "menubar",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "navigation",
+  "none",
+  "note",
+  "option",
+  "paragraph",
+  "presentation",
+  "progressbar",
+  "radio",
+  "radiogroup",
+  "region",
+  "row",
+  "rowgroup",
+  "rowheader",
+  "scrollbar",
+  "search",
+  "searchbox",
+  "separator",
+  "slider",
+  "spinbutton",
+  "status",
+  "strong",
+  "subscript",
+  "superscript",
+  "switch",
+  "tab",
+  "table",
+  "tablist",
+  "tabpanel",
+  "term",
+  "textbox",
+  "time",
+  "timer",
+  "toolbar",
+  "tooltip",
+  "tree",
+  "treegrid",
+  "treeitem"
+]);
 const PASSIVE_AGENT_RESOURCE_TYPES = new Set([
   "font",
   "image",
@@ -61,6 +154,48 @@ const EVIDENCE_ELEMENT_LIMITS = Object.freeze({
 });
 const require = createRequire(import.meta.url);
 const PLAYWRIGHT_VERSION = require("@playwright/test/package.json").version;
+const PIXELMATCH_VERSION = require("pixelmatch/package.json").version;
+const PNGJS_VERSION = require("pngjs/package.json").version;
+
+function compareVisualBuffers(actualBytes, baselineBytes, options = {}) {
+  let actual;
+  let baseline;
+  try {
+    actual = PNG.sync.read(actualBytes);
+    baseline = PNG.sync.read(baselineBytes);
+  } catch (error) {
+    throw new Error(`visual PNG could not be decoded: ${error.message}`);
+  }
+  const dimensionsMatch =
+    actual.width === baseline.width && actual.height === baseline.height;
+  if (!dimensionsMatch) {
+    return {
+      dimensionsMatch: false,
+      actual: { width: actual.width, height: actual.height },
+      baseline: { width: baseline.width, height: baseline.height },
+      diffPixels: Math.max(
+        actual.width * actual.height,
+        baseline.width * baseline.height
+      ),
+      diffPixelRatio: 1
+    };
+  }
+  const diffPixels = pixelmatch(
+    baseline.data,
+    actual.data,
+    null,
+    actual.width,
+    actual.height,
+    { threshold: options.colorThreshold ?? 0.1 }
+  );
+  return {
+    dimensionsMatch: true,
+    actual: { width: actual.width, height: actual.height },
+    baseline: { width: baseline.width, height: baseline.height },
+    diffPixels,
+    diffPixelRatio: diffPixels / (actual.width * actual.height)
+  };
+}
 
 export function authorizeScoutTarget(value) {
   let target;
@@ -126,8 +261,75 @@ export function validateWorkflow(input = {}) {
     if (!SUPPORTED_STEP_ACTIONS.has(step.action)) {
       throw new Error(`unsupported workflow action: ${step.action}`);
     }
-    if (typeof step.selector !== "string" || !step.selector.trim()) {
-      throw new Error(`workflow step ${id} requires a selector`);
+    const hasSelector = step.selector !== undefined;
+    const hasSemanticTarget = step.target !== undefined;
+    if (hasSelector === hasSemanticTarget) {
+      throw new Error(
+        `workflow step ${id} requires exactly one of selector or target`
+      );
+    }
+
+    let target;
+    if (hasSelector) {
+      if (typeof step.selector !== "string" || !step.selector.trim()) {
+        throw new Error(`workflow step ${id} selector must be a non-empty string`);
+      }
+      target = { kind: "css", selector: step.selector };
+    } else {
+      if (
+        !step.target ||
+        typeof step.target !== "object" ||
+        Array.isArray(step.target)
+      ) {
+        throw new Error(`workflow step ${id} target must be an object`);
+      }
+      const unknownTargetProperties = Object.keys(step.target).filter(
+        (property) => !["role", "name", "exact", "heal"].includes(property)
+      );
+      if (unknownTargetProperties.length) {
+        throw new Error(
+          `workflow step ${id} target contains unsupported property ${unknownTargetProperties[0]}`
+        );
+      }
+      const role =
+        typeof step.target.role === "string" ? step.target.role.trim() : "";
+      if (!WORKFLOW_TARGET_ROLES.has(role)) {
+        throw new Error(`workflow step ${id} target requires a supported role`);
+      }
+      if (
+        step.target.name !== undefined &&
+        (typeof step.target.name !== "string" ||
+          !step.target.name.trim() ||
+          step.target.name.length > 400)
+      ) {
+        throw new Error(
+          `workflow step ${id} target name must contain 1 to 400 characters`
+        );
+      }
+      if (
+        step.target.exact !== undefined &&
+        typeof step.target.exact !== "boolean"
+      ) {
+        throw new Error(`workflow step ${id} target exact must be a boolean`);
+      }
+      if (
+        step.target.heal !== undefined &&
+        typeof step.target.heal !== "boolean"
+      ) {
+        throw new Error(`workflow step ${id} target heal must be a boolean`);
+      }
+      if (step.target.heal && step.target.name === undefined) {
+        throw new Error(
+          `workflow step ${id} target healing requires an accessible name`
+        );
+      }
+      target = {
+        kind: "role",
+        role,
+        name: step.target.name?.trim(),
+        exact: step.target.exact ?? true,
+        heal: step.target.heal ?? false
+      };
     }
 
     const capability = STEP_CAPABILITIES[step.action];
@@ -158,14 +360,55 @@ export function validateWorkflow(input = {}) {
     ) {
       throw new Error(`expectText step ${id} requires text`);
     }
+    if (
+      ["select", "expectValue"].includes(step.action) &&
+      typeof step.value !== "string"
+    ) {
+      throw new Error(`${step.action} step ${id} requires a string value`);
+    }
+    if (
+      step.action === "press" &&
+      (typeof step.key !== "string" ||
+        !step.key ||
+        step.key.length > 50 ||
+        /[\u0000-\u001f\u007f]/.test(step.key))
+    ) {
+      throw new Error(`press step ${id} requires a bounded key chord`);
+    }
+    if (step.action === "expectVisual") {
+      if (
+        typeof step.baseline !== "string" ||
+        !step.baseline ||
+        typeof step.baselineData !== "string" ||
+        !step.baselineData
+      ) {
+        throw new Error(
+          `expectVisual step ${id} requires a scenario-confined PNG baseline`
+        );
+      }
+      for (const [property, fallback] of [
+        ["maxDiffPixelRatio", 0.01],
+        ["colorThreshold", 0.1]
+      ]) {
+        const value = step[property] ?? fallback;
+        if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+          throw new Error(`expectVisual step ${id} ${property} must be from 0 to 1`);
+        }
+      }
+    }
 
     return {
       id,
       action: step.action,
-      selector: step.selector,
+      target,
       text: step.text,
       value: step.value,
       valueFromEnv: step.valueFromEnv,
+      key: step.key,
+      baseline: step.baseline,
+      baselineData: step.baselineData,
+      maxDiffPixelRatio: step.maxDiffPixelRatio ?? 0.01,
+      colorThreshold: step.colorThreshold ?? 0.1,
       capability
     };
   });
@@ -173,6 +416,162 @@ export function validateWorkflow(input = {}) {
   return {
     permissions: [...permissions],
     steps: normalizedSteps
+  };
+}
+
+function workflowLocator(page, step) {
+  if (step.target.kind === "css") {
+    return page.locator(step.target.selector);
+  }
+  const options =
+    step.target.name === undefined
+      ? undefined
+      : { name: step.target.name, exact: step.target.exact };
+  return page.getByRole(step.target.role, options);
+}
+
+function workflowLocatorJavaScript(step) {
+  if (step.target.kind === "css") {
+    return `page.locator(${quoteForJavaScript(step.target.selector)})`;
+  }
+  const options =
+    step.target.name === undefined
+      ? ""
+      : `, { name: ${quoteForJavaScript(step.target.name)}, exact: ${step.target.exact} }`;
+  return `page.getByRole(${quoteForJavaScript(step.target.role)}${options})`;
+}
+
+function normalizedTargetName(value) {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replaceAll(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replaceAll(/\s+/g, " ");
+}
+
+function editDistance(left, right) {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] +
+          (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1)
+      );
+    }
+    previous = current;
+  }
+  return previous[right.length];
+}
+
+function tokenDiceSimilarity(left, right) {
+  const leftTokens = new Set(left.split(" ").filter(Boolean));
+  const rightTokens = new Set(right.split(" ").filter(Boolean));
+  if (!leftTokens.size || !rightTokens.size) return 0;
+  let overlap = 0;
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) overlap += 1;
+  }
+  return (2 * overlap) / (leftTokens.size + rightTokens.size);
+}
+
+function targetNameSimilarity(leftValue, rightValue) {
+  const left = normalizedTargetName(leftValue);
+  const right = normalizedTargetName(rightValue);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  const editSimilarity =
+    1 - editDistance(left, right) / Math.max(left.length, right.length);
+  return Math.max(editSimilarity, tokenDiceSimilarity(left, right));
+}
+
+function accessibleNameFromAriaSnapshot(snapshot, role) {
+  const firstLine = String(snapshot || "").split("\n", 1)[0];
+  const prefix = `- ${role} `;
+  if (!firstLine.startsWith(prefix)) return null;
+  const serializedName = firstLine.slice(prefix.length).match(/^"(?:\\.|[^"\\])*"/u)?.[0];
+  if (!serializedName) return null;
+  try {
+    const name = JSON.parse(serializedName);
+    return typeof name === "string" && name ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+async function healWorkflowTarget(page, step, timeoutMs) {
+  if (step.target.kind !== "role" || !step.target.heal) return null;
+  const originalLocator = workflowLocator(page, step);
+  try {
+    await originalLocator.first().waitFor({
+      state: "visible",
+      timeout: Math.min(timeoutMs, 3_000)
+    });
+    return null;
+  } catch {}
+
+  const roleCandidates = page.getByRole(step.target.role);
+  const candidateCount = await roleCandidates.count();
+  if (candidateCount > 100) {
+    throw new Error(
+      `Semantic target healing for ${step.id} exceeded the 100-candidate safety bound`
+    );
+  }
+  const candidates = [];
+  for (let index = 0; index < candidateCount; index += 1) {
+    const candidate = roleCandidates.nth(index);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+    const snapshot = await candidate.ariaSnapshot().catch(() => "");
+    const name = accessibleNameFromAriaSnapshot(snapshot, step.target.role);
+    if (!name || name.length > 400) continue;
+    candidates.push({
+      name,
+      score: targetNameSimilarity(step.target.name, name)
+    });
+  }
+  candidates.sort((left, right) => right.score - left.score);
+  const selected = candidates[0];
+  const runnerUp = candidates[1];
+  if (
+    !selected ||
+    selected.score < 0.66 ||
+    (runnerUp && selected.score - runnerUp.score < 0.15)
+  ) {
+    throw new Error(
+      `Semantic target healing for ${step.id} found no high-confidence unambiguous ${step.target.role}`
+    );
+  }
+  const healedLocator = page.getByRole(step.target.role, {
+    name: selected.name,
+    exact: true
+  });
+  if ((await healedLocator.count()) !== 1) {
+    throw new Error(
+      `Semantic target healing for ${step.id} did not resolve to exactly one control`
+    );
+  }
+  const previousTarget = {
+    role: step.target.role,
+    name: step.target.name,
+    exact: step.target.exact
+  };
+  step.target = {
+    ...step.target,
+    name: selected.name,
+    exact: true
+  };
+  return {
+    from: previousTarget,
+    to: {
+      role: step.target.role,
+      name: step.target.name,
+      exact: step.target.exact
+    },
+    confidence: Number(selected.score.toFixed(3)),
+    expectedResultChanged: false
   };
 }
 
@@ -207,6 +606,128 @@ function normalizeAgentExpectedTexts(value) {
     }
     return normalized;
   });
+}
+
+const AGENT_FIELD_TYPES = new Map([
+  ["textbox", new Set(["email", "search", "tel", "text", "textarea", "url"])],
+  ["searchbox", new Set(["search"])],
+  ["spinbutton", new Set(["number"])]
+]);
+
+function normalizeAgentAuthorization(value, workflow, target, origin) {
+  if (value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("agent authorization must be an object");
+  }
+  const supported = new Set([
+    "schema",
+    "mode",
+    "fields",
+    "mutationControls",
+    "mutationRoutes",
+    "expectedTexts"
+  ]);
+  const unknown = Object.keys(value).find((property) => !supported.has(property));
+  if (unknown) throw new Error(`agent authorization contains unsupported property ${unknown}`);
+  if (
+    value.schema !== "yellowbird.agent.v1" ||
+    value.mode !== "authorized-workflow"
+  ) {
+    throw new Error(
+      "agent authorization requires schema yellowbird.agent.v1 and mode authorized-workflow"
+    );
+  }
+  if (!workflow.permissions.includes("browser.submit")) {
+    throw new Error("authorized agent workflow requires browser.submit permission");
+  }
+  if (workflow.steps.length) {
+    throw new Error("authorized agent workflow cannot include deterministic browser steps");
+  }
+  if (!Array.isArray(value.fields) || value.fields.length < 1 || value.fields.length > 19) {
+    throw new Error("authorized agent workflow requires 1 to 19 field declarations");
+  }
+  const fields = value.fields.map((field, index) => {
+    if (!field || typeof field !== "object" || Array.isArray(field)) {
+      throw new Error(`agent field ${index + 1} must be an object`);
+    }
+    const role = String(field.role ?? "").trim().toLowerCase();
+    const type = String(field.type ?? "").trim().toLowerCase();
+    const name = cleanDiagnosticText(field.name).replaceAll(/\s+/g, " ").trim();
+    if (!AGENT_FIELD_TYPES.get(role)?.has(type)) {
+      throw new Error(`agent field ${index + 1} uses unsupported role/type ${role}:${type}`);
+    }
+    if (!name || name.length > 400 || typeof field.value !== "string" || field.value.length > 4_000) {
+      throw new Error(`agent field ${index + 1} has an invalid name or value`);
+    }
+    return { role, type, name, value: field.value };
+  });
+  if (
+    !Array.isArray(value.mutationControls) ||
+    value.mutationControls.length < 1 ||
+    value.mutationControls.length > 10
+  ) {
+    throw new Error("authorized agent workflow requires 1 to 10 mutation controls");
+  }
+  const mutationControls = value.mutationControls.map((control, index) => {
+    const role = String(control?.role ?? "").trim().toLowerCase();
+    const type = String(control?.type ?? "").trim().toLowerCase();
+    const name = cleanDiagnosticText(control?.name).replaceAll(/\s+/g, " ").trim();
+    if (role !== "button" || !["button", "submit"].includes(type) || !name || name.length > 400) {
+      throw new Error(`agent mutation control ${index + 1} must be an exact named button`);
+    }
+    return { role, type, name };
+  });
+  if (
+    !Array.isArray(value.mutationRoutes) ||
+    value.mutationRoutes.length !== 1
+  ) {
+    throw new Error("authorized agent workflow requires exactly one mutation route");
+  }
+  const routeKeys = new Set();
+  const mutationRoutes = value.mutationRoutes.map((declaration, index) => {
+    const method = String(declaration?.method ?? "").trim().toUpperCase();
+    if (!["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+      throw new Error(`agent mutation route ${index + 1} uses an unsupported method`);
+    }
+    if (typeof declaration?.url !== "string" || !declaration.url.trim() || declaration.url.includes("*")) {
+      throw new Error(`agent mutation route ${index + 1} requires an exact URL`);
+    }
+    let url;
+    try {
+      url = new URL(declaration.url.trim(), target);
+    } catch {
+      throw new Error(`agent mutation route ${index + 1} has an invalid URL`);
+    }
+    url.hash = "";
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.origin !== origin ||
+      url.username ||
+      url.password
+    ) {
+      throw new Error(`agent mutation route ${index + 1} must be an exact-origin http(s) URL`);
+    }
+    const maxRequests = declaration.maxRequests ?? 1;
+    if (maxRequests !== 1) {
+      throw new Error(`agent mutation route ${index + 1} maxRequests must be 1`);
+    }
+    const key = `${method} ${url.href}`;
+    if (routeKeys.has(key)) throw new Error(`duplicate agent mutation route ${key}`);
+    routeKeys.add(key);
+    return { method, url: url.href, maxRequests };
+  });
+  const expectedTexts = normalizeAgentExpectedTexts(value.expectedTexts);
+  if (!expectedTexts.length) {
+    throw new Error("authorized agent workflow requires final expected text assertions");
+  }
+  return {
+    schema: value.schema,
+    mode: value.mode,
+    fields,
+    mutationControls,
+    mutationRoutes,
+    expectedTexts
+  };
 }
 
 function isAgentRequestRouteAuthorized(
@@ -323,7 +844,7 @@ function buildOperationalAssessment(report) {
     exercisedStatuses.has(step.status)
   ).length;
   const workflowAssertionCount = workflowSteps.filter((step) =>
-    ["expectText", "expectVisible"].includes(step.action)
+    ["expectText", "expectVisible", "expectValue", "expectVisual"].includes(step.action)
   ).length;
   const productAssertionCount =
     Number(Number.isInteger(report.assertions.expectedStatus)) +
@@ -331,6 +852,7 @@ function buildOperationalAssessment(report) {
     (report.assertions.expectedTexts?.length || 0) +
     (report.assertions.agentExpectedTexts?.length || 0) +
     (report.assertions.agentExpectedControls?.length || 0) +
+    (exploration.verification?.finalAssertions?.length || 0) +
     workflowAssertionCount;
   const coverageCriteria = exploration.verification?.criteria || [];
   const satisfiedCoverageCriteria = coverageCriteria.filter(
@@ -351,6 +873,13 @@ function buildOperationalAssessment(report) {
     level = "ERROR";
     summary =
       "YellowBird could not complete a trustworthy evaluation. Treat this as an operational concern until diagnosed.";
+  } else if (
+    exploration.verification?.profile === "authorized-workflow.v1" &&
+    exploration.verification.satisfied
+  ) {
+    level = "CLEAR";
+    summary =
+      "The owner-authorized intent workflow completed with observed request and final-state evidence.";
   } else if (!workflowSteps.length) {
     level = "LIMITED";
     summary =
@@ -373,7 +902,9 @@ function buildOperationalAssessment(report) {
   if (workflowSteps.length) {
     effectiveScope = `Declared workflow; ${exercisedWorkflowSteps}/${workflowSteps.length} step(s) exercised; ${pluralizedCount(productAssertionCount, "product assertion")}.`;
   } else if (exploration.requested) {
-    effectiveScope = `Bounded safe exploration; ${exercisedExplorationSteps}/${explorationSteps.length} interaction(s) exercised; no declared workflow; ${pluralizedCount(productAssertionCount, "product assertion")}.`;
+    effectiveScope = exploration.verification?.profile === "authorized-workflow.v1"
+      ? `Owner-authorized intent workflow; ${exercisedExplorationSteps}/${explorationSteps.length} interaction(s) exercised; ${pluralizedCount(productAssertionCount, "product assertion")}.`
+      : `Bounded safe exploration; ${exercisedExplorationSteps}/${explorationSteps.length} interaction(s) exercised; no declared workflow; ${pluralizedCount(productAssertionCount, "product assertion")}.`;
   } else {
     effectiveScope = `Initial-page smoke check; no declared workflow; ${pluralizedCount(productAssertionCount, "product assertion")}.`;
   }
@@ -415,8 +946,21 @@ function buildMarkdown(report) {
         )
         .join("\n")
     : "| - | No test-mechanics issues observed | - |";
-  const repairRows = report.target.repairs.length
-    ? report.target.repairs
+  const workflowRepairs = report.observations.workflowSteps.flatMap((step) =>
+    step.repair
+      ? [
+          {
+            code: `semantic-target:${step.id} (${step.repair.confidence})`,
+            from: `${step.repair.from.role} "${step.repair.from.name}"`,
+            to: `${step.repair.to.role} "${step.repair.to.name}"`,
+            expectedResultChanged: step.repair.expectedResultChanged
+          }
+        ]
+      : []
+  );
+  const repairs = [...report.target.repairs, ...workflowRepairs];
+  const repairRows = repairs.length
+    ? repairs
         .map(
           (repair) =>
             `| ${markdownEscape(repair.code)} | ${markdownEscape(repair.from)} | ${markdownEscape(repair.to)} | ${repair.expectedResultChanged ? "yes" : "no"} |`
@@ -435,6 +979,12 @@ function buildMarkdown(report) {
   const destinationControlAssertions = exploration.steps.flatMap(
     (step) => step.destinationControlAssertions || []
   );
+  const destinationTextAssertions = [
+    ...report.assertions.agentExpectedTexts,
+    ...(exploration.verification?.finalAssertions || []).map(
+      (assertion) => assertion.text
+    )
+  ];
   const operationalAssessment = buildOperationalAssessment(report);
 
   return `# YellowBird scout report
@@ -497,7 +1047,7 @@ ${workflowRows}
 - Load route authority: ${exploration.routePolicy?.loadRoutes.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
 - Load authority source: ${exploration.routePolicy?.automaticLoadRoutes ? "automatic initial-page discovery" : "owner declarations"}
 - Observed background load authority: ${exploration.routePolicy?.backgroundLoadRoutes?.map((route) => `\`${markdownEscape(route)}\``).join(", ") || "none"}
-- Destination text assertions: ${report.assertions.agentExpectedTexts.map((text) => `\`${markdownEscape(text)}\``).join(", ") || "none"}
+- Destination text assertions: ${destinationTextAssertions.map((text) => `\`${markdownEscape(text)}\``).join(", ") || "none"}
 - Destination control assertions: ${destinationControlAssertions.map((assertion) => `\`${markdownEscape(`${assertion.role}:${assertion.type}:${assertion.name}`)}=${assertion.satisfied ? "satisfied" : "unsatisfied"}\``).join(", ") || "none"}
 - Engine: ${markdownEscape(exploration.engine || "not used")}
 - Coverage summary: ${markdownEscape(exploration.summary || "none")}
@@ -606,12 +1156,15 @@ function buildRegression(options, explorationSteps = []) {
   const lines = [
     'import { randomUUID } from "node:crypto";',
     'import { test, expect } from "@playwright/test";',
+    'import pixelmatch from "pixelmatch";',
+    'import { PNG } from "pngjs";',
     "",
     `test(${quoteForJavaScript(`YellowBird scout: ${options.intent}`)}, async ({ page }) => {`,
     "  const consoleErrors = [];",
     "  const pageErrors = [];",
     "  const failedRequests = [];",
     "  const serverErrors = [];",
+    `  const yellowbirdCompareVisualBuffers = ${compareVisualBuffers.toString()};`,
     `  const yellowbirdRenderedTextSnapshot = ${browserRenderedTextSnapshot.toString()};`,
     "  const yellowbirdReadRenderedBodyText = async (maximum, normalizedMaximum = maximum) =>",
     `    (await page.evaluate(yellowbirdRenderedTextSnapshot, { maximum, traversalNodeCount: ${RENDERED_TEXT_LIMITS.traversalNodeCount} }))`,
@@ -711,6 +1264,11 @@ function buildRegression(options, explorationSteps = []) {
     `  const yellowbirdAgentNavigationRoutes = new Set(${quoteForJavaScript(options.agentNavigationRoutes)});`,
     `  const yellowbirdAgentLoadRoutes = new Set(${quoteForJavaScript(options.agentLoadRoutes)});`,
     `  const yellowbirdAgentBackgroundLoadRoutes = new Set(${quoteForJavaScript(options.agentBackgroundLoadRoutes || [])});`,
+    `  const yellowbirdAgentMutationRoutes = new Map(${quoteForJavaScript((options.agentAuthorization?.mutationRoutes || []).map((route) => [`${route.method} ${route.url}`, { ...route, observed: 0 }]))});`,
+    "  const yellowbirdAgentMutationRoute = (method, value) => {",
+    "    try { const url = new URL(value); url.hash = \"\"; return yellowbirdAgentMutationRoutes.get(`${method} ${url.href}`) || null; }",
+    "    catch { return null; }",
+    "  };",
     `  const yellowbirdPassiveAgentResourceTypes = new Set(${quoteForJavaScript([...PASSIVE_AGENT_RESOURCE_TYPES])});`,
     `  const yellowbirdAgentMode = ${options.exploreIntent};`,
     "  const yellowbirdBlockedUrls = new Set();",
@@ -794,11 +1352,12 @@ function buildRegression(options, explorationSteps = []) {
     "    let policyRejected = false;",
     "    if (yellowbirdAgentMode && !localResource) {",
     "      const readAllowed = [\"GET\", \"HEAD\"].includes(occurrence.method);",
+    "      const mutationAllowed = yellowbirdAgentAction?.action === \"mutate\" && Boolean(yellowbirdAgentMutationRoute(occurrence.method, occurrence.url));",
     "      const backgroundLoadAllowed = yellowbirdAgentRouteAllowed(occurrence.url, yellowbirdAgentBackgroundLoadRoutes);",
-    "      policyRejected = !yellowbirdSameOrigin(occurrence.url) || !readAllowed ||",
-    "        !yellowbirdAgentUrlAllowed(occurrence.url) ||",
-    "        !yellowbirdAgentRouteAllowed(occurrence.url, yellowbirdAgentLoadRoutes) ||",
-    "        (yellowbirdAgentAction?.action !== \"visit\" && !backgroundLoadAllowed);",
+    "      policyRejected = !yellowbirdSameOrigin(occurrence.url) || (!readAllowed && !mutationAllowed) ||",
+    "        (!mutationAllowed && !yellowbirdAgentUrlAllowed(occurrence.url)) ||",
+    "        (!mutationAllowed && !yellowbirdAgentRouteAllowed(occurrence.url, yellowbirdAgentLoadRoutes)) ||",
+    "        (![\"visit\", \"mutate\"].includes(yellowbirdAgentAction?.action) && !backgroundLoadAllowed);",
     "    }",
     "    if (policyRejected) {",
     "      yellowbirdBlockedFetchOccurrences.add(occurrenceId);",
@@ -859,7 +1418,7 @@ function buildRegression(options, explorationSteps = []) {
     "      writable: false,",
     "      value: (candidateToken, nextAction) => {",
     "        if (candidateToken !== controlToken) return false;",
-    '        if (!["idle", "visit", "fill", "select", "click"].includes(nextAction)) return false;',
+    '        if (!["idle", "visit", "fill", "select", "click", "mutate"].includes(nextAction)) return false;',
     "        action = nextAction;",
     "        return true;",
     "      }",
@@ -936,6 +1495,7 @@ function buildRegression(options, explorationSteps = []) {
     "      }",
     "    };",
     '    globalThis.addEventListener("submit", event => {',
+    '      if (action === "mutate") return;',
     '      if (!blocked("form-submission")) return;',
     "      event.preventDefault();",
     "      event.stopImmediatePropagation();",
@@ -947,6 +1507,7 @@ function buildRegression(options, explorationSteps = []) {
     "        configurable: false,",
     "        writable: false,",
     "        value: function (...args) {",
+    '          if (action === "mutate") return original.apply(this, args);',
     '          if (blocked("form-submission")) return undefined;',
     "          return original.apply(this, args);",
     "        }",
@@ -958,7 +1519,7 @@ function buildRegression(options, explorationSteps = []) {
     "        configurable: false,",
     "        writable: false,",
     "        value: function (...args) {",
-    '          if (active && action !== "visit") { blocked("non-visit-navigation"); return undefined; }',
+    '          if (active && !["visit", "mutate"].includes(action)) { blocked("non-visit-navigation"); return undefined; }',
     "          const nextUrl = args[2] === undefined ? globalThis.location.href : new URL(args[2], globalThis.location.href).href;",
     '          if (active && !urlAllowed(nextUrl)) { blocked("prohibited-navigation", nextUrl); return undefined; }',
     "          return original.apply(this, args);",
@@ -1002,9 +1563,8 @@ function buildRegression(options, explorationSteps = []) {
     "          try {",
     "            redirectUrl = new URL(location, event.request.url).href;",
     "            redirectAllowed = requestState?.allowed &&",
-    "              yellowbirdAgentAction?.action === \"visit\" &&",
+    "              [\"visit\", \"mutate\"].includes(yellowbirdAgentAction?.action) &&",
     "              yellowbirdAgentAction.navigationWindowOpen &&",
-    '              ["GET", "HEAD"].includes(event.request.method) &&',
     "              yellowbirdAgentUrlAllowed(redirectUrl) &&",
     "              yellowbirdAgentRequestRouteAllowed(redirectUrl, event.resourceType);",
           "          } catch {}",
@@ -1070,11 +1630,15 @@ function buildRegression(options, explorationSteps = []) {
     "      const parsedRequestUrl = new URL(requestUrl);",
     "      const safeAgentUrl = yellowbirdAgentUrlAllowed(requestUrl);",
     "      const safeAgentRoute = yellowbirdAgentRequestRouteAllowed(requestUrl, request.resourceType());",
+    "      const mutationRoute = yellowbirdAgentMutationRoute(requestMethod, requestUrl);",
+    '      const safeMutation = yellowbirdAgentAction?.action === "mutate" && Boolean(mutationRoute) && mutationRoute.observed < mutationRoute.maxRequests;',
     "      const safeBackgroundLoad = request.resourceType() !== \"document\" &&",
     "        yellowbirdAgentRouteAllowed(requestUrl, yellowbirdAgentBackgroundLoadRoutes);",
     "      let safeAgentAction = false;",
     "      if (yellowbirdAgentAction) {",
-    '        if (yellowbirdAgentAction.action !== "visit") {',
+    '        if (yellowbirdAgentAction.action === "mutate") {',
+    '          safeAgentAction = ["GET", "HEAD"].includes(requestMethod) ? yellowbirdAgentAction.navigationWindowOpen : safeMutation;',
+    '        } else if (yellowbirdAgentAction.action !== "visit") {',
     "          safeAgentAction = false;",
     '        } else if (request.resourceType() === "document") {',
     "          const redirectedFrom = request.redirectedFrom();",
@@ -1092,10 +1656,16 @@ function buildRegression(options, explorationSteps = []) {
     "        if (!safeAgentAction && safeBackgroundLoad) safeAgentAction = true;",
     "      }",
     "      allowed = parsedRequestUrl.origin === yellowbirdTarget.origin &&",
-    '        (!yellowbirdAgentMode || (["GET", "HEAD"].includes(requestMethod) &&',
-    "          safeAgentUrl && safeAgentRoute && safeAgentAction));",
+    '        (!yellowbirdAgentMode || ((safeMutation || (["GET", "HEAD"].includes(requestMethod) && safeAgentUrl && safeAgentRoute)) && safeAgentAction));',
     "    } catch {}",
-    "    if (allowed) return route.continue(typeof occurrence === \"string\" ? { headers: forwardedHeaders } : undefined);",
+    "    if (allowed) {",
+    "      const mutationRoute = yellowbirdAgentMutationRoute(requestMethod, requestUrl);",
+    '      if (yellowbirdAgentAction?.action === "mutate" && mutationRoute && !["GET", "HEAD"].includes(requestMethod)) {',
+    "        mutationRoute.observed += 1;",
+    "        yellowbirdAgentAction.mutationRequests.push({ method: requestMethod, url: mutationRoute.url });",
+    "      }",
+    "      return route.continue(typeof occurrence === \"string\" ? { headers: forwardedHeaders } : undefined);",
+    "    }",
     "    yellowbirdRecordBlockedRequest(request);",
     '    return route.abort("blockedbyclient");',
     "  });",
@@ -1130,7 +1700,8 @@ function buildRegression(options, explorationSteps = []) {
     "      requestedUrl,",
     "      navigationStarted: false,",
     "      navigationRequests: new Set(),",
-    '      navigationWindowOpen: action === "visit"',
+    '      navigationWindowOpen: ["visit", "mutate"].includes(action),',
+    "      mutationRequests: []",
     "    };",
     "    await yellowbirdActivateAgentGuard(action);",
     "  };",
@@ -1203,7 +1774,7 @@ function buildRegression(options, explorationSteps = []) {
     );
   }
   options.steps.forEach((step, index) => {
-    const locator = `page.locator(${quoteForJavaScript(step.selector)})`;
+    const locator = workflowLocatorJavaScript(step);
     if (step.action === "click") {
       lines.push(`  await ${locator}.click();`);
     } else if (step.action === "fill" && step.valueFromEnv) {
@@ -1215,12 +1786,35 @@ function buildRegression(options, explorationSteps = []) {
       );
     } else if (step.action === "fill") {
       lines.push(`  await ${locator}.fill(${quoteForJavaScript(step.value)});`);
+    } else if (step.action === "select") {
+      lines.push(`  await ${locator}.selectOption(${quoteForJavaScript(step.value)});`);
+    } else if (step.action === "check") {
+      lines.push(`  await ${locator}.check();`);
+    } else if (step.action === "uncheck") {
+      lines.push(`  await ${locator}.uncheck();`);
+    } else if (step.action === "hover") {
+      lines.push(`  await ${locator}.hover();`);
+    } else if (step.action === "press") {
+      lines.push(`  await ${locator}.press(${quoteForJavaScript(step.key)});`);
     } else if (step.action === "expectText") {
       lines.push(
         `  await expect(${locator}).toContainText(${quoteForJavaScript(step.text)});`
       );
     } else if (step.action === "expectVisible") {
       lines.push(`  await expect(${locator}).toBeVisible();`);
+    } else if (step.action === "expectValue") {
+      lines.push(`  await expect(${locator}).toHaveValue(${quoteForJavaScript(step.value)});`);
+    } else if (step.action === "expectVisual") {
+      const comparison = `yellowbirdVisual${index + 1}`;
+      lines.push(
+        `  const ${comparison} = yellowbirdCompareVisualBuffers(`,
+        `    await ${locator}.screenshot({ animations: "disabled", caret: "hide" }),`,
+        `    Buffer.from(${quoteForJavaScript(step.baselineData)}, "base64"),`,
+        `    { colorThreshold: ${step.colorThreshold} }`,
+        "  );",
+        `  expect(${comparison}.dimensionsMatch).toBe(true);`,
+        `  expect(${comparison}.diffPixelRatio).toBeLessThanOrEqual(${step.maxDiffPixelRatio});`
+      );
     }
   });
   replaySteps.forEach((step, index) => {
@@ -1305,6 +1899,12 @@ function buildRegression(options, explorationSteps = []) {
       );
     } else if (step.action === "click") {
       lines.push(`  await ${selectedLocator}.click();`);
+    } else if (step.action === "mutate") {
+      lines.push(
+        `  await ${selectedLocator}.click();`,
+        "  await page.waitForTimeout(150);",
+        `  expect(yellowbirdAgentAction.mutationRequests).toEqual(${quoteForJavaScript(step.mutationRequests || [])});`
+      );
     }
     lines.push(
       "  });",
@@ -1312,6 +1912,11 @@ function buildRegression(options, explorationSteps = []) {
       "  await yellowbirdAssertAgentGuard();"
     );
   });
+  for (const text of options.agentAuthorization?.expectedTexts || []) {
+    lines.push(
+      `  expect(await yellowbirdReadRenderedBodyText(${RENDERED_TEXT_LIMITS.evidenceBodyText})).toContain(${quoteForJavaScript(text)});`
+    );
+  }
   if (!options.ignoreConsoleErrors) {
     lines.push(
       "  const yellowbirdProductConsoleErrors = consoleErrors.filter(entry =>",
@@ -1341,7 +1946,8 @@ export default defineConfig({
   testMatch: "regression.spec.js",
   reporter: "line",
   use: {
-    serviceWorkers: "block"
+    serviceWorkers: "block",
+    viewport: { width: 1440, height: 900 }
   }
 });
 `;
@@ -1357,7 +1963,9 @@ function buildReplayPackage() {
         test: "playwright test --config playwright.config.js"
       },
       devDependencies: {
-        "@playwright/test": PLAYWRIGHT_VERSION
+        "@playwright/test": PLAYWRIGHT_VERSION,
+        pixelmatch: PIXELMATCH_VERSION,
+        pngjs: PNGJS_VERSION
       }
     },
     null,
@@ -1587,14 +2195,19 @@ async function finalizeRun(state) {
       `Only the ${options.steps.length} owner-declared workflow step(s) were exercised; YellowBird did not explore beyond them.`
     );
   } else if (options.exploreIntent) {
-    if (options.agentAutoNavigationRoutes || options.agentAutoLoadRoutes) {
+    if (
+      !options.agentAuthorization &&
+      (options.agentAutoNavigationRoutes || options.agentAutoLoadRoutes)
+    ) {
       coverageGaps.push(
         "Zero-configuration intent mode authorized safe same-origin GET navigation and initial background reads; prohibited routes, non-read methods, submission, and mutation remained blocked."
       );
     }
     if (state.exploration.status === "completed") {
       coverageGaps.push(
-        `The agent exercised ${state.exploration.steps.length} bounded safe same-origin interaction step(s); form submission, mutation, authentication, and cross-origin behavior were not authorized.`
+        options.agentAuthorization
+          ? `The agent exercised only the ${state.exploration.steps.length} owner-authorized interaction step(s); all other mutation, authentication, and cross-origin behavior remained blocked.`
+          : `The agent exercised ${state.exploration.steps.length} bounded safe same-origin interaction step(s); form submission, mutation, authentication, and cross-origin behavior were not authorized.`
       );
     } else {
       coverageGaps.push(
@@ -1613,7 +2226,7 @@ async function finalizeRun(state) {
   }
   if (invalidWorkflowSteps.length) {
     coverageGaps.push(
-      `${invalidWorkflowSteps.length} workflow action(s) were invalid. YellowBird did not attempt selector healing.`
+      `${invalidWorkflowSteps.length} workflow action(s) were invalid. YellowBird did not attempt target healing.`
     );
   }
   if (
@@ -1712,7 +2325,7 @@ async function finalizeRun(state) {
         title: `Workflow action was invalid: ${step.id}`,
         evidence: step.evidence,
         remediation:
-          "Confirm the selector and declared capability. Selector healing was not attempted."
+          "Confirm the declared target and capability. Target healing was not attempted."
       }))
     ],
     observations: {
@@ -1922,6 +2535,15 @@ export function createScoutRunner({
     method: authorization.authorization.method,
     scope: authorization.authorization.scope
   });
+  const agentAuthorization = normalizeAgentAuthorization(
+    input.agentAuthorization,
+    workflow,
+    authorization.target,
+    authorization.origin
+  );
+  if (agentAuthorization && !exploreIntent) {
+    throw new Error("authorized agent workflow requires intent exploration");
+  }
   const agentPrimaryRoutes = normalizeAgentRoutes(
     input.agentPrimaryRoutes,
     authorization.target,
@@ -1988,6 +2610,7 @@ export function createScoutRunner({
     agentLoadRoutes,
     agentExpectedTexts,
     agentExpectedControls,
+    agentAuthorization,
     ignoreConsoleErrors: Boolean(input.ignoreConsoleErrors),
     headed: Boolean(input.headed),
     timeoutMs
@@ -2020,7 +2643,11 @@ export function createScoutRunner({
     explorationIssues: [],
     exploration: {
       requested: exploreIntent,
-      mode: exploreIntent ? "agent-safe-interaction" : "not-requested",
+      mode: exploreIntent
+        ? agentAuthorization
+          ? "agent-authorized-workflow"
+          : "agent-safe-interaction"
+        : "not-requested",
       status: exploreIntent ? "pending" : "not-requested",
       coverage: exploreIntent ? "pending" : "not-requested",
       summary: "",
@@ -2033,7 +2660,8 @@ export function createScoutRunner({
             loadRoutes: [...options.agentLoadRoutes],
             automaticNavigationRoutes: options.agentAutoNavigationRoutes,
             automaticLoadRoutes: options.agentAutoLoadRoutes,
-            backgroundLoadRoutes: [...options.agentBackgroundLoadRoutes]
+            backgroundLoadRoutes: [...options.agentBackgroundLoadRoutes],
+            mutationRoutes: options.agentAuthorization?.mutationRoutes || []
           }
         : null,
       verification: null,
@@ -2249,6 +2877,16 @@ export function createScoutRunner({
     const agentBackgroundLoadRoutes = new Set(
       options.agentBackgroundLoadRoutes || []
     );
+    const agentMutationRoutes = new Map(
+      (options.agentAuthorization?.mutationRoutes || []).map((route) => [
+        `${route.method} ${route.url}`,
+        { ...route, observed: 0 }
+      ])
+    );
+    const agentMutationRoute = (method, value) => {
+      const url = exactAgentRoute(value);
+      return url ? agentMutationRoutes.get(`${method} ${url}`) || null : null;
+    };
     let agentNetworkPolicyActive = options.exploreIntent;
     let agentActionContext = options.exploreIntent
       ? {
@@ -2345,6 +2983,9 @@ export function createScoutRunner({
                 requestOrigin = new URL(occurrence.url).origin;
               } catch {}
               const readAllowed = ["GET", "HEAD"].includes(occurrence.method);
+              const mutationAllowed =
+                agentActionContext?.action === "mutate" &&
+                Boolean(agentMutationRoute(occurrence.method, occurrence.url));
               const backgroundLoadAllowed =
                 options.agentAutoLoadRoutes &&
                 isAgentRouteAuthorized(
@@ -2353,18 +2994,20 @@ export function createScoutRunner({
                 );
               if (requestOrigin !== authorization.origin) {
                 policyReason = "agent-cross-origin";
-              } else if (!readAllowed) {
+              } else if (!readAllowed && !mutationAllowed) {
                 policyReason = "agent-non-read-method";
               } else if (
-                agentActionContext?.action !== "visit" &&
+                !["visit", "mutate"].includes(agentActionContext?.action) &&
                 !backgroundLoadAllowed
               ) {
                 policyReason = "agent-non-visit-request";
               } else if (
+                !mutationAllowed &&
                 !isAgentUrlAllowed(occurrence.url, authorization.origin)
               ) {
                 policyReason = "agent-prohibited-url";
               } else if (
+                !mutationAllowed &&
                 !isAgentRouteAuthorized(occurrence.url, agentLoadRoutes)
               ) {
                 policyReason = "agent-route-not-authorized";
@@ -2541,6 +3184,11 @@ export function createScoutRunner({
         requestUrl.startsWith("data:") || requestUrl.startsWith("blob:");
       const sameOrigin = requestOrigin === authorization.origin;
       const agentReadAllowed = ["GET", "HEAD"].includes(requestMethod);
+      const mutationRoute = agentMutationRoute(requestMethod, requestUrl);
+      const agentMutationAllowed =
+        agentActionContext?.action === "mutate" &&
+        Boolean(mutationRoute) &&
+        mutationRoute.observed < mutationRoute.maxRequests;
       const agentUrlAllowed = isAgentUrlAllowed(
         requestUrl,
         authorization.origin
@@ -2559,7 +3207,11 @@ export function createScoutRunner({
         isAgentRouteAuthorized(requestUrl, agentBackgroundLoadRoutes);
       let agentActionAllowed = false;
       if (agentNetworkPolicyActive && agentActionContext && !localResource) {
-        if (agentActionContext.action !== "visit") {
+        if (agentActionContext.action === "mutate") {
+          agentActionAllowed = agentReadAllowed
+            ? agentActionContext.navigationWindowOpen
+            : agentMutationAllowed;
+        } else if (agentActionContext.action !== "visit") {
           agentActionAllowed = false;
         } else if (route.request().resourceType() === "document") {
           const redirectedFrom = route.request().redirectedFrom();
@@ -2587,11 +3239,17 @@ export function createScoutRunner({
             route.request().resourceType() !== "document")) ||
         (sameOrigin &&
           (!agentNetworkPolicyActive ||
-            (agentReadAllowed &&
-              agentUrlAllowed &&
-              agentRouteAllowed &&
+            ((agentMutationAllowed ||
+              (agentReadAllowed && agentUrlAllowed && agentRouteAllowed)) &&
               agentActionAllowed)))
       ) {
+        if (agentMutationAllowed && mutationRoute) {
+          mutationRoute.observed += 1;
+          agentActionContext.mutationRequests.push({
+            method: requestMethod,
+            url: mutationRoute.url
+          });
+        }
         if (
           options.agentAutoLoadRoutes &&
           agentNetworkPolicyActive &&
@@ -2614,9 +3272,9 @@ export function createScoutRunner({
         reason = agentNetworkPolicyActive
           ? "agent-cross-origin"
           : "cross-origin";
-      } else if (!agentReadAllowed) {
+      } else if (!agentReadAllowed && !agentMutationAllowed) {
         reason = "agent-non-read-method";
-      } else if (agentActionContext?.action !== "visit") {
+      } else if (!["visit", "mutate"].includes(agentActionContext?.action)) {
         reason = "agent-non-visit-request";
       } else if (agentReadAllowed && !agentUrlAllowed) {
         reason = "agent-prohibited-url";
@@ -2739,7 +3397,7 @@ export function createScoutRunner({
         writable: false,
         value: (candidateToken, nextAction) => {
           if (candidateToken !== controlToken) return false;
-          if (!["idle", "visit", "fill", "select", "click"].includes(nextAction)) {
+          if (!["idle", "visit", "fill", "select", "click", "mutate"].includes(nextAction)) {
             return false;
           }
           action = nextAction;
@@ -2851,6 +3509,7 @@ export function createScoutRunner({
       globalThis.addEventListener(
         "submit",
         (event) => {
+          if (action === "mutate") return;
           if (!blocked("form-submission")) return;
           event.preventDefault();
           event.stopImmediatePropagation();
@@ -2864,6 +3523,7 @@ export function createScoutRunner({
           configurable: false,
           writable: false,
           value: function (...args) {
+            if (action === "mutate") return original.apply(this, args);
             if (blocked("form-submission")) return undefined;
             return original.apply(this, args);
           }
@@ -2875,7 +3535,7 @@ export function createScoutRunner({
           configurable: false,
           writable: false,
           value: function (...args) {
-            if (active && action !== "visit") {
+            if (active && !["visit", "mutate"].includes(action)) {
               blocked("non-visit-navigation");
               return undefined;
             }
@@ -2997,9 +3657,8 @@ export function createScoutRunner({
               redirectUrl = new URL(location, event.request.url).href;
               redirectAllowed =
                 requestState?.allowed &&
-                agentActionContext?.action === "visit" &&
+                ["visit", "mutate"].includes(agentActionContext?.action) &&
                 agentActionContext.navigationWindowOpen &&
-                ["GET", "HEAD"].includes(event.request.method) &&
                 isAgentUrlAllowed(redirectUrl, authorization.origin) &&
                 isAgentRequestRouteAuthorized(
                   redirectUrl,
@@ -3341,6 +4000,7 @@ export function createScoutRunner({
 
     for (const step of options.steps) {
       const stepStartedAt = Date.now();
+      let visual = null;
       if (state.navigationError) {
         workflowSteps.push({
           id: step.id,
@@ -3359,7 +4019,23 @@ export function createScoutRunner({
       }
 
       try {
-        const locator = page.locator(step.selector);
+        const repair = await healWorkflowTarget(page, step, options.timeoutMs);
+        if (repair) {
+          record(
+            "warn",
+            "workflow.target.healed",
+            "Repaired an unambiguous semantic workflow target",
+            {
+              id: step.id,
+              role: repair.from.role,
+              fromName: cleanDiagnosticText(repair.from.name),
+              toName: cleanDiagnosticText(repair.to.name),
+              confidence: repair.confidence,
+              expectedResultChanged: repair.expectedResultChanged
+            }
+          );
+        }
+        const locator = workflowLocator(page, step);
         if (step.action === "click") {
           await locator.click();
         } else if (step.action === "fill") {
@@ -3367,6 +4043,16 @@ export function createScoutRunner({
             ? process.env[step.valueFromEnv]
             : step.value;
           await locator.fill(value);
+        } else if (step.action === "select") {
+          await locator.selectOption(step.value);
+        } else if (step.action === "check") {
+          await locator.check();
+        } else if (step.action === "uncheck") {
+          await locator.uncheck();
+        } else if (step.action === "hover") {
+          await locator.hover();
+        } else if (step.action === "press") {
+          await locator.press(step.key);
         } else if (step.action === "expectText") {
           await playwrightExpect(locator).toContainText(step.text, {
             timeout: options.timeoutMs
@@ -3375,6 +4061,37 @@ export function createScoutRunner({
           await playwrightExpect(locator).toBeVisible({
             timeout: options.timeoutMs
           });
+        } else if (step.action === "expectValue") {
+          await playwrightExpect(locator).toHaveValue(step.value, {
+            timeout: options.timeoutMs
+          });
+        } else if (step.action === "expectVisual") {
+          const actualBytes = await locator.screenshot({
+            animations: "disabled",
+            caret: "hide",
+            timeout: options.timeoutMs
+          });
+          visual = compareVisualBuffers(
+            actualBytes,
+            Buffer.from(step.baselineData, "base64"),
+            { colorThreshold: step.colorThreshold }
+          );
+          visual = {
+            ...visual,
+            baselinePath: step.baseline,
+            maxDiffPixelRatio: step.maxDiffPixelRatio,
+            colorThreshold: step.colorThreshold
+          };
+          if (
+            !visual.dimensionsMatch ||
+            visual.diffPixelRatio > step.maxDiffPixelRatio
+          ) {
+            const error = new Error(
+              `Visual difference ${visual.diffPixelRatio.toFixed(6)} exceeded ${step.maxDiffPixelRatio.toFixed(6)}`
+            );
+            error.visual = visual;
+            throw error;
+          }
         }
 
         workflowSteps.push({
@@ -3382,10 +4099,16 @@ export function createScoutRunner({
           action: step.action,
           status: "passed",
           evidence:
-            step.action.startsWith("expect")
+            repair
+              ? step.action.startsWith("expect")
+                ? "Owner assertion satisfied after semantic target healing"
+                : "Action completed after semantic target healing"
+              : step.action.startsWith("expect")
               ? "Owner assertion satisfied"
               : "Action completed",
-          durationMs: Date.now() - stepStartedAt
+          durationMs: Date.now() - stepStartedAt,
+          ...(visual ? { visual } : {}),
+          ...(repair ? { healed: true, repair } : {})
         });
         record("info", "workflow.step.completed", "Workflow step completed", {
           id: step.id,
@@ -3399,7 +4122,11 @@ export function createScoutRunner({
           action: step.action,
           status: isAssertion ? "failed" : "invalid",
           evidence: error.message,
-          durationMs: Date.now() - stepStartedAt
+          durationMs: Date.now() - stepStartedAt,
+          ...(error.visual ? { visual: error.visual } : {}),
+          ...(step.target.kind === "role" && step.target.heal
+            ? { reason: "target-healing-unsatisfied" }
+            : {})
         };
         workflowSteps.push(result);
         record(
@@ -3500,6 +4227,7 @@ export function createScoutRunner({
               authorizedPrimaryRoutes: agentPrimaryRoutes,
               expectedDestinationTexts: options.agentExpectedTexts,
               expectedDestinationControls: options.agentExpectedControls,
+              agentAuthorization: options.agentAuthorization,
               engine: resolvedEngine.engine,
               maxSteps: options.maxAgentSteps,
               timeoutMs: options.timeoutMs,
@@ -3512,12 +4240,20 @@ export function createScoutRunner({
                     ...action,
                     navigationStarted: false,
                     navigationRequests: new Set(),
-                    navigationWindowOpen: action.action === "visit"
+                    navigationWindowOpen: ["visit", "mutate"].includes(action.action),
+                    mutationRequests: []
                   };
                   await activateAgentGuard(action.action);
                 },
                 async resume() {
                   await closeAgentNavigationWindow();
+                },
+                async observe() {
+                  return {
+                    mutationRequests: [
+                      ...(agentActionContext?.mutationRequests || [])
+                    ]
+                  };
                 },
                 async end() {
                   await closeAgentNavigationWindow();
@@ -3564,7 +4300,9 @@ export function createScoutRunner({
             ...state.exploration,
             ...exploration,
             requested: true,
-            mode: "agent-safe-interaction",
+            mode: options.agentAuthorization
+              ? "agent-authorized-workflow"
+              : "agent-safe-interaction",
             engine: finalEngineName,
             provenance: finalProvenance,
             capabilities: resolvedEngine.capabilities

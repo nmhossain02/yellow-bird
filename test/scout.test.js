@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, open, readFile, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  stat,
+  writeFile
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,6 +28,7 @@ import {
   PROHIBITED_AGENT_ACTION_PATTERN
 } from "../src/scout/explorer.js";
 import { resolveOutputOption } from "../src/scout/output.js";
+import { loadScenarioFile } from "../src/scout/scenario.js";
 
 let server;
 let target;
@@ -36,6 +44,7 @@ let visitEventSourceRequestCount = 0;
 let visitWebSocketUpgradeCount = 0;
 let failedVisitDelayedRequestCount = 0;
 let submissionRequestCount = 0;
+let authorizedMutationRequestCount = 0;
 let crossOriginRequestCount = 0;
 let prohibitedRedirectRequestCount = 0;
 let deleteAccountRequestCount = 0;
@@ -47,6 +56,7 @@ let zeroConfigBackgroundRequestCount = 0;
 let failVisitNavigation = false;
 let changeReplaySettlementUrl = false;
 let hideAgentFlowHeading = false;
+let visualFixtureChanged = false;
 
 async function runCommand(command, cwd, env) {
   const captureDirectory = await mkdtemp(
@@ -165,6 +175,74 @@ beforeAll(async () => {
   const { chromium } = await import("@playwright/test");
   sharedBrowser = await chromium.launch({ headless: true, timeout: 15_000 });
   server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/command-fixture") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Command fixture</title></head>
+          <body>
+            <select id="choice"><option value="alpha">Alpha</option><option value="beta">Beta</option></select>
+            <label><input id="enabled" type="checkbox"> Enabled</label>
+            <button id="hover" type="button">Hover target</button>
+            <input id="keys" aria-label="Keyboard target">
+            <p id="status">Ready</p>
+            <script>
+              const status = document.querySelector("#status");
+              document.querySelector("#enabled").addEventListener("change", event => {
+                status.textContent = event.target.checked ? "Checked" : "Unchecked";
+              });
+              document.querySelector("#hover").addEventListener("mouseenter", () => {
+                status.textContent = "Hovered";
+              });
+              document.querySelector("#keys").addEventListener("keydown", event => {
+                if (event.key === "Enter") status.textContent = "Pressed Enter";
+              });
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/visual-fixture") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Visual fixture</title></head>
+          <body style="margin: 0">
+            <section id="card" style="width: 240px; height: 120px; background: ${visualFixtureChanged ? "rgb(180, 20, 20)" : "rgb(20, 80, 180)"}; color: white; display: flex; align-items: center; justify-content: center; font: 20px sans-serif">Visual contract</section>
+          </body>
+        </html>`);
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/fixture-items") {
+      authorizedMutationRequestCount += 1;
+      response.writeHead(303, { location: "/authorized-workflow-complete" });
+      response.end();
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      request.url === "/authorized-workflow-complete"
+    ) {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html><head><title>Fixture committed</title></head>
+        <body><h1>Fixture committed successfully</h1></body></html>`);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/authorized-workflow") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Authorized fixture workflow</title></head>
+          <body>
+            <form action="/api/fixture-items" method="post">
+              <label>Fixture name <input name="fixtureName" type="text"></label>
+              <button type="submit">Commit fixture</button>
+            </form>
+          </body>
+        </html>`);
+      return;
+    }
     if (request.method === "GET" && request.url === "/zero-config-flow-data") {
       zeroConfigBackgroundRequestCount += 1;
       response.writeHead(200, { "content-type": "application/json" });
@@ -249,6 +327,18 @@ beforeAll(async () => {
                 }, 200);
               });
             </script>
+          </body>
+        </html>`);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/ambiguous-healing") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html>
+        <html>
+          <head><title>Ambiguous healing</title></head>
+          <body>
+            <button>Buy now</button>
+            <button>Buy later</button>
           </body>
         </html>`);
       return;
@@ -4594,6 +4684,148 @@ test("agent action broker blocks GET form submission", async () => {
   );
 });
 
+test("versioned agent authority performs one exact mutation and replays model-free", async () => {
+  authorizedMutationRequestCount = 0;
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-authorized-workflow-")
+  );
+  const report = await runSharedScout({
+    target: `${target}/authorized-workflow`,
+    agentPrimaryRoutes: undefined,
+    agentLoadRoutes: undefined,
+    intent: "Complete the owner-authorized fixture workflow",
+    exploreIntent: true,
+    maxAgentSteps: 2,
+    permissions: [
+      "browser.navigate",
+      "browser.read",
+      "browser.fill",
+      "browser.click",
+      "browser.submit"
+    ],
+    agentAuthorization: {
+      schema: "yellowbird.agent.v1",
+      mode: "authorized-workflow",
+      fields: [
+        {
+          role: "textbox",
+          type: "text",
+          name: "Fixture name",
+          value: "isolated-yellowbird-fixture"
+        }
+      ],
+      mutationControls: [
+        { role: "button", type: "submit", name: "Commit fixture" }
+      ],
+      mutationRoutes: [
+        { method: "POST", url: "/api/fixture-items", maxRequests: 1 }
+      ],
+      expectedTexts: ["Fixture committed successfully"]
+    },
+    outputDirectory
+  });
+
+  assert.equal(authorizedMutationRequestCount, 1);
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.exploration.mode, "agent-authorized-workflow");
+  assert.equal(report.observations.exploration.verification.profile, "authorized-workflow.v1");
+  assert.equal(report.observations.exploration.verification.satisfied, true);
+  assert.deepEqual(
+    report.observations.exploration.steps.map((step) => step.action),
+    ["fill", "mutate"]
+  );
+  assert.deepEqual(
+    report.observations.exploration.steps[1].mutationRequests,
+    [{ method: "POST", url: `${target}/api/fixture-items` }]
+  );
+
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.equal(authorizedMutationRequestCount, 2);
+}, 30_000);
+
+test("CLI runs a versioned authorized-agent scenario with the local planner", async () => {
+  authorizedMutationRequestCount = 0;
+  const fixtureDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-agent-cli-fixture-")
+  );
+  const scenarioPath = join(fixtureDirectory, "authorized.scenario.json");
+  const outputDirectory = join(fixtureDirectory, "output");
+  await writeFile(
+    scenarioPath,
+    `${JSON.stringify({
+      schema: "yellowbird.scenario.v1",
+      target: `${target}/authorized-workflow`,
+      intent: "Complete the owner-authorized fixture workflow",
+      permissions: [
+        "browser.navigate",
+        "browser.read",
+        "browser.fill",
+        "browser.click",
+        "browser.submit"
+      ],
+      assertions: { expectedStatus: 200 },
+      agent: {
+        schema: "yellowbird.agent.v1",
+        mode: "authorized-workflow",
+        fields: [
+          {
+            role: "textbox",
+            type: "text",
+            name: "Fixture name",
+            value: "cli-isolated-fixture"
+          }
+        ],
+        mutationControls: [
+          { role: "button", type: "submit", name: "Commit fixture" }
+        ],
+        mutationRoutes: [
+          { method: "POST", url: "/api/fixture-items", maxRequests: 1 }
+        ],
+        expectedTexts: ["Fixture committed successfully"]
+      },
+      steps: []
+    }, null, 2)}\n`,
+    "utf8"
+  );
+
+  const cli = await runCommand(
+    [
+      process.execPath,
+      "bin/yellowbird.js",
+      "scout",
+      "--scenario",
+      scenarioPath,
+      "--output",
+      outputDirectory
+    ],
+    resolve(".")
+  );
+  assert.equal(cli.exitCode, 0, `${cli.stdout}\n${cli.stderr}`);
+  assert.equal(authorizedMutationRequestCount, 1);
+  const evidence = JSON.parse(
+    await readFile(join(outputDirectory, "evidence.json"), "utf8")
+  );
+  assert.equal(evidence.outcome, "clear");
+  assert.equal(
+    evidence.observations.exploration.verification.profile,
+    "authorized-workflow.v1"
+  );
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+  assert.equal(authorizedMutationRequestCount, 2);
+}, 30_000);
+
 test("cross-origin effects attempted during exploration are inconclusive", async () => {
   crossOriginRequestCount = 0;
   const outputDirectory = await mkdtemp(
@@ -5829,13 +6061,13 @@ test("scout executes a permission-declared workflow and generates its regression
       {
         id: "enter-email",
         action: "fill",
-        selector: "[name=email]",
+        target: { role: "textbox", name: "Email" },
         value: "bird@example.test"
       },
       {
         id: "prepare-order",
         action: "click",
-        selector: "#checkout"
+        target: { role: "button", name: "Bu", exact: false }
       },
       {
         id: "confirm-ready",
@@ -5862,9 +6094,266 @@ test("scout executes a permission-declared workflow and generates its regression
     /Effective scope: Declared workflow; 3\/3 step\(s\) exercised; 2 product assertions\./
   );
   const regression = await readFile(report.artifacts.regression, "utf8");
-  assert.match(regression, /locator\("\[name=email\]"\)\.fill/);
-  assert.match(regression, /locator\("#checkout"\)\.click/);
+  assert.match(
+    regression,
+    /getByRole\("textbox", \{ name: "Email", exact: true \}\)\.fill/
+  );
+  assert.match(
+    regression,
+    /getByRole\("button", \{ name: "Bu", exact: false \}\)\.click/
+  );
   assert.match(regression, /toContainText\("Order ready"\)/);
+});
+
+test("scenario visual assertion passes live and replay then detects drift", async () => {
+  const fixtureDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-visual-fixture-")
+  );
+  const baselinePath = join(fixtureDirectory, "card.png");
+  const baselinePage = await sharedBrowser.newPage({
+    viewport: { width: 1440, height: 900 }
+  });
+  try {
+    await baselinePage.goto(`${target}/visual-fixture`, {
+      waitUntil: "domcontentloaded"
+    });
+    await writeFile(
+      baselinePath,
+      await baselinePage.locator("#card").screenshot({
+        animations: "disabled",
+        caret: "hide"
+      })
+    );
+  } finally {
+    await baselinePage.close();
+  }
+  const scenarioPath = join(fixtureDirectory, "visual.scenario.json");
+  await writeFile(
+    scenarioPath,
+    `${JSON.stringify({
+      schema: "yellowbird.scenario.v1",
+      target: `${target}/visual-fixture`,
+      intent: "Verify the visual card contract",
+      permissions: ["browser.navigate", "browser.read"],
+      assertions: { expectedStatus: 200 },
+      steps: [
+        {
+          id: "card-visual",
+          action: "expectVisual",
+          selector: "#card",
+          baseline: "card.png",
+          maxDiffPixelRatio: 0,
+          colorThreshold: 0
+        }
+      ]
+    }, null, 2)}\n`,
+    "utf8"
+  );
+  const scenario = await loadScenarioFile(scenarioPath);
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-visual-output-")
+  );
+  const report = await runSharedScout({
+    target: scenario.target,
+    intent: scenario.intent,
+    permissions: scenario.permissions,
+    steps: scenario.steps,
+    expectedStatus: scenario.assertions.expectedStatus,
+    exploreIntent: false,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.workflowSteps[0].status, "passed");
+  assert.equal(
+    report.observations.workflowSteps[0].visual.diffPixelRatio,
+    0
+  );
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+
+  visualFixtureChanged = true;
+  try {
+    const driftReplay = await runCommand(
+      [process.execPath, "run", "test"],
+      outputDirectory
+    );
+    assert.notEqual(
+      driftReplay.exitCode,
+      0,
+      `${driftReplay.stdout}\n${driftReplay.stderr}`
+    );
+    assert.match(
+      `${driftReplay.stdout}\n${driftReplay.stderr}`,
+      /diffPixelRatio|toBeLessThanOrEqual/
+    );
+  } finally {
+    visualFixtureChanged = false;
+  }
+}, 30_000);
+
+test("deterministic form and keyboard commands execute and replay", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-command-workflow-")
+  );
+  const report = await runSharedScout({
+    target: `${target}/command-fixture`,
+    intent: "Exercise deterministic browser commands",
+    permissions: [
+      "browser.navigate",
+      "browser.read",
+      "browser.fill",
+      "browser.click"
+    ],
+    steps: [
+      { id: "select", action: "select", selector: "#choice", value: "beta" },
+      { id: "selected", action: "expectValue", selector: "#choice", value: "beta" },
+      { id: "check", action: "check", selector: "#enabled" },
+      { id: "checked", action: "expectText", selector: "#status", text: "Checked" },
+      { id: "uncheck", action: "uncheck", selector: "#enabled" },
+      { id: "unchecked", action: "expectText", selector: "#status", text: "Unchecked" },
+      { id: "hover", action: "hover", selector: "#hover" },
+      { id: "hovered", action: "expectText", selector: "#status", text: "Hovered" },
+      { id: "press", action: "press", selector: "#keys", key: "Enter" },
+      { id: "pressed", action: "expectText", selector: "#status", text: "Pressed Enter" }
+    ],
+    expectedStatus: 200,
+    exploreIntent: false,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.equal(report.observations.workflowSteps.length, 10);
+  assert.ok(
+    report.observations.workflowSteps.every((step) => step.status === "passed")
+  );
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+}, 30_000);
+
+test("CLI executes a variable-backed reusable module and replays the expansion", async () => {
+  const scenarioDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-cli-module-")
+  );
+  const moduleDirectory = join(scenarioDirectory, "modules");
+  const outputDirectory = join(scenarioDirectory, "output");
+  await mkdir(moduleDirectory);
+  const modulePath = join(moduleDirectory, "prepare.module.json");
+  const scenarioPath = join(scenarioDirectory, "checkout.scenario.json");
+  await writeFile(
+    modulePath,
+    `${JSON.stringify(
+      {
+        schema: "yellowbird.module.v1",
+        parameters: ["EMAIL", "EXPECTED"],
+        defaults: { EXPECTED: "Order ready" },
+        steps: [
+          {
+            id: "email",
+            action: "fill",
+            target: { role: "textbox", name: "Email" },
+            value: "{{ vars.EMAIL }}"
+          },
+          {
+            id: "buy",
+            action: "click",
+            target: { role: "button", name: "Buy" }
+          },
+          {
+            id: "ready",
+            action: "expectText",
+            selector: "#status",
+            text: "{{ vars.EXPECTED }}"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  await writeFile(
+    scenarioPath,
+    `${JSON.stringify(
+      {
+        schema: "yellowbird.scenario.v1",
+        target: `${target}/delayed-workflow`,
+        intent: "Prepare an order for {{ vars.PERSON }}",
+        permissions: [
+          "browser.navigate",
+          "browser.read",
+          "browser.fill",
+          "browser.click"
+        ],
+        variables: {
+          PERSON: "a shopper",
+          EMAIL: "bird@example.test"
+        },
+        assertions: { expectedStatus: 200 },
+        steps: [
+          {
+            id: "checkout",
+            action: "module",
+            path: "modules/prepare.module.json",
+            inputs: { EMAIL: "{{ vars.EMAIL }}" }
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const result = await runCommand(
+    [
+      process.execPath,
+      resolve("bin/yellowbird.js"),
+      "scout",
+      "--scenario",
+      scenarioPath,
+      "--output",
+      outputDirectory
+    ],
+    resolve(".")
+  );
+  assert.equal(result.exitCode, 0, `${result.stdout}\n${result.stderr}`);
+  const evidence = JSON.parse(
+    await readFile(join(outputDirectory, "evidence.json"), "utf8")
+  );
+  assert.equal(evidence.intent, "Prepare an order for a shopper");
+  assert.deepEqual(
+    evidence.observations.workflowSteps.map(({ id, status }) => ({ id, status })),
+    [
+      { id: "checkout.email", status: "passed" },
+      { id: "checkout.buy", status: "passed" },
+      { id: "checkout.ready", status: "passed" }
+    ]
+  );
+  const regression = await readFile(
+    join(outputDirectory, "regression.spec.js"),
+    "utf8"
+  );
+  assert.match(regression, /fill\("bird@example\.test"\)/);
+  assert.doesNotMatch(regression, /\{\{\s*vars\./);
+
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
 });
 
 test("an unexecutable owner action is inconclusive rather than a product pass", async () => {
@@ -5887,6 +6376,201 @@ test("an unexecutable owner action is inconclusive rather than a product pass", 
   assert.equal(report.findings.length, 0);
   assert.equal(report.observations.workflowSteps[0].status, "invalid");
   assert.ok(
-    report.coverageGaps.some((gap) => gap.includes("did not attempt selector healing"))
+    report.coverageGaps.some((gap) => gap.includes("did not attempt target healing"))
+  );
+});
+
+test("workflow semantic targets are validated before browser execution", () => {
+  const base = {
+    permissions: ["browser.navigate", "browser.read", "browser.click"]
+  };
+  assert.throws(
+    () =>
+      validateWorkflow({
+        ...base,
+        steps: [
+          {
+            id: "ambiguous",
+            action: "click",
+            selector: "button",
+            target: { role: "button", name: "Continue" }
+          }
+        ]
+      }),
+    /exactly one of selector or target/
+  );
+  assert.throws(
+    () =>
+      validateWorkflow({
+        ...base,
+        steps: [
+          {
+            id: "unsupported-role",
+            action: "click",
+            target: { role: "banana", name: "Continue" }
+          }
+        ]
+      }),
+    /requires a supported role/
+  );
+  assert.throws(
+    () =>
+      validateWorkflow({
+        ...base,
+        steps: [
+          {
+            id: "unknown-option",
+            action: "click",
+            target: { role: "button", name: "Continue", fuzzy: true }
+          }
+        ]
+      }),
+    /unsupported property fuzzy/
+  );
+  assert.throws(
+    () =>
+      validateWorkflow({
+        ...base,
+        steps: [
+          {
+            id: "unnamed-healing",
+            action: "click",
+            target: { role: "button", heal: true }
+          }
+        ]
+      }),
+    /target healing requires an accessible name/
+  );
+});
+
+test("semantic workflow targets heal unambiguous accessible-name drift and replay", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-workflow-healing-")
+  );
+  const report = await runSharedScout({
+    target: `${target}/delayed-workflow`,
+    intent: "Prepare an order after accessible copy changes",
+    permissions: [
+      "browser.navigate",
+      "browser.read",
+      "browser.fill",
+      "browser.click"
+    ],
+    steps: [
+      {
+        id: "enter-email",
+        action: "fill",
+        target: { role: "textbox", name: "Email address", heal: true },
+        value: "bird@example.test"
+      },
+      {
+        id: "prepare-order",
+        action: "click",
+        target: { role: "button", name: "Buy now", heal: true }
+      },
+      {
+        id: "confirm-ready",
+        action: "expectText",
+        selector: "#status",
+        text: "Order ready"
+      }
+    ],
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "clear");
+  assert.deepEqual(
+    report.observations.workflowSteps.slice(0, 2).map((step) => ({
+      id: step.id,
+      healed: step.healed,
+      from: step.repair.from.name,
+      to: step.repair.to.name,
+      expectedResultChanged: step.repair.expectedResultChanged
+    })),
+    [
+      {
+        id: "enter-email",
+        healed: true,
+        from: "Email address",
+        to: "Email",
+        expectedResultChanged: false
+      },
+      {
+        id: "prepare-order",
+        healed: true,
+        from: "Buy now",
+        to: "Buy",
+        expectedResultChanged: false
+      }
+    ]
+  );
+  const regression = await readFile(report.artifacts.regression, "utf8");
+  assert.match(
+    regression,
+    /getByRole\("textbox", \{ name: "Email", exact: true \}\)\.fill/
+  );
+  assert.match(
+    regression,
+    /getByRole\("button", \{ name: "Buy", exact: true \}\)\.click/
+  );
+  assert.doesNotMatch(regression, /Email address|Buy now/);
+  const markdown = await readFile(report.artifacts.report, "utf8");
+  assert.match(
+    markdown,
+    /semantic-target:enter-email \(0\.667\).*textbox "Email address".*textbox "Email".*no/
+  );
+  assert.match(
+    markdown,
+    /semantic-target:prepare-order \(0\.667\).*button "Buy now".*button "Buy".*no/
+  );
+  const diagnostics = await readFile(report.artifacts.diagnostics, "utf8");
+  assert.equal(
+    diagnostics
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.event === "workflow.target.healed").length,
+    2
+  );
+
+  const install = await runCommand([process.execPath, "install"], outputDirectory);
+  assert.equal(install.exitCode, 0, install.stderr);
+  const replay = await runCommand(
+    [process.execPath, "run", "test"],
+    outputDirectory
+  );
+  assert.equal(replay.exitCode, 0, `${replay.stdout}\n${replay.stderr}`);
+});
+
+test("semantic workflow target healing fails closed on ambiguous drift", async () => {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "yellowbird-workflow-ambiguous-healing-")
+  );
+  const report = await runSharedScout({
+    target: `${target}/ambiguous-healing`,
+    permissions: ["browser.navigate", "browser.read", "browser.click"],
+    steps: [
+      {
+        id: "buy",
+        action: "click",
+        target: { role: "button", name: "Buy", heal: true }
+      }
+    ],
+    timeoutMs: 500,
+    outputDirectory
+  });
+
+  assert.equal(report.outcome, "inconclusive");
+  assert.equal(report.findings.length, 0);
+  assert.deepEqual(
+    report.observations.workflowSteps.map(({ status, reason }) => ({
+      status,
+      reason
+    })),
+    [{ status: "invalid", reason: "target-healing-unsatisfied" }]
+  );
+  assert.match(
+    report.observations.workflowSteps[0].evidence,
+    /no high-confidence unambiguous button/
   );
 });

@@ -1,4 +1,12 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -119,6 +127,58 @@ async function trustedPriceScoutCommit() {
   return commit.toLowerCase();
 }
 
+export async function preparedPriceScoutCheckout(
+  authorizedCommit,
+  {
+    requestedDirectory = requestedPriceScoutDirectory,
+    explicitlyRequested =
+      process.env.YELLOWBIRD_PRICE_SCOUT_DIR !== undefined,
+    repositoryUrl = `${expectedRepository}.git`
+  } = {}
+) {
+  try {
+    return await realpath(requestedDirectory);
+  } catch (error) {
+    if (explicitlyRequested || error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const parentDirectory = dirname(requestedDirectory);
+  await mkdir(parentDirectory, { recursive: true });
+  const stagingRoot = await mkdtemp(
+    join(parentDirectory, ".yellowbird-price-scout-checkout-")
+  );
+  const stagedCheckout = join(stagingRoot, "price-scout");
+  try {
+    await checked(
+      [
+        "git",
+        "-c",
+        "credential.helper=",
+        "clone",
+        "--no-checkout",
+        "--",
+        repositoryUrl,
+        stagedCheckout
+      ],
+      stagingRoot,
+      "Trusted Price Scout fixture checkout",
+      gitEnvironment
+    );
+    await checked(
+      ["git", "checkout", "--detach", authorizedCommit],
+      stagedCheckout,
+      "Trusted Price Scout fixture revision checkout",
+      gitEnvironment
+    );
+    await rename(stagedCheckout, requestedDirectory);
+    return await realpath(requestedDirectory);
+  } finally {
+    await rm(stagingRoot, { force: true, recursive: true });
+  }
+}
+
 async function verifyPriceScoutCheckout(directory, stage, expectedCommit) {
   const [commit, status, worktreeRoot] = await Promise.all([
     checked(
@@ -230,6 +290,30 @@ function composeEnvironmentMatches(service, expected) {
   );
 }
 
+export function priceScoutEngineArguments(engineConfig) {
+  if (
+    !engineConfig.explicitlyConfigured ||
+    engineConfig.adapter === "builtin"
+  ) {
+    return ["--engine-adapter", "builtin"];
+  }
+  return [
+    "--engine-adapter",
+    engineConfig.adapter,
+    "--engine-base-url",
+    engineConfig.baseUrl,
+    ...(engineConfig.model === null
+      ? []
+      : ["--engine-model", engineConfig.model])
+  ];
+}
+
+export function priceScoutExpectedEngineEndpointClass(engineConfig) {
+  return !engineConfig.explicitlyConfigured || engineConfig.adapter === "builtin"
+    ? "local-process"
+    : "loopback";
+}
+
 async function main() {
   const engineConfig = validateAgentEngineConfig();
   requireCondition(
@@ -241,10 +325,10 @@ async function main() {
     classifyAgentEngineEndpoint(engineConfig.baseUrl) === "loopback",
     `The real Price Scout gate requires a loopback planning engine, received ${engineConfig.baseUrl}`
   );
-  const sourcePriceScoutDirectory = await realpath(
-    requestedPriceScoutDirectory
-  );
   const authorizedCommit = await trustedPriceScoutCommit();
+  const sourcePriceScoutDirectory = await preparedPriceScoutCheckout(
+    authorizedCommit
+  );
 
   const [origin, sourceWorktreeRoot] = await Promise.all([
     checked(
@@ -488,11 +572,7 @@ async function main() {
         target,
         "--intent",
         "Assess initial interface and basic user flow",
-        "--engine-base-url",
-        engineConfig.baseUrl,
-        ...(engineConfig.model === null
-          ? []
-          : ["--engine-model", engineConfig.model]),
+        ...priceScoutEngineArguments(engineConfig),
         "--agent-primary-route",
         "/monitors/new",
         ...priceScoutExpectedDestinationTexts.flatMap((text) => [
@@ -543,9 +623,12 @@ async function main() {
         evidence.observations.exploration.coverage === "covered",
       "Intent exploration did not complete with covered evidence"
     );
+    const expectedEngineEndpointClass =
+      priceScoutExpectedEngineEndpointClass(engineConfig);
     requireCondition(
-      evidence.observations.exploration.provenance?.endpointClass === "loopback",
-      "The real Price Scout gate did not use a loopback planning engine"
+      evidence.observations.exploration.provenance?.endpointClass ===
+        expectedEngineEndpointClass,
+      `The real Price Scout gate did not use the expected ${expectedEngineEndpointClass} planning engine`
     );
     requireCondition(
       evidence.observations.exploration.verification?.profile ===
@@ -658,4 +741,4 @@ async function main() {
   }
 }
 
-await main();
+if (import.meta.main) await main();

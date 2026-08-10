@@ -5,8 +5,10 @@ to discover product failures before customers do, preserve the product owner's
 expected results, and return evidence that can be reproduced without YellowBird.
 
 The executable product is a local browser scout. It checks a loopback web target,
-can explore a bounded non-submitting flow from natural-language intent, captures
-runtime evidence, and generates a portable Playwright regression. The dashboard
+can explore a bounded flow from natural-language intent, captures runtime
+evidence, and generates a portable Playwright regression. Ordinary intent runs
+remain non-submitting. A versioned scenario can grant one exact owner-declared
+mutation request with observed final assertions. The dashboard
 still demonstrates the larger orchestration model while that model is implemented
 incrementally.
 
@@ -74,7 +76,7 @@ evaluation and should be treated as an operational concern until diagnosed.
 check or bounded safe exploration ran without a declared functional workflow.
 `ATTENTION` identifies observed product failure signals, and combines with
 `ERROR` when both product findings and run-integrity problems occur. `CLEAR` is
-reserved for completed declared functional workflows. The effective scope
+reserved for completed deterministic or owner-authorized functional workflows. The effective scope
 counts every enforced product assertion, including the expected HTTP status.
 The same summary states the YellowBird run status, product signal, and effective
 scope so a narrow `clear` evidence outcome cannot read as broad product health.
@@ -114,8 +116,86 @@ bun run scout -- --scenario examples/checkout.scenario.json
 That workflow declares `browser.fill` and `browser.click` before the run, enters
 an email, prepares an order, and asserts that the product reaches `Order ready`.
 Its actions and assertions are also written into the generated regression.
+Steps can use a CSS `selector` or a semantic `target` with an accessibility
+`role`, optional accessible `name`, and optional `exact` matching. Semantic
+targets are preferred because they preserve user-facing intent across DOM class
+and layout changes while keeping execution and replay deterministic. Set
+`"heal": true` on a named semantic target to allow bounded accessible-name
+healing. YellowBird waits for the original target, considers only visible
+controls with the same role, requires one high-confidence unambiguous match,
+records the repair without changing expected results, and pins the observed name
+into the generated replay.
+Scenarios may also declare non-secret string `variables` and interpolate them as
+`{{ vars.NAME }}` in the target, intent, assertions, and workflow string fields.
+An `action: "module"` step loads a `yellowbird.module.v1` JSON file relative to
+the scenario, supplies parameter `inputs`, and expands its steps with stable
+dot-prefixed IDs before validation and execution. Modules may define parameter
+`defaults` and invoke nested modules. Module paths are resolved physically and
+must remain inside the scenario directory. Expansion is limited to 10 nesting
+levels, 50 module files, and 200 browser steps. Continue to use `valueFromEnv`
+for secrets because scenario variables are intentionally preserved in the
+portable regression.
 The public format is
-[`schemas/scenario.v1.schema.json`](./schemas/scenario.v1.schema.json).
+[`schemas/scenario.v1.schema.json`](./schemas/scenario.v1.schema.json), and the
+module format is [`schemas/module.v1.schema.json`](./schemas/module.v1.schema.json).
+
+Intent-driven server mutation is available only inside a versioned scenario.
+It cannot be enabled by `--intent`, `--agent`, planner output, or a route flag.
+The scenario must declare `browser.submit` and an `agent` object with schema
+`yellowbird.agent.v1`, mode `authorized-workflow`, exact semantic fields, one
+exact semantic mutation control, one exact-origin non-read route with a request
+budget of one, and final rendered-text assertions. Deterministic workflow steps
+cannot be mixed with this mode. For example:
+
+```json
+{
+  "agent": {
+    "schema": "yellowbird.agent.v1",
+    "mode": "authorized-workflow",
+    "fields": [
+      {
+        "role": "textbox",
+        "type": "url",
+        "name": "Product URL",
+        "value": "https://example.test/product"
+      }
+    ],
+    "mutationControls": [
+      { "role": "button", "type": "submit", "name": "Compile monitor" }
+    ],
+    "mutationRoutes": [
+      { "method": "POST", "url": "/api/v1/monitors", "maxRequests": 1 }
+    ],
+    "expectedTexts": ["Review your monitor"]
+  }
+}
+```
+
+YellowBird keeps owner field values out of planner input, records the chosen
+actions and exact authorized request, and generates a model-free replay with the
+same request budget and final assertions. Scenario variables are non-secret, so
+this first authority version intentionally does not accept credentials or
+environment-backed field values.
+
+Scenarios and modules also support deterministic `select`, `check`, `uncheck`,
+`hover`, `press`, and `expectValue` steps. An `expectVisual` step compares a
+selector or semantic target against a repository-owned PNG with configurable
+`maxDiffPixelRatio` and `colorThreshold` values from 0 to 1. Baseline paths are
+resolved physically, must remain inside the scenario directory, must be PNG
+files no larger than 2 MiB, and are embedded into the portable replay. Live
+evidence records dimensions, changed pixels, the observed ratio, and configured
+thresholds. For example:
+
+```json
+{
+  "id": "summary-card",
+  "action": "expectVisual",
+  "target": { "role": "region", "name": "Order summary" },
+  "baseline": "baselines/order-summary.png",
+  "maxDiffPixelRatio": 0.01,
+  "colorThreshold": 0.1
+}
+```
 
 ## Use YellowBird from another repository
 
@@ -246,7 +326,7 @@ This is a useful development boundary, not production target authorization.
 Remote staging and production targets will require explicit challenge proofs,
 scoped run grants, sandboxing, and policy approval before they are enabled.
 
-An explicit natural-language intent may visit owner-declared exact-origin links,
+An ordinary natural-language intent may visit owner-declared exact-origin links,
 fill eligible fields with YellowBird-owned synthetic values, select supplied
 options, and use a narrow allowlist of read-only non-submit buttons whose labels
 begin with `collapse`, `detail`, `details`, `expand`, `hide`, `inspect`,
@@ -257,7 +337,11 @@ throughout agent exploration. Dedicated and shared worker creation is also
 policy-blocked because a worker can open WebTransport before a page-level
 observer can constrain it. Form submission,
 authentication, credential use, cross-origin navigation, and destructive
-controls are not available to the model as actions. The model proposes one
+controls are not available to the model as actions. A `yellowbird.agent.v1`
+scenario is the only exception: it exposes only the exact owner-declared fields
+and mutation control, opens only the single declared non-read request for one
+active action, requires exactly one observed mutation request, and verifies the
+owner-declared final text. The model proposes one
 supplied element at a time; YellowBird validates and executes the action. Model
 text is coverage guidance, never product-failure evidence. Planner output alone
 cannot authorize `covered` coverage. An intent-exploration run can be `clear`
@@ -265,7 +349,7 @@ only when a named YellowBird-owned profile satisfies every machine-readable
 observed criterion. The initial-interface basic-flow profile, for example,
 requires the initial page, a passed visit to a distinct authorized route, safe
 controls observed on that destination, and no failed agent action. Intents that
-do not match an owned profile, need server-side mutation, or require another
+do not match an owned profile, need undeclared server-side mutation, or require another
 action outside the safe interaction authority produce an `inconclusive` result
 instead of an unverified pass. After at least one authorized step passes, a
 later planner, action, cleanup, policy, or browser-operation failure preserves
@@ -291,8 +375,8 @@ evidence JSON and Markdown report retain declared or automatic navigation and
 load authority plus the exact observed background routes used for browser
 enforcement.
 
-The generated regression re-enforces the live scout's exact-origin, read-only,
-redirect, and 150 ms visit-settlement guards, including submission and the same
+The generated regression re-enforces the live scout's exact-origin, request,
+redirect, and 150 ms action-settlement guards, including submission and the same
 non-HTTP transport blocking, without calling the model. Every authorized visit
 attempt is retained for replay, including one that failed during the live scout.
 Recorded non-navigation actions also replay through verified locators and assert
@@ -317,9 +401,11 @@ diagnostics.
 
 Owner-declared scenarios retain their explicit permission model for exact
 `fill`, `click`, `expectText`, and `expectVisible` steps. A failed action is
-reported as `inconclusive`, not as a product pass or product bug, because selector
-healing has not been implemented. That distinction is part of the evidence
-contract. Assertions wait up to the configured browser timeout for async page
+reported as `inconclusive`, not as a product pass or product bug. Scenarios can
+use deterministic accessibility-role targets to avoid CSS-selector drift, but
+automatic healing is limited to explicitly opted-in semantic accessible names
+and fails closed on low-confidence or ambiguous candidates. That distinction is
+part of the evidence contract. Assertions wait up to the configured browser timeout for async page
 transitions and rendering before they fail.
 
 Navigation and transport failures are also `inconclusive` test mechanics rather
@@ -392,12 +478,16 @@ local browser check.
 - Loopback-only target authorization and exact-origin browser network policy
 - Initial-page navigation with status, title, text, console, exception, failed
   request, screenshot, and interactive-element evidence
-- Intent-driven bounded exploration through YellowBird's safe built-in planner
+- Intent-driven bounded exploration through YellowBird's safe built-in planner,
+  including versioned owner-authorized one-request workflows,
   or a probed OpenAI-compatible endpoint
 - YellowBird-enforced same-origin action policy, synthetic form values, truthful
   coverage accounting, engine provenance, and model-free replay
-- Permission-declared `fill`, `click`, `expectText`, and `expectVisible` workflow
-  steps with `inconclusive` handling for invalid test mechanics
+- Permission-declared form, pointer, keyboard, text, value, visibility, and
+  pixel-tolerant visual workflow steps with `inconclusive` handling for invalid
+  test mechanics
+- Non-secret scenario variables and bounded, parameterized, nested workflow
+  modules that expand before validation into deterministic replay steps
 - Loopback transport diagnosis and evidence-backed HTTPS-to-HTTP scheme repair
 - Ordered JSONL diagnostics correlated by run ID, with a live `--verbose` view
 - Owner-authored assertions that YellowBird does not rewrite

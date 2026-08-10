@@ -535,9 +535,45 @@ export function createBuiltinIntentEngine() {
       ? request.page.availableElements
       : [];
     const stepsTaken = Number(request.policy?.stepsTaken || 0);
+    const authorizedWorkflow = request.policy?.formSubmissionAllowed === true;
     let output;
 
-    if (
+    if (authorizedWorkflow) {
+      const nextField = elements.find(
+        (element) => element?.allowedAction === "fill"
+      );
+      const mutation = elements.find(
+        (element) => element?.allowedAction === "mutate"
+      );
+      if (nextField) {
+        output = {
+          action: "act",
+          elementRef: nextField.ref,
+          value: null,
+          rationale:
+            "YellowBird selected the next exact owner-declared field in the authorized workflow.",
+          coverage: "continue",
+          summary: ""
+        };
+      } else if (mutation) {
+        output = {
+          action: "act",
+          elementRef: mutation.ref,
+          value: null,
+          rationale:
+            "YellowBird selected the exact owner-declared mutation control after filling every available declared field.",
+          coverage: "continue",
+          summary: ""
+        };
+      } else {
+        output = finishAction(
+          stepsTaken > 0 ? "covered" : "blocked",
+          stepsTaken > 0
+            ? "YellowBird completed every available owner-declared action and deferred coverage to observed final criteria."
+            : "The authorized workflow exposed no exact owner-declared action."
+        );
+      }
+    } else if (
       !BASIC_FLOW_INTENT.test(intent) ||
       !BASIC_FLOW_VERB.test(intent) ||
       PROHIBITED_INTENT.test(intent)

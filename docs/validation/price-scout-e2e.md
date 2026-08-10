@@ -6,15 +6,21 @@ local end-to-end gate against the application repository and its generated
 portable replay. CI keeps running the controlled suite, while this local gate owns
 the external checkout, Compose stack, and planning-engine dependencies.
 
-Clone the external application into the ignored fixture directory:
+By default, the gate checks out the trusted repository's current remote `HEAD`
+into the ignored fixture directory when it is missing:
 
 ```bash
 git clone https://github.com/nmhossain02/price-scout.git \
   test/fixtures/external/price-scout
 ```
 
-Prepare the local compatible planning engine described in the main README, then
-run:
+The command above is optional. For a later offline validation, prepare the
+checkout and set `YELLOWBIRD_PRICE_SCOUT_COMMIT` to its full authorized commit so
+the gate does not need to resolve remote `HEAD`.
+
+The built-in bounded planner is used by default, so no model service is required.
+To exercise a configured HTTP planner instead, prepare the local compatible
+engine described in the main README. Then run:
 
 ```bash
 bun run test:price-scout
@@ -37,8 +43,8 @@ An operator can instead authorize one immutable revision with
 temporary shared clone with no initial checkout, checks out that digest into a
 detached worktree, and executes only from its fresh index and files. Dirty source
 files, untracked dotenv files, and source index flags therefore cannot enter the
-validated tree. The validator also refuses a non-loopback planning-engine
-endpoint.
+validated tree. The validator also refuses a non-loopback configured HTTP
+planning-engine endpoint.
 
 Before startup, the validator creates a unique Compose project with unique image
 tags and assigns free loopback-only host ports to the API and fixture services.
@@ -57,8 +63,9 @@ teardown.
 The validator runs the intent scout from the Price Scout working directory with
 `/monitors/new` declared as the primary read-only agent route, the application's
 asset prefixes declared as prefix load routes, and `/api/v1/monitors` plus
-`/api/v1/events` declared as exact load routes. It verifies loopback engine
-provenance and requires the observed
+`/api/v1/events` declared as exact load routes. It verifies local-process
+provenance for the built-in planner or loopback provenance for an explicitly
+configured HTTP planner, and requires the observed
 `initial-interface-basic-flow.v1` profile, requires a passed visit to
 `/monitors/new`, requires the destination to expose the Price Scout form's
 heading text, and requires exactly one visible `Product URL` URL textbox,
@@ -72,6 +79,9 @@ intact. On success, it prints the path together with the verified Price Scout
 commit and Compose project name.
 
 The default external checkout remains uncommitted because
-`test/fixtures/external/` is ignored. Target and health endpoint overrides are
-rejected so the configured URL cannot be redirected to a service unrelated to
-the stack started by this gate.
+`test/fixtures/external/` is ignored. When that checkout is missing, the gate
+clones the trusted remote through a temporary sibling directory, checks out the
+authorized commit, and atomically moves it into place. An explicitly configured
+missing checkout still fails instead of cloning to an unexpected operator path.
+Target and health endpoint overrides are rejected so the configured URL cannot
+be redirected to a service unrelated to the stack started by this gate.

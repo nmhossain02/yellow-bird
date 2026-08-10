@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  writeFile
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
@@ -10,6 +17,11 @@ import {
   createCompatibleEngine,
   resolveAgentEngine
 } from "../src/scout/engine.js";
+import {
+  preparedPriceScoutCheckout,
+  priceScoutEngineArguments,
+  priceScoutExpectedEngineEndpointClass
+} from "../scripts/validate-price-scout-e2e.js";
 
 function jsonResponse(value, init = {}) {
   return new Response(JSON.stringify(value), {
@@ -45,6 +57,97 @@ test("engine endpoint classification recognizes only exact loopback hosts", () =
   assert.equal(
     classifyAgentEngineEndpoint("https://localhost.example/v1"),
     "remote"
+  );
+});
+
+test("Price Scout gate preserves built-in and configured engine selection", () => {
+  const automatic = {
+    adapter: "auto",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    model: null,
+    explicitlyConfigured: false
+  };
+  const configured = {
+    adapter: "http",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    model: "local-planner",
+    explicitlyConfigured: true
+  };
+  assert.deepEqual(
+    priceScoutEngineArguments(automatic),
+    ["--engine-adapter", "builtin"]
+  );
+  assert.deepEqual(
+    priceScoutEngineArguments(configured),
+    [
+      "--engine-adapter",
+      "http",
+      "--engine-base-url",
+      "http://127.0.0.1:11434/v1",
+      "--engine-model",
+      "local-planner"
+    ]
+  );
+  assert.equal(
+    priceScoutExpectedEngineEndpointClass(automatic),
+    "local-process"
+  );
+  assert.equal(priceScoutExpectedEngineEndpointClass(configured), "loopback");
+});
+
+test("Price Scout gate prepares a missing default fixture at an authorized commit", async () => {
+  const fixtureRoot = await mkdtemp(
+    join(tmpdir(), "yellowbird-price-scout-prepare-")
+  );
+  const repository = join(fixtureRoot, "repository");
+  const destination = join(fixtureRoot, "external", "price-scout");
+  await mkdir(repository);
+  const git = async (cwd, ...arguments_) => {
+    const child = Bun.spawn({
+      cmd: ["git", ...arguments_],
+      cwd,
+      env: process.env,
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited
+    ]);
+    assert.equal(exitCode, 0, stderr);
+    return stdout.trim();
+  };
+  await git(repository, "init", "--initial-branch=main");
+  await writeFile(join(repository, "README.md"), "Price Scout fixture\n", "utf8");
+  await git(repository, "add", "README.md");
+  await git(
+    repository,
+    "-c",
+    "user.name=YellowBird Test",
+    "-c",
+    "user.email=yellowbird@example.test",
+    "commit",
+    "-m",
+    "fixture"
+  );
+  const commit = await git(repository, "rev-parse", "HEAD");
+
+  const prepared = await preparedPriceScoutCheckout(commit, {
+    requestedDirectory: destination,
+    explicitlyRequested: false,
+    repositoryUrl: repository
+  });
+  assert.equal(prepared, await realpath(destination));
+  assert.equal(await git(prepared, "rev-parse", "HEAD"), commit);
+  assert.equal(await git(prepared, "status", "--porcelain"), "");
+  await assert.rejects(
+    preparedPriceScoutCheckout(commit, {
+      requestedDirectory: join(fixtureRoot, "missing-explicit"),
+      explicitlyRequested: true,
+      repositoryUrl: repository
+    }),
+    /ENOENT/
   );
 });
 

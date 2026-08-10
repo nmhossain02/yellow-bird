@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { access, readFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import {
@@ -8,6 +8,7 @@ import {
   diagnosticUrl
 } from "../src/scout/diagnostics.js";
 import { resolveOutputOption } from "../src/scout/output.js";
+import { loadScenarioFile } from "../src/scout/scenario.js";
 import { startServer } from "../src/server.js";
 
 function optionValues(name) {
@@ -155,12 +156,7 @@ async function scout() {
   const scenarioPath = argument("scenario");
   let scenario = {};
   if (scenarioPath) {
-    scenario = JSON.parse(await readFile(resolve(scenarioPath), "utf8"));
-    if (scenario.schema !== "yellowbird.scenario.v1") {
-      throw new Error(
-        "scenario must declare schema yellowbird.scenario.v1"
-      );
-    }
+    scenario = await loadScenarioFile(scenarioPath);
   }
 
   const target = argument("target", scenario.target);
@@ -191,9 +187,13 @@ async function scout() {
     permissions: scenario.permissions,
     steps: scenario.steps,
     exploreIntent:
-      !scenarioPath &&
-      (explicitIntent !== undefined || (flag("agent") && !flag("no-agent"))),
-    maxAgentSteps: argument("max-agent-steps", "4"),
+      scenario.agent?.mode === "authorized-workflow" ||
+      (!scenarioPath &&
+        (explicitIntent !== undefined || (flag("agent") && !flag("no-agent")))),
+    maxAgentSteps: argument(
+      "max-agent-steps",
+      String(scenario.agent ? scenario.agent.fields.length + 1 : 4)
+    ),
     engineAdapter: argument("engine-adapter"),
     engineBaseUrl: argument("engine-base-url"),
     engineModel: argument("engine-model"),
@@ -202,6 +202,7 @@ async function scout() {
     agentLoadRoutes: optionalArgumentsFor("agent-load-route"),
     agentExpectedTexts: argumentsFor("agent-expect-text"),
     agentExpectedControls: argumentsFor("agent-expect-control"),
+    agentAuthorization: scenario.agent,
     ...output,
     headed: flag("headed"),
     ignoreConsoleErrors: flag("ignore-console-errors"),

@@ -196,7 +196,50 @@
               "status": { "enum": ["passed", "failed", "invalid", "skipped"] },
               "evidence": { "type": "string" },
               "reason": { "type": "string" },
-              "durationMs": { "type": "integer", "minimum": 0 }
+              "durationMs": { "type": "integer", "minimum": 0 },
+              "healed": { "type": "boolean" },
+              "visual": {
+                "type": "object",
+                "required": [
+                  "dimensionsMatch",
+                  "actual",
+                  "baseline",
+                  "baselinePath",
+                  "diffPixels",
+                  "diffPixelRatio",
+                  "maxDiffPixelRatio",
+                  "colorThreshold"
+                ],
+                "properties": {
+                  "dimensionsMatch": { "type": "boolean" },
+                  "actual": { "$ref": "#/$defs/imageDimensions" },
+                  "baseline": { "$ref": "#/$defs/imageDimensions" },
+                  "baselinePath": { "type": "string" },
+                  "diffPixels": { "type": "integer", "minimum": 0 },
+                  "diffPixelRatio": { "type": "number", "minimum": 0, "maximum": 1 },
+                  "maxDiffPixelRatio": { "type": "number", "minimum": 0, "maximum": 1 },
+                  "colorThreshold": { "type": "number", "minimum": 0, "maximum": 1 }
+                }
+              },
+              "repair": {
+                "type": "object",
+                "required": [
+                  "from",
+                  "to",
+                  "confidence",
+                  "expectedResultChanged"
+                ],
+                "properties": {
+                  "from": { "$ref": "#/$defs/workflowSemanticTarget" },
+                  "to": { "$ref": "#/$defs/workflowSemanticTarget" },
+                  "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "expectedResultChanged": { "const": false }
+                }
+              }
             }
           }
         },
@@ -219,7 +262,11 @@
           "properties": {
             "requested": { "type": "boolean" },
             "mode": {
-              "enum": ["agent-safe-interaction", "not-requested"]
+              "enum": [
+                "agent-safe-interaction",
+                "agent-authorized-workflow",
+                "not-requested"
+              ]
             },
             "status": {
               "enum": [
@@ -323,6 +370,18 @@
                       "type": "array",
                       "items": { "type": "string" }
                     },
+                    "mutationRoutes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["method", "url", "maxRequests"],
+                        "properties": {
+                          "method": { "enum": ["POST", "PUT", "PATCH", "DELETE"] },
+                          "url": { "type": "string" },
+                          "maxRequests": { "const": 1 }
+                        }
+                      }
+                    },
                     "automaticNavigationRoutes": {
                       "type": "boolean"
                     },
@@ -407,7 +466,7 @@
                 "properties": {
                   "id": { "type": "string" },
                   "action": {
-                    "enum": ["visit", "fill", "select", "click"]
+                    "enum": ["visit", "fill", "select", "click", "mutate"]
                   },
                   "status": {
                     "enum": ["passed", "failed", "invalid"]
@@ -478,6 +537,26 @@
                   "evidence": { "type": "string" },
                   "rationale": { "type": "string" },
                   "value": { "type": ["string", "null"] },
+                  "control": {
+                    "type": "object",
+                    "required": ["role", "type", "name"],
+                    "properties": {
+                      "role": { "type": "string" },
+                      "type": { "type": "string" },
+                      "name": { "type": "string" }
+                    }
+                  },
+                  "mutationRequests": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["method", "url"],
+                      "properties": {
+                        "method": { "enum": ["POST", "PUT", "PATCH", "DELETE"] },
+                        "url": { "type": "string" }
+                      }
+                    }
+                  },
                   "navigationAttempted": { "type": "boolean" },
                   "locator": {
                     "oneOf": [
@@ -569,12 +648,31 @@
           ],
           "properties": {
             "adapter": { "type": "string" },
-            "endpointClass": { "enum": ["loopback", "remote"] },
+            "endpointClass": { "enum": ["loopback", "remote", "local-process"] },
             "modelRequested": { "type": "string" },
             "modelReported": { "type": "string" },
             "capabilityManifestVersion": { "type": "string" }
           }
         }
+      }
+    }
+  },
+  "$defs": {
+    "imageDimensions": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "workflowSemanticTarget": {
+      "type": "object",
+      "required": ["role", "name", "exact"],
+      "properties": {
+        "role": { "type": "string" },
+        "name": { "type": "string" },
+        "exact": { "type": "boolean" }
       }
     }
   }

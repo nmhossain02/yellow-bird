@@ -721,8 +721,45 @@ function hasProhibitedSemantics(element) {
   );
 }
 
-function elementAction(element, authorizedOrigin, authorizedNavigationRoutes) {
-  if (element.disabled || hasProhibitedSemantics(element)) return null;
+function normalizedControlName(element) {
+  return normalizeText(
+    element.label || element.ariaLabel || element.name || "",
+    400
+  );
+}
+
+function declaredAgentField(element, agentAuthorization) {
+  if (!agentAuthorization) return null;
+  const name = normalizedControlName(element);
+  return agentAuthorization.fields.find(
+    (field) =>
+      field.role === element.role &&
+      field.type === element.type &&
+      field.name === name
+  ) || null;
+}
+
+function declaredMutationControl(element, agentAuthorization) {
+  if (!agentAuthorization) return null;
+  const name = normalizedControlName(element);
+  return agentAuthorization.mutationControls.find(
+    (control) =>
+      control.role === element.role &&
+      control.type === element.type &&
+      control.name === name
+  ) || null;
+}
+
+function elementAction(
+  element,
+  authorizedOrigin,
+  authorizedNavigationRoutes,
+  agentAuthorization
+) {
+  if (element.disabled) return null;
+  if (declaredAgentField(element, agentAuthorization)) return "fill";
+  if (declaredMutationControl(element, agentAuthorization)) return "mutate";
+  if (hasProhibitedSemantics(element)) return null;
   if (element.formAction) {
     if (!isAgentUrlAllowed(element.formAction, authorizedOrigin)) return null;
   }
@@ -766,14 +803,15 @@ async function snapshotPage(
   page,
   authorizedOrigin,
   authorizedNavigationRoutes,
-  expectedDestinationControls
+  expectedDestinationControls,
+  agentAuthorization
 ) {
   const snapshotRefToken = randomUUID();
   const bodyText = await page.evaluate(browserRenderedTextSnapshot, {
     maximum: SNAPSHOT_LIMITS.bodyText,
     traversalNodeCount: SNAPSHOT_LIMITS.traversalNodeCount
   });
-  const raw = await page.evaluate(({ bodyTextCharacters, limits, prohibitedPattern, refToken }) => {
+  const raw = await page.evaluate(({ agentFields, mutationControls, bodyTextCharacters, limits, prohibitedPattern, refToken }) => {
     let remainingCharacters = limits.totalCharacters - bodyTextCharacters;
     const prohibited = new RegExp(prohibitedPattern, "i");
     const canonicalizeSemanticText = (value) =>
@@ -1241,12 +1279,18 @@ async function snapshotPage(
         remainingCharacters -= observedCharacters;
         observedElements.push(observedCandidate);
         element.setAttribute("data-yellowbird-agent-ref", runtimeRef);
+        const exactAuthorizedElement = [...agentFields, ...mutationControls].some(
+          (declaration) =>
+            declaration.role === role &&
+            declaration.type === String(element.type || "") &&
+            declaration.name === String(label)
+        );
         if (
           formHasPassword ||
-          safetyFields.some(
+          (!exactAuthorizedElement && safetyFields.some(
             ([value, maximum]) =>
               String(value).length > maximum || hasProhibitedText(value)
-          )
+          ))
         ) {
           return [];
         }
@@ -1288,7 +1332,9 @@ async function snapshotPage(
     bodyTextCharacters: bodyText.length,
     limits: SNAPSHOT_LIMITS,
     prohibitedPattern: PROHIBITED_AGENT_ACTION_PATTERN,
-    refToken: snapshotRefToken
+    refToken: snapshotRefToken,
+    agentFields: agentAuthorization?.fields || [],
+    mutationControls: agentAuthorization?.mutationControls || []
   });
   const semanticSnapshot = await verifyBrowserSemanticCandidates(page, {
     ancestorCount: SEMANTIC_CONTROL_LIMITS.ancestorCount,
@@ -1311,7 +1357,8 @@ async function snapshotPage(
     const action = elementAction(
       { ...rawElement, pageUrl: raw.url },
       authorizedOrigin,
-      authorizedNavigationRoutes
+      authorizedNavigationRoutes,
+      agentAuthorization
     );
     if (!action) continue;
     let href = rawElement.href;
@@ -1343,6 +1390,8 @@ async function snapshotPage(
       runtimeHandle,
       locator: rawElement.locator
     };
+    const authorizedField = declaredAgentField(rawElement, agentAuthorization);
+    if (authorizedField) element.ownerValue = authorizedField.value;
     if (!element.locator) continue;
     element.key = [raw.url, rawElement.ref, action].join("|");
     elements.push(element);
@@ -1385,7 +1434,7 @@ function availableElements(snapshot, usedActionKeys, visited) {
   return snapshot.elements
     .filter((element) => !usedActionKeys.has(element.key))
     .filter((element) => element.action !== "visit" || !visited.has(element.href))
-    .map(({ runtimeHandle, locator, key, action, ...element }) => ({
+    .map(({ runtimeHandle, locator, key, action, ownerValue, ...element }) => ({
       ...element,
       options: element.options.map(({ ref, label }) => ({ ref, label })),
       allowedAction: action
@@ -1409,12 +1458,14 @@ function plannerMessages({
   stepsTaken,
   maxSteps,
   requireAction,
-  feedback
+  feedback,
+  agentAuthorization
 }) {
+  const authorizedMutation = Boolean(agentAuthorization);
   return [
     {
       role: "system",
-      content: `You are YellowBird's bounded safe-interaction web test planner. Choose action act with exactly one supplied elementRef, or choose finish. YellowBird, not you, enforces each element's allowedAction. Set value to null for fill actions because YellowBird supplies a deterministic synthetic value. For select actions, value must exactly match a supplied opaque option ref. You may not invent elements or URLs, use real personal data or credentials, submit forms, mutate server state, authenticate, change expected results, or report product bugs. Prefer supplied read-only setup or navigation paths over existing-record detail pages when the owner asks to assess a basic user flow. An element supplied with allowedAction visit is a YellowBird-authorized read-only GET navigation; opening a path labeled New, Start, or Setup observes a form and does not submit it. Visiting a supplied link is a browser action. When requireAtLeastOneAction is true, finish is invalid until you select an authorized action. When the owner asks to assess, review, or inspect a basic flow, loading the relevant primary route and observing its controls may support covered coverage; preserve partial coverage whenever any requested area remains unverified. Safely exercising fields can add coverage but is not required unless the intent asks about form interaction. If the intent explicitly asks to create, submit, mutate, authenticate, or complete another prohibited effect, finish with partial or blocked coverage. Product findings require browser evidence outside your output.`
+      content: `You are YellowBird's bounded web test planner. Choose action act with exactly one supplied elementRef, or choose finish. YellowBird, not you, enforces each element's allowedAction. Set value to null for fill actions because YellowBird supplies an owner-declared or deterministic value. For select actions, value must exactly match a supplied opaque option ref. You may not invent elements or URLs, use personal data or credentials, authenticate, change expected results, or report product bugs. ${authorizedMutation ? "The owner has granted a versioned, exact-control and exact-route mutation policy. Only an element supplied with allowedAction mutate may submit or mutate, and it should be selected only after required fields are filled." : "You may not submit forms or mutate server state."} Prefer supplied setup or navigation paths over existing-record detail pages when the owner asks to assess a user flow. Visiting a supplied link is a browser action. When requireAtLeastOneAction is true, finish is invalid until you select an authorized action. Product findings require browser evidence outside your output.`
     },
     {
       role: "user",
@@ -1425,8 +1476,9 @@ function plannerMessages({
           stepsTaken,
           maxSteps,
           requireAtLeastOneAction: requireAction,
-          syntheticValuesOnly: true,
-          formSubmissionAllowed: false
+          syntheticValuesOnly: !authorizedMutation,
+          ownerDeclaredFieldValues: authorizedMutation,
+          formSubmissionAllowed: authorizedMutation
         },
         page: {
           url: snapshot.url,
@@ -1615,6 +1667,68 @@ function verifyOwnedCoverageProfile(
   };
 }
 
+function verifyAuthorizedWorkflowProfile(
+  steps,
+  pages,
+  snapshot,
+  agentAuthorization
+) {
+  if (!agentAuthorization) return null;
+  const passedMutations = steps.filter(
+    (step) => step.action === "mutate" && step.status === "passed"
+  );
+  const finalAssertions = destinationAssertions(
+    snapshot,
+    agentAuthorization.expectedTexts
+  );
+  const criteria = [
+    { id: "initial-page-observed", satisfied: pages.length >= 1 },
+    {
+      id: "owner-declared-fields-filled",
+      satisfied: agentAuthorization.fields.every((field) =>
+        steps.some(
+          (step) =>
+            step.action === "fill" &&
+            step.status === "passed" &&
+            step.control?.role === field.role &&
+            step.control?.type === field.type &&
+            step.control?.name === field.name
+        )
+      )
+    },
+    {
+      id: "exactly-one-authorized-mutation-action",
+      satisfied: passedMutations.length === 1
+    },
+    {
+      id: "authorized-mutation-request-observed",
+      satisfied:
+        passedMutations.length === 1 &&
+        passedMutations[0].mutationRequests?.length === 1
+    },
+    {
+      id: "owner-declared-final-text-observed",
+      satisfied: finalAssertions.every((assertion) => assertion.satisfied)
+    },
+    {
+      id: "authorized-actions-passed",
+      satisfied:
+        steps.length > 0 && steps.every((step) => step.status === "passed")
+    }
+  ];
+  const satisfied = criteria.every((criterion) => criterion.satisfied);
+  return {
+    profile: "authorized-workflow.v1",
+    authority: "yellowbird-observed-criteria",
+    satisfied,
+    criteria,
+    finalAssertions,
+    summary: satisfied
+      ? "YellowBird filled every owner-declared field, observed one authorized mutation action and request, and matched every owner-declared final text assertion."
+      : "YellowBird could not satisfy every observed criterion for the authorized workflow profile."
+  };
+}
+
 function destinationAssertions(snapshot, expectedDestinationTexts) {
   return expectedDestinationTexts.map((text) => ({
     text,
@@ -1641,7 +1755,8 @@ export async function exploreIntentWithEngine({
   authorizedNavigationRoutes = new Set(),
   authorizedPrimaryRoutes = new Set(),
   expectedDestinationTexts = [],
-  expectedDestinationControls = []
+  expectedDestinationControls = [],
+  agentAuthorization = null
 }) {
   const steps = [];
   const pages = [];
@@ -1655,7 +1770,8 @@ export async function exploreIntentWithEngine({
       page,
       authorizedOrigin,
       authorizedNavigationRoutes,
-      expectedDestinationControls
+      expectedDestinationControls,
+      agentAuthorization
     );
     visited.add(new URL(snapshot.url).href);
     pages.push({
@@ -1720,6 +1836,7 @@ export async function exploreIntentWithEngine({
           stepsTaken: steps.length,
           maxSteps,
           requireAction: requireAction && steps.length === 0,
+          agentAuthorization,
           feedback: mustFinish
             ? "The interaction budget is exhausted. Finish now and assess coverage truthfully."
             : feedback
@@ -1783,14 +1900,21 @@ export async function exploreIntentWithEngine({
       }
     }
     if (proposed.action === "finish") {
-      const verification = verifyOwnedCoverageProfile(
-        intent,
-        steps,
-        pages,
-        authorizedPrimaryRoutes,
-        expectedDestinationTexts,
-        expectedDestinationControls
-      );
+      const verification =
+        verifyAuthorizedWorkflowProfile(
+          steps,
+          pages,
+          snapshot,
+          agentAuthorization
+        ) ||
+        verifyOwnedCoverageProfile(
+          intent,
+          steps,
+          pages,
+          authorizedPrimaryRoutes,
+          expectedDestinationTexts,
+          expectedDestinationControls
+        );
       const coverage = verification
         ? verification.satisfied
           ? "covered"
@@ -1880,7 +2004,7 @@ export async function exploreIntentWithEngine({
     const id = `agent-${action}-${steps.length + 1}`;
     const actionValue =
       action === "fill"
-        ? syntheticValue(selected)
+        ? selected.ownerValue ?? syntheticValue(selected)
         : action === "select"
           ? selectedOption.value
           : null;
@@ -1915,9 +2039,21 @@ export async function exploreIntentWithEngine({
         await selected.runtimeHandle.selectOption(actionValue);
       } else if (action === "click") {
         await selected.runtimeHandle.click();
+      } else if (action === "mutate") {
+        await selected.runtimeHandle.click();
       }
       await page.waitForTimeout(actionPolicy?.navigationSettlementMs ?? 150);
       if (action === "visit") await actionPolicy?.resume?.(action);
+      const actionEffects = (await actionPolicy?.observe?.()) || {};
+      if (
+        action === "mutate" &&
+        (!Array.isArray(actionEffects.mutationRequests) ||
+          actionEffects.mutationRequests.length === 0)
+      ) {
+        throw new Error(
+          "The authorized mutation control completed without an observed authorized mutation request."
+        );
+      }
       const actionPageUrl = page.url();
       if (
         !isAgentUrlAllowed(actionPageUrl, authorizedOrigin) ||
@@ -1933,7 +2069,8 @@ export async function exploreIntentWithEngine({
         page,
         authorizedOrigin,
         authorizedNavigationRoutes,
-        expectedDestinationControls
+        expectedDestinationControls,
+        agentAuthorization
       );
       if (!pages.some((entry) => entry.url === snapshot.url)) {
         pages.push({
@@ -1965,6 +2102,12 @@ export async function exploreIntentWithEngine({
             : "Authorized safe browser interaction completed",
         rationale: normalizeText(proposed.rationale, 500),
         value: actionValue,
+        control: {
+          role: selected.role,
+          type: selected.type,
+          name: selected.label
+        },
+        mutationRequests: actionEffects.mutationRequests || [],
         locator: selected.locator,
         navigationAttempted,
         durationMs: Date.now() - startedAt
